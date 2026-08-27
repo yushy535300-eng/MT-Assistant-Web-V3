@@ -6,147 +6,187 @@ export type RoadMark = {
   result: RoadResult;
   filled?: boolean;
   tieCount?: number;
-  baseCol?: number;
-  runIndex?: number;
+  logicalCol?: number;
+  logicalRow?: number;
   isNewColumn?: boolean;
 };
 
 const cellKey = (col: number, row: number) => `${col}:${row}`;
 
 export function buildRoadWindow(marks: RoadMark[], columns: number): RoadMark[] {
-  const lastCol = Math.max(-1, ...marks.map((mark) => mark.col));
+  const lastCol = Math.max(-1, ...marks.map((m) => m.col));
   const start = Math.max(0, lastCol - columns + 1);
-  return marks.map((mark) => ({ ...mark, col: mark.col - start })).filter((mark) => mark.col >= 0 && mark.col < columns);
+  return marks
+    .map((m) => ({ ...m, col: m.col - start }))
+    .filter((m) => m.col >= 0 && m.col < columns);
 }
 
-type BigRoadState = { marks: RoadMark[]; columns: Array<Array<boolean>> };
+type LogicalColumn = { result: "莊" | "閒"; length: number };
+type BigRoadState = { marks: RoadMark[]; columns: LogicalColumn[] };
 
+/**
+ * Standard baccarat Big Road.
+ * - ties never consume a cell; they annotate the previous Banker/Player mark
+ * - a streak moves downward first
+ * - after reaching row 6 or being blocked, that streak forms a horizontal dragon tail
+ * - once a streak has turned, it never drops down again
+ */
 function buildBigRoadState(results: RoadResult[]): BigRoadState {
   const marks: RoadMark[] = [];
+  const columns: LogicalColumn[] = [];
   const occupied = new Set<string>();
-  const columns: Array<Array<boolean>> = [];
-  let previous: "莊" | "閒" | null = null;
-  let baseCol = -1;
-  let last: RoadMark | null = null;
-  let pendingTies = 0;
-  let runIndex = 0;
 
-  for (const result of results) {
-    if (result === "和") {
+  let previous: "莊" | "閒" | null = null;
+  let logicalCol = -1;
+  let baseDisplayCol = -1;
+  let last: RoadMark | null = null;
+  let turned = false;
+  let tailRow = 0;
+  let pendingTies = 0;
+
+  for (const raw of results) {
+    if (raw === "和") {
       if (last) last.tieCount = (last.tieCount ?? 0) + 1;
       else pendingTies += 1;
       continue;
     }
+    const result = raw as "莊" | "閒";
+    const newColumn = result !== previous;
+    let row = 0;
+    let col = 0;
+    let logicalRow = 0;
 
-    const newRun = previous !== result;
-    let col: number;
-    let row: number;
-
-    if (newRun) {
-      baseCol += 1;
-      while (occupied.has(cellKey(baseCol, 0))) baseCol += 1;
-      col = baseCol;
+    if (newColumn) {
+      logicalCol += 1;
+      logicalRow = 0;
+      columns[logicalCol] = { result, length: 1 };
+      baseDisplayCol += 1;
+      while (occupied.has(cellKey(baseDisplayCol, 0))) baseDisplayCol += 1;
+      col = baseDisplayCol;
       row = 0;
-      runIndex = 0;
-      columns[baseCol] ??= [];
+      turned = false;
+      tailRow = 0;
     } else {
-      runIndex += 1;
-      const down = (last?.row ?? 0) + 1;
-      if (down <= 5 && last && !occupied.has(cellKey(last.col, down))) {
-        col = last.col;
-        row = down;
-      } else {
-        col = (last?.col ?? baseCol) + 1;
-        row = last?.row ?? 0;
+      logicalRow = columns[logicalCol]?.length ?? 1;
+      columns[logicalCol].length = logicalRow + 1;
+
+      if (!last) {
+        col = Math.max(0, baseDisplayCol);
+        row = 0;
+      } else if (turned) {
+        row = tailRow;
+        col = last.col + 1;
         while (occupied.has(cellKey(col, row))) col += 1;
+      } else {
+        const downRow = last.row + 1;
+        if (downRow <= 5 && !occupied.has(cellKey(last.col, downRow))) {
+          col = last.col;
+          row = downRow;
+        } else {
+          turned = true;
+          tailRow = last.row;
+          row = tailRow;
+          col = last.col + 1;
+          while (occupied.has(cellKey(col, row))) col += 1;
+        }
       }
     }
 
-    const mark: RoadMark = { row, col, result, baseCol, runIndex, isNewColumn: newRun };
+    const mark: RoadMark = {
+      row,
+      col,
+      result,
+      logicalCol,
+      logicalRow,
+      isNewColumn: newColumn,
+    };
     if (pendingTies) {
       mark.tieCount = pendingTies;
       pendingTies = 0;
     }
-    occupied.add(cellKey(col, row));
-    columns[baseCol] ??= [];
-    columns[baseCol][runIndex] = true;
     marks.push(mark);
+    occupied.add(cellKey(col, row));
     last = mark;
     previous = result;
   }
+
   return { marks, columns };
-}
-
-function placeRoad(sequence: RoadResult[], filled: boolean): RoadMark[] {
-  const marks: RoadMark[] = [];
-  const occupied = new Set<string>();
-  let previous: RoadResult | null = null;
-  let last: RoadMark | null = null;
-
-  for (const result of sequence) {
-    let col = 0;
-    let row = 0;
-    if (!last || result !== previous) {
-      col = last ? last.col + 1 : 0;
-      while (occupied.has(cellKey(col, 0))) col += 1;
-    } else {
-      const down = last.row + 1;
-      if (down <= 5 && !occupied.has(cellKey(last.col, down))) {
-        col = last.col;
-        row = down;
-      } else {
-        col = last.col + 1;
-        row = last.row;
-        while (occupied.has(cellKey(col, row))) col += 1;
-      }
-    }
-    const mark: RoadMark = { row, col, result, filled };
-    occupied.add(cellKey(col, row));
-    marks.push(mark);
-    last = mark;
-    previous = result;
-  }
-  return marks;
 }
 
 export function buildBigRoad(results: RoadResult[]): RoadMark[] {
   return buildBigRoadState(results).marks;
 }
 
+function placeDerived(sequence: RoadResult[], filled: boolean): RoadMark[] {
+  const marks: RoadMark[] = [];
+  const occupied = new Set<string>();
+  let previous: RoadResult | null = null;
+  let baseCol = -1;
+  let last: RoadMark | null = null;
+  let turned = false;
+  let tailRow = 0;
+
+  for (const result of sequence) {
+    if (!last || result !== previous) {
+      baseCol += 1;
+      while (occupied.has(cellKey(baseCol, 0))) baseCol += 1;
+      const m: RoadMark = { row: 0, col: baseCol, result, filled };
+      marks.push(m); occupied.add(cellKey(m.col, m.row)); last = m; previous = result;
+      turned = false; tailRow = 0;
+      continue;
+    }
+
+    let row: number, col: number;
+    if (turned) {
+      row = tailRow; col = last.col + 1;
+      while (occupied.has(cellKey(col, row))) col += 1;
+    } else {
+      const down = last.row + 1;
+      if (down <= 5 && !occupied.has(cellKey(last.col, down))) {
+        row = down; col = last.col;
+      } else {
+        turned = true; tailRow = last.row; row = tailRow; col = last.col + 1;
+        while (occupied.has(cellKey(col, row))) col += 1;
+      }
+    }
+    const m: RoadMark = { row, col, result, filled };
+    marks.push(m); occupied.add(cellKey(col, row)); last = m;
+  }
+  return marks;
+}
+
 /**
- * Standard derived-road comparison based on the Big Road's logical columns.
- * offset: 1 Big Eye Boy, 2 Small Road, 3 Cockroach Pig.
- * 莊/閒 here mean red/blue display only.
+ * Big Eye Boy / Small Road / Cockroach Road.
+ * offset: 1 / 2 / 3. Red/blue are structural colors, encoded as 莊/閒 for renderer reuse.
  */
 export function buildDerivedRoad(results: RoadResult[], offset: 1 | 2 | 3, filled: boolean): RoadMark[] {
   const { marks, columns } = buildBigRoadState(results);
   const colors: RoadResult[] = [];
 
   for (const mark of marks) {
-    const c = mark.baseCol ?? 0;
-    const depth = mark.runIndex ?? 0;
+    const c = mark.logicalCol ?? 0;
+    const r = mark.logicalRow ?? 0;
     let color: RoadResult | null = null;
 
-    if (mark.isNewColumn) {
-      // At the first bead of a new column, compare the previous column with
-      // the column offset+1 positions back.
-      if (c >= offset + 1) {
-        const a = columns[c - 1]?.length ?? 0;
-        const b = columns[c - offset - 1]?.length ?? 0;
-        color = a === b ? "莊" : "閒";
-      }
+    if (r === 0) {
+      // New Big-Road column: compare the two earlier column depths separated by offset.
+      const a = c - 1;
+      const b = c - offset - 1;
+      if (b >= 0) color = columns[a]?.length === columns[b]?.length ? "莊" : "閒";
     } else {
+      // Continuing streak: compare occupancy at same depth vs the cell above in the look-back column.
+      // Use logical depth (infinite downward) so dragon tails do not distort derived roads.
       const ref = c - offset;
-      if (ref >= 0 && depth >= 1) {
-        const hasSameDepth = Boolean(columns[ref]?.[depth]);
-        const hasAbove = Boolean(columns[ref]?.[depth - 1]);
-        color = hasSameDepth === hasAbove ? "莊" : "閒";
+      if (ref >= 0) {
+        const len = columns[ref]?.length ?? 0;
+        const sameRowOccupied = len > r;
+        const aboveOccupied = len > r - 1;
+        color = sameRowOccupied === aboveOccupied ? "莊" : "閒";
       }
     }
     if (color) colors.push(color);
   }
-
-  return placeRoad(colors, filled);
+  return placeDerived(colors, filled);
 }
 
 export type AskRoadPrediction = {
@@ -170,19 +210,11 @@ export function buildAskRoad(results: RoadResult[]): { banker: AskRoadPrediction
   return { banker: predict("莊"), player: predict("閒") };
 }
 
-/**
- * Six columns x six rows, top-to-bottom then left-to-right.
- * After 36 results the oldest whole column disappears, so the latest result
- * starts/continues in the rightmost visible six-column window.
- */
 export function buildBeadWindow(results: RoadResult[]) {
-  if (results.length <= 36) return results;
-  const overflow = results.length - 36;
-  const columnsToDrop = Math.ceil(overflow / 6);
-  const start = columnsToDrop * 6;
-  return results.slice(start, start + 36);
+  return results.slice(-36);
 }
 
+/** Bead Plate: top-to-bottom, then left-to-right, latest 36 only. */
 export function buildBeadGrid(results: RoadResult[]): Array<RoadResult | undefined> {
   const window = buildBeadWindow(results);
   return Array.from({ length: 36 }, (_, slot) => {
