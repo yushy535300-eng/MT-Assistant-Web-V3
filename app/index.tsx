@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import * as Linking from "expo-linking";
+import { useVideoPlayer, VideoView } from "expo-video";
 import { ScreenContainer } from "@/components/screen-container";
 import { trpc } from "@/lib/trpc";
 import {
@@ -185,20 +186,69 @@ function FloatingAssistant({open,onToggle,tables,selectedId,onSelect,onSync}:{
 }
 
 function AccessScreen({onAuthenticated}:{onAuthenticated:()=>void}) {
-  const [username,setUsername]=useState("Dino0209"),[password,setPassword]=useState(""),[error,setError]=useState("");
+  const [username,setUsername]=useState("");
+  const [password,setPassword]=useState("");
+  const [showPassword,setShowPassword]=useState(false);
+  const [error,setError]=useState("");
+  const playCount=useRef(0);
+  const player=useVideoPlayer(require("../assets/videos/login-bg.mp4"), p=>{
+    p.loop=false;
+    p.muted=true;
+    p.play();
+  });
+
+  useEffect(()=>{
+    const sub=player.addListener("playToEnd",()=>{
+      playCount.current+=1;
+      if(playCount.current<2){
+        player.currentTime=0;
+        player.play();
+      }else{
+        player.pause();
+      }
+    });
+    return()=>sub.remove();
+  },[player]);
+
   const login=trpc.trackerAccess.login.useMutation({
     onSuccess:r=>r.success?(setError(""),onAuthenticated()):setError("帳號或密碼不正確"),
     onError:()=>setError("登入驗證暫時無法完成")
   });
-  const submit=()=>{if(!username.trim()||!password){setError("請輸入帳號與密碼");return}login.mutate({username,password})};
-  return <ScreenContainer edges={["top","left","right","bottom"]} containerClassName="bg-[#08111C]" className="bg-[#08111C]">
-    <View style={s.loginScreen}><View style={s.loginPanel}>
-      <View style={s.loginBrand}><MaterialIcons name="casino" size={25} color="#F5C64A"/><View><Text style={s.loginKicker}>MT ASSISTANT</Text><Text style={s.loginTitle}>即時多桌牌路</Text></View></View>
-      <Text style={s.loginLabel}>帳號</Text><TextInput value={username} onChangeText={setUsername} style={s.loginInput} autoCapitalize="none"/>
-      <Text style={s.loginLabel}>密碼</Text><TextInput value={password} onChangeText={setPassword} secureTextEntry style={s.loginInput} onSubmitEditing={submit}/>
-      <Pressable style={s.loginBtn} onPress={submit}><Text style={s.loginBtnText}>{login.isPending?"驗證中":"安全登入"}</Text></Pressable>
-      {error?<Text style={s.error}>{error}</Text>:null}
-    </View></View>
+  const submit=()=>{
+    if(!username.trim()||!password){setError("請輸入帳號與密碼");return}
+    login.mutate({username:username.trim(),password});
+  };
+
+  return <ScreenContainer edges={["top","left","right","bottom"]} containerClassName="bg-[#020A12]" className="bg-[#020A12]">
+    <View style={s.loginScreen}>
+      <VideoView player={player} style={s.loginVideo} contentFit="cover" nativeControls={false}/>
+      <View style={s.loginShade}/>
+      <View style={s.loginPanel}>
+        <View style={s.loginTopline}>
+          <Text style={s.loginTopText}>MT ASSISTANT · ACCESS</Text>
+          <Text style={s.loginSafe}>● 安全驗證</Text>
+        </View>
+        <View style={s.loginBrand}>
+          <View style={s.loginIcon}><MaterialIcons name="casino" size={26} color="#F5C64A"/></View>
+          <View><Text style={s.loginKicker}>REAL-TIME CONTROL ROOM</Text><Text style={s.loginTitle}>即時多桌牌路</Text><Text style={s.loginSub}>安全登入後進入牌路控制台</Text></View>
+        </View>
+        <View style={s.loginDivider}/>
+        <Text style={s.loginHint}>請輸入管理帳號與密碼。</Text>
+        <Text style={s.loginLabel}>帳號</Text>
+        <TextInput value={username} onChangeText={setUsername} style={s.loginInput} autoCapitalize="none" autoCorrect={false} placeholder="輸入帳號" placeholderTextColor="#6F8292"/>
+        <Text style={s.loginLabel}>密碼</Text>
+        <View style={s.passwordWrap}>
+          <TextInput value={password} onChangeText={setPassword} secureTextEntry={!showPassword} style={s.passwordInput} placeholder="輸入密碼" placeholderTextColor="#6F8292" onSubmitEditing={submit}/>
+          <Pressable onPress={()=>setShowPassword(v=>!v)} style={s.eyeBtn}><MaterialIcons name={showPassword?"visibility-off":"visibility"} size={19} color="#6E8DA5"/></Pressable>
+        </View>
+        <Pressable style={[s.loginBtn,login.isPending&&{opacity:.65}]} onPress={submit} disabled={login.isPending}>
+          <MaterialIcons name="verified-user" size={17} color="#fff"/><Text style={s.loginBtnText}>{login.isPending?"驗證中…":"安全登入"}</Text>
+        </Pressable>
+        {error?<Text style={s.error}>{error}</Text>:null}
+        <Text style={s.loginFoot}>● 密碼僅用於本站登入驗證</Text>
+        <Pressable onPress={openLineContact}><Text style={s.loginHelp}>需要協助？LINE 聯絡</Text></Pressable>
+      </View>
+    </View>
   </ScreenContainer>;
 }
 
@@ -322,9 +372,12 @@ const s=StyleSheet.create({
   smallLabel:{color:"#8EA3B3",fontSize:8},latestText:{fontSize:18,fontWeight:"900",marginTop:1},detectBox:{flex:1.35,backgroundColor:"#102335",borderRadius:6,padding:8},detectText:{color:"#F1F6F9",fontSize:12,fontWeight:"900",marginTop:5},
   infoBox:{flex:1.2,backgroundColor:"#102335",borderRadius:6,padding:8},infoText:{color:"#F1F6F9",fontSize:11,fontWeight:"800",marginTop:4},
   askArea:{flexDirection:"row",gap:6,paddingHorizontal:7,paddingBottom:7},askBox:{flex:1,backgroundColor:"#102335",borderRadius:6,padding:7},askTitle:{fontSize:9,fontWeight:"900"},askSymbols:{flexDirection:"row",gap:8,marginTop:4},
-  loginScreen:{flex:1,backgroundColor:"#08111C",alignItems:"center",justifyContent:"center",padding:16},loginPanel:{width:"100%",maxWidth:390,backgroundColor:"#13202E",borderWidth:1,borderColor:"#2A4054",borderRadius:10,padding:18},
-  loginBrand:{flexDirection:"row",alignItems:"center",gap:10,marginBottom:18},loginKicker:{color:"#8298A9",fontSize:8,letterSpacing:1.2},loginTitle:{color:"#F1F5F8",fontSize:19,fontWeight:"800",marginTop:2},
-  loginLabel:{color:"#AAB9C5",fontSize:10,marginBottom:5},loginInput:{height:40,backgroundColor:"#0E1823",borderRadius:6,borderWidth:1,borderColor:"#456276",color:"#fff",paddingHorizontal:11,fontSize:13,marginBottom:12},
-  loginBtn:{height:42,backgroundColor:"#2879EC",borderRadius:6,alignItems:"center",justifyContent:"center",marginTop:2},loginBtnText:{color:"#fff",fontSize:13,fontWeight:"900"},error:{color:"#FF959C",fontSize:10,textAlign:"center",marginTop:9},
+  loginScreen:{flex:1,backgroundColor:"#020A12",alignItems:"center",justifyContent:"center",padding:18,overflow:"hidden"},loginVideo:{...StyleSheet.absoluteFillObject},loginShade:{...StyleSheet.absoluteFillObject,backgroundColor:"rgba(2,10,18,0.42)"},
+  loginPanel:{width:"100%",maxWidth:480,backgroundColor:"rgba(7,31,44,0.76)",borderWidth:1,borderColor:"rgba(82,151,177,0.62)",borderRadius:18,padding:22,shadowColor:"#000",shadowOpacity:.4,shadowRadius:20,elevation:14},
+  loginTopline:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:26},loginTopText:{color:"#A9BED0",fontSize:9,letterSpacing:1.8,fontWeight:"700"},loginSafe:{color:"#39E0B0",fontSize:9,fontWeight:"800"},
+  loginBrand:{flexDirection:"row",alignItems:"center",justifyContent:"center",gap:13,marginBottom:22},loginIcon:{width:46,height:46,borderRadius:12,borderWidth:1,borderColor:"#D5A82F",alignItems:"center",justifyContent:"center",backgroundColor:"rgba(245,198,74,.08)"},loginKicker:{color:"#8DB4CE",fontSize:8,letterSpacing:1.5,fontWeight:"700"},loginTitle:{color:"#F5F8FA",fontSize:24,fontWeight:"900",marginTop:4},loginSub:{color:"#91A7B8",fontSize:10,marginTop:3},
+  loginDivider:{height:1,backgroundColor:"rgba(109,157,184,.32)",marginBottom:20},loginHint:{color:"#A7B8C5",fontSize:11,marginBottom:18},loginLabel:{color:"#B9C8D3",fontSize:11,fontWeight:"700",marginBottom:6},
+  loginInput:{height:48,backgroundColor:"rgba(2,17,28,.68)",borderRadius:8,borderWidth:1,borderColor:"#385B70",color:"#fff",paddingHorizontal:14,fontSize:14,marginBottom:14},passwordWrap:{height:48,backgroundColor:"rgba(2,17,28,.68)",borderRadius:8,borderWidth:1,borderColor:"#385B70",flexDirection:"row",alignItems:"center",marginBottom:16},passwordInput:{flex:1,height:"100%",color:"#fff",paddingHorizontal:14,fontSize:14},eyeBtn:{width:46,height:"100%",alignItems:"center",justifyContent:"center"},
+  loginBtn:{height:50,backgroundColor:"#168CEB",borderRadius:8,alignItems:"center",justifyContent:"center",flexDirection:"row",gap:8,shadowColor:"#168CEB",shadowOpacity:.28,shadowRadius:10,elevation:5},loginBtnText:{color:"#fff",fontSize:14,fontWeight:"900"},error:{color:"#FF959C",fontSize:11,textAlign:"center",marginTop:10},loginFoot:{color:"#71899A",fontSize:9,textAlign:"center",marginTop:18},loginHelp:{color:"#42B9F5",fontSize:10,fontWeight:"800",textAlign:"center",marginTop:10},
   toast:{position:"absolute",bottom:78,left:20,right:20,backgroundColor:"#203A4E",borderRadius:8,padding:9,zIndex:100},toastText:{color:"#fff",textAlign:"center",fontSize:10}
 });
