@@ -62,40 +62,55 @@ function openLineContact() {
   else Linking.openURL(lineContactUrl).catch(() => undefined);
 }
 
-function detectPattern(results: Result[]) {
-  const seq = results.filter((r) => r !== "和");
-  if (seq.length < 3) return "資料累積中";
-  const tail = seq.slice(-8);
-  const last = tail.at(-1)!;
+type PatternInfo = {
+  type: "資料累積中" | "一房兩廳" | "單跳" | "雙跳" | "連龍" | "一般連" | "混合";
+  label: string; side?: "莊" | "閒"; run?: number;
+};
+
+function getPatternInfo(results: Result[]): PatternInfo {
+  const seq = results.filter((r): r is "莊" | "閒" => r === "莊" || r === "閒");
+  const n = seq.length;
+  if (n < 3) return { type: "資料累積中", label: "資料累積中" };
+  const last = seq[n - 1];
   let run = 1;
-  for (let i = tail.length - 2; i >= 0 && tail[i] === last; i--) run++;
-  if (run >= 4) return `${last}${run}連龍趨勢`;
-  if (tail.length >= 6 && tail.slice(-6).every((v, i, a) => i === 0 || v !== a[i - 1])) return "單跳趨勢";
-  if (tail.length >= 6) {
-    const a = tail.slice(-6);
-    if (a[0] === a[1] && a[2] === a[3] && a[4] === a[5] && a[0] !== a[2] && a[2] !== a[4]) return "雙跳趨勢";
+  for (let i = n - 2; i >= 0 && seq[i] === last; i--) run++;
+  if (run >= 4) return { type: "連龍", label: `${last}連龍${run}顆`, side: last, run };
+  const last3 = seq.slice(-3);
+  if (last3[0] === last3[2] && last3[0] !== last3[1]) return { type: "單跳", label: "單跳趨勢", side: last };
+  if (n >= 5) {
+    const x = seq.slice(-5);
+    if (x[0] === x[1] && x[2] === x[3] && x[0] !== x[2] && x[4] === x[0]) return { type: "雙跳", label: "雙跳趨勢", side: x[4] };
   }
-  return run >= 2 ? `${last}${run}連` : "混合走勢";
+  if (last3[0] === "莊" && last3[1] === "閒" && last3[2] === "閒") return { type: "一房兩廳", label: "一莊兩閒｜一房兩廳", side: "閒" };
+  if (last3[0] === "閒" && last3[1] === "莊" && last3[2] === "莊") return { type: "一房兩廳", label: "兩莊一閒｜一房兩廳", side: "莊" };
+  if (run >= 2) return { type: "一般連", label: `${last}連${run}顆`, side: last, run };
+  return { type: "混合", label: "混合走勢", side: last };
 }
 
+function detectPattern(results: Result[]) { return getPatternInfo(results).label; }
+
 function recommendSide(results: Result[]): "莊" | "閒" {
-  const seq = results.filter((r): r is "莊" | "閒" => r !== "和");
+  const seq = results.filter((r): r is "莊" | "閒" => r === "莊" || r === "閒");
   if (!seq.length) return "莊";
-  const tail = seq.slice(-8);
-  const pattern = detectPattern(results);
-  const last = tail.at(-1)!;
-  if (pattern.includes("連龍") || pattern.endsWith("連")) return last;
-  if (pattern === "單跳趨勢") return last === "莊" ? "閒" : "莊";
-  const b = tail.filter(x => x === "莊").length;
-  const p = tail.length - b;
-  return b >= p ? "莊" : "閒";
+  const info = getPatternInfo(results), last = seq[seq.length - 1];
+  if (info.type === "連龍" || info.type === "一般連" || info.type === "雙跳") return last;
+  if (info.type === "單跳") return last === "莊" ? "閒" : "莊";
+  if (info.type === "一房兩廳") return info.side ?? last;
+  const tail = seq.slice(-8), b = tail.filter(x => x === "莊").length;
+  return b >= tail.length - b ? "莊" : "閒";
 }
 
 function analysisText(table?: TableData) {
-  if (!table || table.results.length < 3) return "目前資料仍在累積，等待更多牌局後再判讀節奏。";
-  const p = detectPattern(table.results);
-  const side = recommendSide(table.results);
-  return `目前牌型：${p}。最近結果以${side}側節奏較明顯；此區僅依已開出的牌路做整理，實際結果仍以即時開獎為準。`;
+  if (!table) return "等待牌局資料。";
+  const seq = table.results.filter((r): r is "莊" | "閒" => r === "莊" || r === "閒");
+  if (seq.length < 3) return "目前資料累積中，第三顆開始判斷牌型。";
+  const info = getPatternInfo(table.results), side = recommendSide(table.results);
+  if (info.type === "連龍") return `目前${info.label}，已連續開出${info.run}顆${info.side}。目前輔助方向：${side}。`;
+  if (info.type === "單跳") return `目前形成單跳趨勢，第三顆已符合交替節奏。目前輔助方向：${side}。`;
+  if (info.type === "雙跳") return `目前形成雙跳趨勢，第三段第一顆已出現。目前輔助方向：${side}。`;
+  if (info.type === "一房兩廳") return `目前形成${info.label}，第三顆已符合牌型條件。目前輔助方向：${side}。`;
+  if (info.type === "一般連") return `目前${info.label}，尚未達到四顆連龍條件。目前輔助方向：${side}。`;
+  return `目前尚未形成明確牌型，最近牌路暫時偏向${side}側。`;
 }
 
 function strategyAmount(name: StrategyName, base: number, level: number, lab: number[]) {
@@ -116,32 +131,34 @@ function strategyAmount(name: StrategyName, base: number, level: number, lab: nu
   return b;
 }
 
-function ResultDot({ result, desktop = false }: { result: Result; desktop?: boolean }) {
-  return <View style={[s.beadDot, desktop && s.beadDotDesktop, { backgroundColor: resultColor(result) }]} />;
+const ROAD_SPEC = {
+  colors: { hollowRed: "#E6352B", hollowBlue: "#4578D4", solidRed: "#EF3215", solidBlue: "#2D64F5", slashRed: "#CC2419", slashBlue: "#2476E2", tie: "#20B66B" }
+} as const;
+
+function ResultDot({ result, desktop }: { result: Result; desktop: boolean }) {
+  return <View style={[s.beadDot, desktop && s.beadDotDesktop, { backgroundColor: result === "莊" ? ROAD_SPEC.colors.solidRed : result === "閒" ? ROAD_SPEC.colors.solidBlue : ROAD_SPEC.colors.tie }]} />;
+}
+
+function derivedColor(ri: number, result: Result) {
+  const red = result === "莊";
+  if (ri === 0) return red ? ROAD_SPEC.colors.hollowRed : ROAD_SPEC.colors.hollowBlue;
+  if (ri === 1) return red ? ROAD_SPEC.colors.solidRed : ROAD_SPEC.colors.solidBlue;
+  return red ? ROAD_SPEC.colors.slashRed : ROAD_SPEC.colors.slashBlue;
 }
 
 function RoadGrid({ table, desktop }: { table: TableData; desktop: boolean }) {
-  const beads = useMemo(() => buildBeadGrid(table.results), [table.results]);
+  const beads = useMemo(() => buildBeadGrid(table.results.slice(-36)), [table.results]);
   const big = useMemo(() => buildRoadWindow(buildBigRoad(table.results), 15), [table.results]);
   const lower = useMemo(() => [
     buildRoadWindow(buildDerivedRoad(table.results, 1, false), 10),
     buildRoadWindow(buildDerivedRoad(table.results, 2, true), 10),
     buildRoadWindow(buildDerivedRoad(table.results, 3, false), 10),
   ], [table.results]);
-
   return <View style={[s.roadArea, desktop && s.roadAreaDesktop]}>
-    <View style={[s.beadPane, desktop && s.beadPaneDesktop]}>
-      <View style={s.beadGrid}>{Array.from({length:36},(_,i)=><View key={i} style={[s.beadCell,desktop&&s.beadCellDesktop]}>{beads[i]?<ResultDot result={beads[i]!} desktop={desktop}/>:null}</View>)}</View>
-    </View>
+    <View style={[s.beadPane, desktop && s.beadPaneDesktop]}><View style={s.beadGrid}>{Array.from({length:36},(_,i)=><View key={i} style={[s.beadCell,desktop&&s.beadCellDesktop]}>{beads[i]?<ResultDot result={beads[i]!} desktop={desktop}/>:null}</View>)}</View></View>
     <View style={s.roadStack}>
-      <View style={[s.bigGrid,desktop&&s.bigGridDesktop]}>{Array.from({length:90},(_,i)=>{
-        const row=Math.floor(i/15),col=i%15,m=big.find(x=>x.row===row&&x.col===col);
-        return <View key={i} style={[s.bigCell,desktop&&s.bigCellDesktop]}>{m?<View style={[s.bigMark,desktop&&s.bigMarkDesktop,{borderColor:resultColor(m.result)}]}>{m.tieCount?<Text style={[s.tieNumber,desktop&&s.tieNumberDesktop]}>{m.tieCount}</Text>:null}</View>:null}</View>
-      })}</View>
-      <View style={[s.lowerArea,desktop&&s.lowerAreaDesktop]}>{lower.map((road,ri)=><View key={ri} style={s.lowerPane}>{Array.from({length:60},(_,i)=>{
-        const row=Math.floor(i/10),col=i%10,m=road.find(x=>x.row===row&&x.col===col),slash=ri===2;
-        return <View key={i} style={[s.lowerCell,desktop&&s.lowerCellDesktop]}>{m?<View style={[slash?s.slash:s.lowerMark,desktop&&(slash?s.slashDesktop:s.lowerMarkDesktop),{borderColor:resultColor(m.result),backgroundColor:(m.filled||slash)?resultColor(m.result):"transparent"},slash&&{transform:[{rotate:"-45deg"}]}]}/>:null}</View>
-      })}</View>)}</View>
+      <View style={[s.bigGrid,desktop&&s.bigGridDesktop]}>{Array.from({length:90},(_,i)=>{ const row=Math.floor(i/15),col=i%15,m=big.find(x=>x.row===row&&x.col===col); return <View key={i} style={[s.bigCell,desktop&&s.bigCellDesktop]}>{m?<View style={[s.bigMark,desktop&&s.bigMarkDesktop,{borderColor:m.result==="莊"?ROAD_SPEC.colors.hollowRed:m.result==="閒"?ROAD_SPEC.colors.hollowBlue:ROAD_SPEC.colors.tie}]}>{m.tieCount?<Text style={[s.tieNumber,desktop&&s.tieNumberDesktop]}>{m.tieCount}</Text>:null}</View>:null}</View> })}</View>
+      <View style={[s.lowerArea,desktop&&s.lowerAreaDesktop]}>{lower.map((road,ri)=><View key={ri} style={s.lowerPane}>{Array.from({length:60},(_,i)=>{ const row=Math.floor(i/10),col=i%10,m=road.find(x=>x.row===row&&x.col===col); if(!m)return <View key={i} style={[s.lowerCell,desktop&&s.lowerCellDesktop]}/>; const color=derivedColor(ri,m.result); return <View key={i} style={[s.lowerCell,desktop&&s.lowerCellDesktop]}>{ri===0?<View style={[s.lowerHollow,{borderColor:color}]}/>:ri===1?<View style={[s.lowerSolid,{backgroundColor:color}]}/>:<View style={[s.lowerSlash,{backgroundColor:color}]}/>}</View> })}</View>)}</View>
     </View>
   </View>;
 }
@@ -179,12 +196,12 @@ function AccessScreen({onAuthenticated}:{onAuthenticated:()=>void}){
   const [showPassword,setShowPassword]=useState(false);
   const [error,setError]=useState("");
   const playCount=useRef(0);
-  const player=useVideoPlayer({ uri: "/poker.mp4" },p=>{p.loop=false;p.muted=true;p.play()});
-  useEffect(()=>{const sub=player.addListener("playToEnd",()=>{playCount.current+=1;if(playCount.current<2){player.currentTime=0;player.play()}else player.pause()});return()=>sub.remove()},[player]);
+  const player=useVideoPlayer({ uri: "/poker.mp4" },p=>{if(Platform.OS!=="web"){p.loop=false;p.muted=true;p.play()}});
+  useEffect(()=>{if(Platform.OS==="web")return;const sub=player.addListener("playToEnd",()=>{playCount.current+=1;if(playCount.current<2){player.currentTime=0;player.play()}else player.pause()});return()=>sub.remove()},[player]);
   const login=trpc.trackerAccess.login.useMutation({onSuccess:r=>r.success?(setError(""),onAuthenticated()):setError("帳號或密碼不正確"),onError:()=>setError("登入驗證暫時無法完成")});
   const submit=()=>{if(!username.trim()||!password){setError("請輸入帳號與密碼");return}login.mutate({username,password})};
   return <ScreenContainer edges={["top","left","right","bottom"]} containerClassName="bg-[#020A12]" className="bg-[#020A12]">
-    <View style={s.loginScreen}><VideoView player={player} style={s.loginVideo} contentFit="cover" nativeControls={false}/><View style={s.loginShade}/><View style={s.loginPanel}>
+    <View style={s.loginScreen}>{Platform.OS==="web"?createElement("video" as any,{src:"/poker.mp4",autoPlay:true,muted:true,playsInline:true,preload:"auto",style:{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover"},onEnded:(e:any)=>{const v=e.currentTarget;playCount.current+=1;if(playCount.current<2){v.currentTime=0;void v.play()}else{v.pause();try{v.currentTime=Math.max(0,(v.duration||0)-0.05)}catch{}}}}):<VideoView player={player} style={s.loginVideo} contentFit="cover" nativeControls={false}/>}<View style={s.loginShade}/><View style={s.loginPanel}>
       <View style={s.loginTopline}><Text style={s.loginTopText}>MT ASSISTANT · ACCESS</Text><Text style={s.loginSafe}>● 安全驗證</Text></View>
       <View style={s.loginBrand}><View style={s.loginIcon}><MaterialIcons name="casino" size={26} color="#F5C64A"/></View><View><Text style={s.loginKicker}>REAL-TIME CONTROL ROOM</Text><Text style={s.loginTitle}>即時多桌牌路</Text><Text style={s.loginSub}>安全登入後進入牌路控制台</Text></View></View>
       <View style={s.loginDivider}/><Text style={s.loginHint}>請輸入已授權的管理帳號與密碼。</Text>
@@ -267,35 +284,44 @@ export default function HomeScreen(){
 
   const orbResponder=useMemo(()=>PanResponder.create({
     onStartShouldSetPanResponder:()=>true,
-    onMoveShouldSetPanResponder:(_,g)=>Math.abs(g.dx)>1||Math.abs(g.dy)>1,
+    onStartShouldSetPanResponderCapture:()=>true,
+    onMoveShouldSetPanResponder:()=>true,
+    onMoveShouldSetPanResponderCapture:()=>true,
     onPanResponderGrant:()=>orbPosition.extractOffset(),
-    onPanResponderMove:Animated.event([null,{dx:orbPosition.x,dy:orbPosition.y}],{useNativeDriver:false}),
+    onPanResponderMove:(_,g)=>{orbPosition.setValue({x:g.dx*1.35,y:g.dy*1.35})},
     onPanResponderRelease:(_,g)=>{
       orbPosition.flattenOffset();
       orbPosition.stopAnimation((v:any)=>orbPosition.setValue({x:Math.max(-(width-72),Math.min(12,v.x)),y:Math.max(-(height-86),Math.min(24,v.y))}));
-      if(Math.abs(g.dx)<4&&Math.abs(g.dy)<4)setFloatingOpen(v=>!v);
-    }
+      if(Math.abs(g.dx)<3&&Math.abs(g.dy)<3)setFloatingOpen(v=>!v);
+    },
+    onPanResponderTerminationRequest:()=>false,
   }),[orbPosition,width,height]);
   const panelDrag=useMemo(()=>PanResponder.create({
     onStartShouldSetPanResponder:()=>true,
-    onMoveShouldSetPanResponder:(_,g)=>Math.abs(g.dx)>2||Math.abs(g.dy)>2,
+    onStartShouldSetPanResponderCapture:()=>false,
+    onMoveShouldSetPanResponder:()=>true,
+    onMoveShouldSetPanResponderCapture:()=>true,
     onPanResponderGrant:()=>{setRoomDropdownOpen(false);panelPosition.extractOffset()},
-    onPanResponderMove:Animated.event([null,{dx:panelPosition.x,dy:panelPosition.y}],{useNativeDriver:false}),
+    onPanResponderMove:(_,g)=>{panelPosition.setValue({x:g.dx*1.25,y:g.dy*1.25})},
     onPanResponderRelease:()=>{
       panelPosition.flattenOffset();
       const panelWidth=Math.min(width*.86,560*(desktop?assistScale:1));
       panelPosition.stopAnimation((v:any)=>panelPosition.setValue({x:Math.max(-(width-panelWidth-86),Math.min(64,v.x)),y:Math.max(-(height-220),Math.min(24,v.y))}));
-    }
+    },
+    onPanResponderTerminationRequest:()=>false,
   }),[panelPosition,width,height,desktop,assistScale]);
   const pageSwipe=useMemo(()=>PanResponder.create({
-    onMoveShouldSetPanResponder:(_,g)=>!roomDropdownOpen&&Math.abs(g.dx)>16&&Math.abs(g.dx)>Math.abs(g.dy)*1.2,
-    onPanResponderRelease:(_,g)=>{if(roomDropdownOpen)return;if(g.dx<-42)setAssistPage(p=>Math.min(2,p+1));if(g.dx>42)setAssistPage(p=>Math.max(0,p-1))}
+    onMoveShouldSetPanResponder:(_,g)=>!roomDropdownOpen&&Math.abs(g.dx)>12&&Math.abs(g.dx)>Math.abs(g.dy)*1.25,
+    onPanResponderRelease:(_,g)=>{if(roomDropdownOpen)return;if(g.dx<-36)setAssistPage(p=>Math.min(2,p+1));if(g.dx>36)setAssistPage(p=>Math.max(0,p-1))}
   }),[roomDropdownOpen]);
   const resizeResponder=useMemo(()=>PanResponder.create({
     onStartShouldSetPanResponder:()=>desktop,
-    onMoveShouldSetPanResponder:(_,g)=>desktop&&(Math.abs(g.dx)>1||Math.abs(g.dy)>1),
+    onStartShouldSetPanResponderCapture:()=>desktop,
+    onMoveShouldSetPanResponder:()=>desktop,
+    onMoveShouldSetPanResponderCapture:()=>desktop,
     onPanResponderGrant:()=>{resizeStartScale.current=assistScale;setRoomDropdownOpen(false)},
-    onPanResponderMove:(_,g)=>{if(!desktop)return;const delta=(g.dx+g.dy)/520;setAssistScale(Math.max(.78,Math.min(1.55,resizeStartScale.current+delta)))},
+    onPanResponderMove:(_,g)=>{if(!desktop)return;const delta=(g.dx+g.dy)/360;setAssistScale(Math.max(.72,Math.min(1.75,resizeStartScale.current+delta)))},
+    onPanResponderTerminationRequest:()=>false,
   }),[desktop,assistScale]);
 
   const settlePending=(actual:Result,payload:any)=>{
@@ -369,13 +395,13 @@ export default function HomeScreen(){
           <Text style={s.selectorMeta}>Shoe {assistTable?.shoe??"—"} · Round {assistTable?.round??0}</Text>
         </Pressable>
         {roomDropdownOpen?<View style={s.roomDropdown}>
-          <ScrollView style={s.roomDropdownScroll} nestedScrollEnabled>
+          <ScrollView style={[s.roomDropdownScroll,Platform.OS==="web"?({overflowY:"auto",overscrollBehavior:"contain"} as any):null]} nestedScrollEnabled showsVerticalScrollIndicator onTouchStart={(e:any)=>e.stopPropagation?.()} onWheel={(e:any)=>e.stopPropagation?.()}>
             {tables.map(t=>{const id=t.apiId??`BAG${t.id}`;return <Pressable key={id} style={[s.roomDropdownItem,id===assistTableId&&s.roomDropdownItemActive]} onPress={()=>{setAssistTableId(id);setRoomDropdownOpen(false)}}><Text style={s.roomDropdownText}>{id}</Text><Text style={s.roomDropdownMeta}>Shoe {t.shoe} · R{t.round}</Text></Pressable>})}
           </ScrollView>
         </View>:null}
       </View>
       {assistPage===0?page1:assistPage===1?page2:page3}<View style={s.pageDots}>{[0,1,2].map(i=><Pressable key={i} onPress={()=>setAssistPage(i)}><View style={[s.pageDot,assistPage===i&&s.pageDotActive]}/></Pressable>)}</View>
-      {desktop?<View style={s.resizeHandle} {...resizeResponder.panHandlers}><MaterialIcons name="open-in-full" size={13} color="#9CC5E4"/><Text style={s.resizeText}>{Math.round(assistScale*100)}%</Text></View>:null}
+      {desktop?<View style={s.resizeHandle} {...resizeResponder.panHandlers}><MaterialIcons name="south-east" size={18} color="#CBE7FA"/></View>:null}
     </Animated.View>;
   };
 
@@ -405,9 +431,9 @@ const s=StyleSheet.create({
   content:{padding:10,paddingBottom:90},overview:{borderWidth:1,borderColor:"#244158",borderRadius:8,padding:12,flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:10,backgroundColor:"#0E1B28"},overKicker:{color:"#6E99B9",fontSize:7,letterSpacing:1.4},overTitle:{color:"#fff",fontSize:18,fontWeight:"900",marginTop:2},overSub:{color:"#7E92A2",fontSize:9,marginTop:3},overStats:{flexDirection:"row",gap:8},overStat:{minWidth:112,borderWidth:1,borderColor:"#28475D",borderRadius:6,padding:9},overValue:{color:"#fff",fontSize:13,fontWeight:"900",marginTop:4},listHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:7},listTitle:{color:"#F2F6F9",fontSize:15,fontWeight:"900"},listHint:{color:"#73899A",fontSize:8},
   cardsGrid:{width:"100%",alignSelf:"center"},cardsGridDesktop:{flexDirection:"row",flexWrap:"wrap",gap:10},cardsGridDesktopCentered:{maxWidth:1280},cardWrap:{width:"100%"},cardWrapDesktop:{width:"calc(50% - 5px)" as any,maxWidth:635},tableCard:{backgroundColor:"#06090E",borderWidth:1,borderColor:"#1B3449",overflow:"hidden",marginBottom:10},tableCardDesktop:{},tableHead:{height:28,paddingHorizontal:5,backgroundColor:"#05070A",flexDirection:"row",justifyContent:"space-between",alignItems:"center"},game:{color:"#fff",fontSize:9,fontWeight:"700"},tableId:{color:"#fff",borderWidth:1,borderColor:"#AEBCC6",paddingHorizontal:6,paddingVertical:1,fontSize:9,fontWeight:"900"},headText:{color:"#fff",fontSize:8,fontWeight:"800"},statText:{fontSize:8,fontWeight:"900"},countWrap:{height:20,minWidth:28,borderWidth:1,borderColor:"#8D2030",borderRadius:4,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:2,paddingHorizontal:3},countdown:{color:"#FF5362",fontSize:8,fontWeight:"900"},miniBtn:{height:20,paddingHorizontal:6,borderRadius:4,alignItems:"center",justifyContent:"center"},miniBtnText:{color:"#fff",fontSize:7,fontWeight:"900"},
   tableBody:{flexDirection:"row",height:150,backgroundColor:"#fff"},tableBodyDesktop:{height:138},dealer:{width:112,backgroundColor:"#F2F0EC",padding:4,justifyContent:"flex-end"},dealerDesktop:{width:96},photo:{position:"absolute",top:3,left:3,right:3,height:112,backgroundColor:"#DCE2E6",alignItems:"center",justifyContent:"center",overflow:"hidden"},photoDesktop:{height:104},photoImage:{width:"100%",height:"100%",resizeMode:"cover"},crown:{fontSize:30,color:"#C5A24C"},dealerName:{color:"#fff",backgroundColor:"#873B96",alignSelf:"flex-start",paddingHorizontal:4,paddingVertical:1,fontSize:8,fontWeight:"800"},meta:{color:"#526371",fontSize:6.5,marginTop:1},
-  roadArea:{flex:1,flexDirection:"row",backgroundColor:"#F8FAFC",minWidth:0},roadAreaDesktop:{},beadPane:{width:126,borderRightWidth:1,borderColor:"#CCD6DE"},beadPaneDesktop:{width:108},beadGrid:{flexDirection:"row",flexWrap:"wrap"},beadCell:{width:"16.666%",aspectRatio:1,borderRightWidth:1,borderBottomWidth:1,borderColor:"#E0E7EC",alignItems:"center",justifyContent:"center"},beadCellDesktop:{},beadDot:{width:"72%",aspectRatio:1,borderRadius:999},beadDotDesktop:{width:"64%"},roadStack:{flex:1,minWidth:0},bigGrid:{height:"58%",flexDirection:"row",flexWrap:"wrap",alignContent:"flex-start"},bigGridDesktop:{},bigCell:{width:"6.666%",height:"16.666%",borderRightWidth:1,borderBottomWidth:1,borderColor:"#DDE4E9",alignItems:"center",justifyContent:"center"},bigCellDesktop:{},bigMark:{width:"78%",aspectRatio:1,borderRadius:999,borderWidth:1.4,alignItems:"center",justifyContent:"center"},bigMarkDesktop:{width:"66%",borderWidth:1.1},tieNumber:{color:"#00B96B",fontSize:7,fontWeight:"900",lineHeight:8},tieNumberDesktop:{fontSize:6,lineHeight:7},lowerArea:{height:"42%",flexDirection:"row",borderTopWidth:1,borderColor:"#CCD6DE"},lowerAreaDesktop:{},lowerPane:{width:"33.333%",flexDirection:"row",flexWrap:"wrap",alignContent:"flex-start",borderRightWidth:1,borderColor:"#E0E7EC"},lowerCell:{width:"10%",height:"16.666%",alignItems:"center",justifyContent:"center"},lowerCellDesktop:{},lowerMark:{width:"60%",aspectRatio:1,borderRadius:999,borderWidth:1.2},lowerMarkDesktop:{width:"48%",borderWidth:1},slash:{width:"65%",height:2,borderRadius:2},slashDesktop:{width:"52%",height:1.5},
+  roadArea:{flex:1,flexDirection:"row",backgroundColor:"#fff",minWidth:0,overflow:"hidden"},roadAreaDesktop:{},beadPane:{width:"21.88%",height:"100%",borderRightWidth:1,borderColor:"#CDD5DB",overflow:"hidden"},beadPaneDesktop:{},beadGrid:{width:"100%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch"},beadCell:{width:"16.6666667%",height:"16.6666667%",borderRightWidth:1,borderBottomWidth:1,borderColor:"#E0E5E9",alignItems:"center",justifyContent:"center"},beadCellDesktop:{},beadDot:{width:"72%",aspectRatio:1,borderRadius:999},beadDotDesktop:{width:"64%"},roadStack:{flex:1,minWidth:0,height:"100%"},bigGrid:{width:"100%",height:"58%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch"},bigGridDesktop:{},bigCell:{width:"6.6666667%",height:"16.6666667%",borderRightWidth:1,borderBottomWidth:1,borderColor:"#DDE4E9",alignItems:"center",justifyContent:"center"},bigCellDesktop:{},bigMark:{width:"72%",aspectRatio:1,borderRadius:999,borderWidth:1.4,backgroundColor:"transparent",alignItems:"center",justifyContent:"center"},bigMarkDesktop:{width:"66%",borderWidth:1.1},tieNumber:{color:"#20B66B",fontSize:7,fontWeight:"900",lineHeight:8},tieNumberDesktop:{fontSize:6,lineHeight:7},lowerArea:{width:"100%",height:"42%",flexDirection:"row",borderTopWidth:1,borderTopColor:"#CCD6DE"},lowerAreaDesktop:{},lowerPane:{width:"33.333333%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",borderRightWidth:1,borderRightColor:"#DDE4E9"},lowerCell:{width:"10%",height:"16.6666667%",alignItems:"center",justifyContent:"center",borderRightWidth:.5,borderBottomWidth:.5,borderColor:"#E4E8EB"},lowerCellDesktop:{},lowerHollow:{width:7,height:7,borderRadius:999,borderWidth:1.8,backgroundColor:"transparent"},lowerSolid:{width:7,height:7,borderRadius:999},lowerSlash:{width:7,height:2,borderRadius:2,transform:[{rotate:"-45deg"}]},
   orb:{position:"absolute",right:16,bottom:24,zIndex:90,width:50,height:50,borderRadius:25,backgroundColor:"#153B59",borderWidth:2,borderColor:"#66A9F1",alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:.45,shadowRadius:9,elevation:12},orbMt:{bottom:34},orbStatus:{position:"absolute",right:4,top:4,width:8,height:8,borderRadius:4,borderWidth:1,borderColor:"#fff"},
-  floatPanel:{position:"absolute",right:74,bottom:22,zIndex:100,width:560,maxWidth:"86%",backgroundColor:"rgba(13,26,39,.96)",borderWidth:1,borderColor:"#385975",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:14,elevation:15},floatPanelMt:{zIndex:9999},floatHeader:{height:38,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#14283B"},floatHeadLeft:{flexDirection:"row",alignItems:"center",gap:8},floatTitle:{color:"#F0F5F9",fontWeight:"900",fontSize:12},floatStatus:{color:"#56D48C",fontSize:8},iconBtn:{width:27,height:27,borderRadius:5,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},iconTextBtn:{height:27,paddingHorizontal:7,borderRadius:5,backgroundColor:"#214A70",flexDirection:"row",gap:3,alignItems:"center"},iconText:{color:"#fff",fontSize:8,fontWeight:"800"},selectorWrap:{marginHorizontal:6,marginTop:6,position:"relative",zIndex:130},selector:{height:38,paddingHorizontal:9,borderWidth:1,borderColor:"#31516B",borderRadius:5,backgroundColor:"#09151F",flexDirection:"row",alignItems:"center",justifyContent:"space-between"},selectorLeft:{flexDirection:"row",alignItems:"center",gap:4},selectorValue:{color:"#F0F5F8",fontSize:11,fontWeight:"900"},selectorMeta:{color:"#B6C5D0",fontSize:9},roomDropdown:{position:"absolute",left:0,right:0,top:42,maxHeight:205,backgroundColor:"#0A1722",borderWidth:1,borderColor:"#345A76",borderRadius:6,zIndex:160,elevation:30,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:10},roomDropdownScroll:{maxHeight:205},roomDropdownItem:{height:34,paddingHorizontal:10,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#183044"},roomDropdownItemActive:{backgroundColor:"#1B5B88"},roomDropdownText:{color:"#EDF5FA",fontSize:10,fontWeight:"900"},roomDropdownMeta:{color:"#8EA7B9",fontSize:8},assistPage:{padding:6,minHeight:150},decisionRow:{flexDirection:"row",gap:5},decisionBox:{flex:1,minHeight:68,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,padding:7},smallLabel:{color:"#8EA3B3",fontSize:7.5},latestLine:{flexDirection:"row",alignItems:"center",gap:7,marginTop:7},glowDot:{width:17,height:17,borderRadius:8.5,shadowOpacity:1,shadowRadius:10,elevation:8},latestText:{fontSize:16,fontWeight:"900"},detectText:{color:"#F1F6F9",fontSize:11,fontWeight:"900",marginTop:7},recommendText:{fontSize:14,fontWeight:"900",marginTop:7},microText:{color:"#8FA2B0",fontSize:7,marginTop:2},aiBox:{marginTop:5,backgroundColor:"#0B1925",borderRadius:5,padding:7},aiTitle:{color:"#B7D3E6",fontSize:11,fontWeight:"900"},aiText:{color:"#C6D2DB",fontSize:11,lineHeight:17,marginTop:5},moneyGrid:{flexDirection:"row",gap:5},fieldBox:{flex:1,backgroundColor:"#102335",borderRadius:5,padding:7,minHeight:58},moneyInput:{color:"#fff",fontSize:13,fontWeight:"900",padding:0,marginTop:5},nextAmount:{color:"#54D79A",fontSize:15,fontWeight:"900",marginTop:6},strategyScroll:{marginTop:6,maxHeight:30},strategyRow:{gap:4},strategyChip:{height:25,paddingHorizontal:8,borderRadius:4,backgroundColor:"#172B3B",justifyContent:"center"},strategyChipActive:{backgroundColor:"#2B78B5"},strategyChipText:{color:"#AABCC8",fontSize:7.5,fontWeight:"800"},progressBox:{marginTop:6,backgroundColor:"#0B1925",borderRadius:5,padding:7},progressText:{color:"#DDE9F0",fontSize:9,fontWeight:"800",marginTop:4},betButtons:{flexDirection:"row",gap:5},betBtn:{flex:1,height:38,borderRadius:5,alignItems:"center",justifyContent:"center"},betBtnText:{color:"#fff",fontSize:12,fontWeight:"900"},statsGrid:{marginTop:6,backgroundColor:"#102335",borderRadius:5,padding:7,flexDirection:"row",justifyContent:"space-between"},statsValue:{color:"#fff",fontSize:11,fontWeight:"900",marginTop:3},recordBar:{marginTop:5,flexDirection:"row",justifyContent:"space-between",alignItems:"center"},resetText:{color:"#51BDF1",fontSize:8,fontWeight:"900"},historyRow:{gap:4,marginTop:5},historyChip:{backgroundColor:"#142A3B",borderRadius:4,paddingHorizontal:6,paddingVertical:4},pageDots:{height:19,flexDirection:"row",gap:7,alignItems:"center",justifyContent:"center"},pageDot:{width:6,height:6,borderRadius:3,backgroundColor:"#526574"},pageDotActive:{backgroundColor:"#fff"},resizeHandle:{position:"absolute",right:4,bottom:3,height:22,paddingHorizontal:6,borderRadius:5,backgroundColor:"#102A3E",borderWidth:1,borderColor:"#315A78",flexDirection:"row",alignItems:"center",gap:3,zIndex:190},resizeText:{color:"#9CC5E4",fontSize:7,fontWeight:"900"},
+  floatPanel:{position:"absolute",right:74,bottom:22,zIndex:100,width:560,maxWidth:"86%",backgroundColor:"rgba(13,26,39,.96)",borderWidth:1,borderColor:"#385975",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:14,elevation:15},floatPanelMt:{zIndex:9999},floatHeader:{height:38,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#14283B"},floatHeadLeft:{flexDirection:"row",alignItems:"center",gap:8},floatTitle:{color:"#F0F5F9",fontWeight:"900",fontSize:12},floatStatus:{color:"#56D48C",fontSize:8},iconBtn:{width:27,height:27,borderRadius:5,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},iconTextBtn:{height:27,paddingHorizontal:7,borderRadius:5,backgroundColor:"#214A70",flexDirection:"row",gap:3,alignItems:"center"},iconText:{color:"#fff",fontSize:8,fontWeight:"800"},selectorWrap:{marginHorizontal:6,marginTop:6,position:"relative",zIndex:130},selector:{height:38,paddingHorizontal:9,borderWidth:1,borderColor:"#31516B",borderRadius:5,backgroundColor:"#09151F",flexDirection:"row",alignItems:"center",justifyContent:"space-between"},selectorLeft:{flexDirection:"row",alignItems:"center",gap:4},selectorValue:{color:"#F0F5F8",fontSize:11,fontWeight:"900"},selectorMeta:{color:"#B6C5D0",fontSize:9},roomDropdown:{position:"absolute",left:0,right:0,top:42,maxHeight:205,backgroundColor:"#0A1722",borderWidth:1,borderColor:"#345A76",borderRadius:6,zIndex:160,elevation:30,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:10},roomDropdownScroll:{maxHeight:205,overflow:"scroll"},roomDropdownItem:{height:34,paddingHorizontal:10,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#183044"},roomDropdownItemActive:{backgroundColor:"#1B5B88"},roomDropdownText:{color:"#EDF5FA",fontSize:10,fontWeight:"900"},roomDropdownMeta:{color:"#8EA7B9",fontSize:8},assistPage:{padding:6,minHeight:150},decisionRow:{flexDirection:"row",gap:5},decisionBox:{flex:1,minHeight:68,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,padding:7},smallLabel:{color:"#8EA3B3",fontSize:7.5},latestLine:{flexDirection:"row",alignItems:"center",gap:7,marginTop:7},glowDot:{width:17,height:17,borderRadius:8.5,shadowOpacity:1,shadowRadius:10,elevation:8},latestText:{fontSize:16,fontWeight:"900"},detectText:{color:"#F1F6F9",fontSize:11,fontWeight:"900",marginTop:7},recommendText:{fontSize:14,fontWeight:"900",marginTop:7},microText:{color:"#8FA2B0",fontSize:7,marginTop:2},aiBox:{marginTop:5,backgroundColor:"#0B1925",borderRadius:5,padding:7},aiTitle:{color:"#B7D3E6",fontSize:11,fontWeight:"900"},aiText:{color:"#C6D2DB",fontSize:11,lineHeight:17,marginTop:5},moneyGrid:{flexDirection:"row",gap:5},fieldBox:{flex:1,backgroundColor:"#102335",borderRadius:5,padding:7,minHeight:58},moneyInput:{color:"#fff",fontSize:13,fontWeight:"900",padding:0,marginTop:5},nextAmount:{color:"#54D79A",fontSize:15,fontWeight:"900",marginTop:6},strategyScroll:{marginTop:6,maxHeight:30},strategyRow:{gap:4},strategyChip:{height:25,paddingHorizontal:8,borderRadius:4,backgroundColor:"#172B3B",justifyContent:"center"},strategyChipActive:{backgroundColor:"#2B78B5"},strategyChipText:{color:"#AABCC8",fontSize:7.5,fontWeight:"800"},progressBox:{marginTop:6,backgroundColor:"#0B1925",borderRadius:5,padding:7},progressText:{color:"#DDE9F0",fontSize:9,fontWeight:"800",marginTop:4},betButtons:{flexDirection:"row",gap:5},betBtn:{flex:1,height:38,borderRadius:5,alignItems:"center",justifyContent:"center"},betBtnText:{color:"#fff",fontSize:12,fontWeight:"900"},statsGrid:{marginTop:6,backgroundColor:"#102335",borderRadius:5,padding:7,flexDirection:"row",justifyContent:"space-between"},statsValue:{color:"#fff",fontSize:11,fontWeight:"900",marginTop:3},recordBar:{marginTop:5,flexDirection:"row",justifyContent:"space-between",alignItems:"center"},resetText:{color:"#51BDF1",fontSize:8,fontWeight:"900"},historyRow:{gap:4,marginTop:5},historyChip:{backgroundColor:"#142A3B",borderRadius:4,paddingHorizontal:6,paddingVertical:4},pageDots:{height:19,flexDirection:"row",gap:7,alignItems:"center",justifyContent:"center"},pageDot:{width:6,height:6,borderRadius:3,backgroundColor:"#526574"},pageDotActive:{backgroundColor:"#fff"},resizeHandle:{position:"absolute",right:0,bottom:0,width:34,height:34,borderTopLeftRadius:9,backgroundColor:"#153A55",borderLeftWidth:1,borderTopWidth:1,borderColor:"#4C7896",alignItems:"center",justifyContent:"center",zIndex:190,cursor:"nwse-resize" as any},resizeText:{color:"#9CC5E4",fontSize:7,fontWeight:"900"},
   loginScreen:{flex:1,backgroundColor:"#020A12",alignItems:"center",justifyContent:"center",padding:18,overflow:"hidden"},loginVideo:{...StyleSheet.absoluteFillObject},loginShade:{...StyleSheet.absoluteFillObject,backgroundColor:"rgba(2,10,18,.46)"},loginPanel:{width:"100%",maxWidth:480,backgroundColor:"rgba(7,31,44,.76)",borderWidth:1,borderColor:"rgba(82,151,177,.62)",borderRadius:18,padding:22,shadowColor:"#000",shadowOpacity:.4,shadowRadius:20,elevation:14},loginTopline:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:26},loginTopText:{color:"#A9BED0",fontSize:9,letterSpacing:1.8,fontWeight:"700"},loginSafe:{color:"#39E0B0",fontSize:9,fontWeight:"800"},loginBrand:{flexDirection:"row",alignItems:"center",justifyContent:"center",gap:13,marginBottom:22},loginIcon:{width:46,height:46,borderRadius:12,borderWidth:1,borderColor:"#D5A82F",alignItems:"center",justifyContent:"center",backgroundColor:"rgba(245,198,74,.08)"},loginKicker:{color:"#8DB4CE",fontSize:8,letterSpacing:1.5,fontWeight:"700"},loginTitle:{color:"#F5F8FA",fontSize:24,fontWeight:"900",marginTop:4},loginSub:{color:"#91A7B8",fontSize:10,marginTop:3},loginDivider:{height:1,backgroundColor:"rgba(109,157,184,.32)",marginBottom:20},loginHint:{color:"#A7B8C5",fontSize:11,marginBottom:18},loginLabel:{color:"#B9C8D3",fontSize:11,fontWeight:"700",marginBottom:6},loginInput:{height:48,backgroundColor:"rgba(2,17,28,.68)",borderRadius:8,borderWidth:1,borderColor:"#385B70",color:"#fff",paddingHorizontal:14,fontSize:14,marginBottom:14},passwordWrap:{height:48,backgroundColor:"rgba(2,17,28,.68)",borderRadius:8,borderWidth:1,borderColor:"#385B70",flexDirection:"row",alignItems:"center",marginBottom:16},passwordInput:{flex:1,height:"100%",color:"#fff",paddingHorizontal:14,fontSize:14},eyeBtn:{width:46,height:"100%",alignItems:"center",justifyContent:"center"},loginBtn:{height:50,backgroundColor:"#168CEB",borderRadius:8,alignItems:"center",justifyContent:"center",flexDirection:"row",gap:8},loginBtnText:{color:"#fff",fontSize:14,fontWeight:"900"},error:{color:"#FF959C",fontSize:11,textAlign:"center",marginTop:10},loginFoot:{color:"#71899A",fontSize:9,textAlign:"center",marginTop:18},loginHelp:{color:"#42B9F5",fontSize:10,fontWeight:"800",textAlign:"center",marginTop:10},
   modalShade:{flex:1,backgroundColor:"rgba(0,0,0,.72)",alignItems:"center",justifyContent:"center",padding:16},connectionModal:{width:"100%",maxWidth:760,maxHeight:"92%",backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},smallModal:{width:"100%",maxWidth:520,backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},modalHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:12},modalTitle:{color:"#fff",fontSize:17,fontWeight:"800"},modalNote:{color:"#BAC7D0",fontSize:10,lineHeight:15,backgroundColor:"#0C1721",padding:10,borderRadius:5,marginBottom:12},fieldLabel:{color:"#C6D3DC",fontSize:10,marginBottom:5,marginTop:8},modalInput:{height:42,borderWidth:1,borderColor:"#36536A",borderRadius:5,backgroundColor:"#08131D",color:"#fff",paddingHorizontal:10},mappingRow:{flexDirection:"row",gap:6,marginTop:10,flexWrap:"wrap"},mapChip:{color:"#C8D4DD",fontSize:9,backgroundColor:"#263A4C",paddingHorizontal:8,paddingVertical:6,borderRadius:4},modalActions:{flexDirection:"row",gap:7,marginTop:12,flexWrap:"wrap"},actionBtn:{height:38,paddingHorizontal:12,borderRadius:5,justifyContent:"center"},btnText:{color:"#fff",fontWeight:"900",fontSize:10},syncText:{color:"#AFC0CB",fontSize:9,marginTop:11},logBox:{height:130,backgroundColor:"#08131D",borderRadius:5,padding:9,marginTop:4},logText:{color:"#B8C8D2",fontSize:8,lineHeight:13},helpText:{color:"#D2DDE4",fontSize:11,lineHeight:18},
   mtScreen:{flex:1,backgroundColor:"#05090E"},mtTop:{minHeight:58,paddingHorizontal:14,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#10202D",borderBottomWidth:1,borderBottomColor:"#28465A"},mtTitle:{color:"#fff",fontSize:15,fontWeight:"900"},iframeWrap:{flex:1},nativeMtFallback:{flex:1,alignItems:"center",justifyContent:"center"},toast:{position:"absolute",bottom:78,left:20,right:20,backgroundColor:"#203A4E",borderRadius:8,padding:9,zIndex:200},toastText:{color:"#fff",textAlign:"center",fontSize:10}
