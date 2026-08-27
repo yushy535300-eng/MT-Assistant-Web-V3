@@ -179,7 +179,7 @@ function AccessScreen({onAuthenticated}:{onAuthenticated:()=>void}){
   const [showPassword,setShowPassword]=useState(false);
   const [error,setError]=useState("");
   const playCount=useRef(0);
-  const player=useVideoPlayer(require("../assets/videos/login-bg.mp4"),p=>{p.loop=false;p.muted=true;p.play()});
+  const player=useVideoPlayer({ uri: "/poker.mp4" },p=>{p.loop=false;p.muted=true;p.play()});
   useEffect(()=>{const sub=player.addListener("playToEnd",()=>{playCount.current+=1;if(playCount.current<2){player.currentTime=0;player.play()}else player.pause()});return()=>sub.remove()},[player]);
   const login=trpc.trackerAccess.login.useMutation({onSuccess:r=>r.success?(setError(""),onAuthenticated()):setError("帳號或密碼不正確"),onError:()=>setError("登入驗證暫時無法完成")});
   const submit=()=>{if(!username.trim()||!password){setError("請輸入帳號與密碼");return}login.mutate({username,password})};
