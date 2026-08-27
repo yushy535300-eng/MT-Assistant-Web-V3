@@ -1,0 +1,55 @@
+# MT Assistant V34 — 完整網站復刻版
+
+這份專案直接以原始 `tracker-v34-mt-restore最新2.zip` 的 React Native / Expo Web 畫面與牌路邏輯為基礎，不是重新設計的簡易網站。
+
+## 保留內容
+
+- 原版 MT ASSISTANT 登入畫面
+- 原版頂部控制列與分類列
+- 15 桌百家樂卡片
+- 荷官、房間、Shoe、Round、倒數與莊/閒/和統計
+- 珠盤 36 顆、大路、下三路
+- 單桌分析彈窗
+- MT 連線設定視窗
+- `wss://a1.ofalive99.net/game/ws` 即時 WebSocket 流程
+- `/authenticate`、`/tables`、`/tablesvg`、`multiple_join`、`show_win`、`wait/end` 更新
+- 原版可拖動右下角懸浮球
+- 原版橫向 MT 懸浮輔助與自動監看頁籤
+
+## 已拔除 Manus 依賴
+
+正式網站啟動不再呼叫 Manus OAuth、Manus runtime、Manus storage proxy 或 Manus heartbeat。網站登入只走同站 `/api/trpc/trackerAccess.login`。
+
+## 本機開發
+
+需要 Node.js 20+ 與 pnpm。
+
+```bash
+cp .env.example .env
+pnpm install
+pnpm dev
+```
+
+前端開發頁預設為 `http://localhost:8081`，API 為 `http://localhost:3000`。正式部署請使用下面的 build/start 流程，前後端會由同一個網址提供。
+
+## 正式網站
+
+```bash
+cp .env.example .env
+# 修改 TRACKER_LOGIN_PASSWORD
+pnpm install
+pnpm build
+pnpm start
+```
+
+瀏覽器開啟：
+
+```text
+http://localhost:3000
+```
+
+## MT 即時資料
+
+網站本身已獨立於 Manus，但真實牌路仍需要來源 MT 工作階段授權。登入 MT 後，把帶 `token` 的完整 MT 網址貼進「連線」視窗，再開始連線。
+
+> 若來源 WebSocket 有 Origin、Cookie、Token 或 IP 限制，是否能從公開網域連線仍由來源伺服器決定，這與 Manus 無關。
