@@ -196,12 +196,33 @@ function AccessScreen({onAuthenticated}:{onAuthenticated:()=>void}){
   const [showPassword,setShowPassword]=useState(false);
   const [error,setError]=useState("");
   const playCount=useRef(0);
+  const webVideoRef=useRef<any>(null);
   const player=useVideoPlayer({ uri: "/poker.mp4" },p=>{if(Platform.OS!=="web"){p.loop=false;p.muted=true;p.play()}});
   useEffect(()=>{if(Platform.OS==="web")return;const sub=player.addListener("playToEnd",()=>{playCount.current+=1;if(playCount.current<2){player.currentTime=0;player.play()}else player.pause()});return()=>sub.remove()},[player]);
+  useEffect(()=>{
+    if(Platform.OS!=="web") return;
+    playCount.current=0;
+    const video=webVideoRef.current;
+    if(!video) return;
+    video.muted=true;
+    video.defaultMuted=true;
+    video.playsInline=true;
+    video.loop=false;
+    const start=()=>{
+      try{
+        const promise=video.play?.();
+        if(promise?.catch) promise.catch(()=>undefined);
+      }catch{}
+    };
+    start();
+    const t1=setTimeout(start,120);
+    const t2=setTimeout(start,600);
+    return()=>{clearTimeout(t1);clearTimeout(t2)};
+  },[]);
   const login=trpc.trackerAccess.login.useMutation({onSuccess:r=>r.success?(setError(""),onAuthenticated()):setError("帳號或密碼不正確"),onError:()=>setError("登入驗證暫時無法完成")});
   const submit=()=>{if(!username.trim()||!password){setError("請輸入帳號與密碼");return}login.mutate({username,password})};
   return <ScreenContainer edges={["top","left","right","bottom"]} containerClassName="bg-[#020A12]" className="bg-[#020A12]">
-    <View style={s.loginScreen}>{Platform.OS==="web"?createElement("video" as any,{src:"/poker.mp4",autoPlay:true,muted:true,playsInline:true,preload:"auto",style:{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover"},onEnded:(e:any)=>{const v=e.currentTarget;playCount.current+=1;if(playCount.current<2){v.currentTime=0;void v.play()}else{v.pause();try{v.currentTime=Math.max(0,(v.duration||0)-0.05)}catch{}}}}):<VideoView player={player} style={s.loginVideo} contentFit="cover" nativeControls={false}/>}<View style={s.loginShade}/><View style={s.loginPanel}>
+    <View style={s.loginScreen}>{Platform.OS==="web"?createElement("video" as any,{ref:(node:any)=>{webVideoRef.current=node},src:"/poker.mp4",autoPlay:true,muted:true,defaultMuted:true,playsInline:true,preload:"auto",controls:false,disablePictureInPicture:true,style:{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",pointerEvents:"none"},onLoadedData:(e:any)=>{const v=e.currentTarget;v.muted=true;v.defaultMuted=true;void v.play?.().catch?.(()=>undefined)},onCanPlay:(e:any)=>{const v=e.currentTarget;v.muted=true;void v.play?.().catch?.(()=>undefined)},onEnded:(e:any)=>{const v=e.currentTarget;playCount.current+=1;if(playCount.current<2){v.currentTime=0;void v.play?.().catch?.(()=>undefined)}else{v.pause();try{v.currentTime=Math.max(0,(v.duration||0)-0.05)}catch{}}}}):<VideoView player={player} style={s.loginVideo} contentFit="cover" nativeControls={false}/>}<View style={s.loginShade}/><View style={s.loginPanel}>
       <View style={s.loginTopline}><Text style={s.loginTopText}>MT ASSISTANT · ACCESS</Text><Text style={s.loginSafe}>● 安全驗證</Text></View>
       <View style={s.loginBrand}><View style={s.loginIcon}><MaterialIcons name="casino" size={26} color="#F5C64A"/></View><View><Text style={s.loginKicker}>REAL-TIME CONTROL ROOM</Text><Text style={s.loginTitle}>即時多桌牌路</Text><Text style={s.loginSub}>安全登入後進入牌路控制台</Text></View></View>
       <View style={s.loginDivider}/><Text style={s.loginHint}>請輸入已授權的管理帳號與密碼。</Text>
