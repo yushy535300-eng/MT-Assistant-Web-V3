@@ -55,7 +55,7 @@ const initialTables: TableData[] = baccaratTableIds.map((apiId) => ({
   roomId: "—", tableBadge: "—", shoe: "—", round: 0, banker: 0, player: 0, tie: 0,
   results: [], trend: "",
 }));
-const lineContactUrl = "https://line.me/ti/p/HM2rMNvenj";
+const lineContactUrl = "https://line.me/ti/p/k2pkYGXGL3";
 const resultColor = (r?: Result) => r === "莊" ? "#EF4E57" : r === "閒" ? "#2879E5" : r === "和" ? "#20B66B" : "#70889A";
 const strategies: StrategyName[] = ["平注","馬丁","達朗貝爾","Fibonacci","Paroli","1-3-2-6","Labouchere","Oscar's Grind"];
 
