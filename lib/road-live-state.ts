@@ -55,22 +55,34 @@ function stats(results: RoadResult[]) {
   };
 }
 
-function mergeSnapshot(local: RoadResult[], server: RoadResult[], sameShoe: boolean, round: number) {
-  // A shoe change always starts a fresh road.
-  if (!sameShoe) return server;
+function limitToCurrentShoe(results: RoadResult[], round: number) {
+  // A baccarat round represents one completed result (including ties).
+  // If the upstream snapshot accidentally contains older-shoe history, keep only
+  // the newest results that can belong to the current shoe.
+  if (!Number.isFinite(round) || round <= 0 || results.length <= round) return results;
+  return results.slice(-round);
+}
 
-  // The server bead plate is the authoritative snapshot whenever it is available.
-  // This prevents results from an older shoe being kept just because the local array is longer.
-  if (server.length) {
-    return Number.isFinite(round) && round >= 0 ? server.slice(0, round) : server;
-  }
+function mergeSnapshot(
+  local: RoadResult[],
+  server: RoadResult[],
+  sameShoe: boolean,
+  currentRound: number,
+) {
+  const cleanServer = limitToCurrentShoe(server, currentRound);
+  const cleanLocal = limitToCurrentShoe(local, currentRound);
 
-  // If the round counter has moved backwards/reset, never keep more local results than the current round.
-  if (Number.isFinite(round) && round >= 0 && local.length > round) {
-    return local.slice(0, round);
-  }
+  // ONLY a real shoe-id change starts a new shoe.
+  // Round going backwards is not a shoe change because live packets can arrive out of order.
+  if (!sameShoe) return cleanServer;
 
-  return local;
+  if (!cleanServer.length) return cleanLocal;
+  if (!cleanLocal.length) return cleanServer;
+
+  // Prefer the server snapshot when it has caught up.  If it is temporarily behind,
+  // keep locally appended show_win results until the next snapshot catches up.
+  if (cleanServer.length >= cleanLocal.length) return cleanServer;
+  return cleanLocal;
 }
 
 export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): T {
@@ -79,8 +91,7 @@ export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): 
   const sourceShoe = String(trend?.current_shoe ?? source?.shoe ?? table.shoe ?? "—");
   const sourceRound = Number(trend?.current_round ?? source?.round ?? table.round);
   const sameShoe = sourceShoe === String(table.shoe);
-  const roundReset = Number.isFinite(sourceRound) && sourceRound < Number(table.round);
-  const results = mergeSnapshot(table.results, serverResults, sameShoe && !roundReset, sourceRound);
+  const results = mergeSnapshot(table.results, serverResults, sameShoe, sourceRound);
   const count = stats(results);
   const apiId = getApiTableId(source);
   return {
@@ -98,7 +109,7 @@ export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): 
     roomId: String(source?.room_id ?? table.roomId ?? ""),
     tableBadge: String(source?.orderState ?? table.tableBadge ?? ""),
     shoe: sourceShoe,
-    round: sourceRound,
+    round: Number.isFinite(sourceRound) ? sourceRound : table.round,
     ...count,
     results,
     dealerPhoto:
@@ -135,11 +146,11 @@ export function applyLiveShowWin<T extends LiveRoadTable>(current: T[], payload:
     const resultKey = `${nextShoe}|${Number.isFinite(nextRound) ? nextRound : ""}`;
     if (resultKey !== "|" && table.lastResultKey === resultKey) return table;
 
-    // Clear on a real shoe-id change OR when the round counter resets/backtracks.
-    // Some feeds update the shoe id slightly later than the first round of a new shoe.
-    const roundReset = Number.isFinite(nextRound) && nextRound <= Number(table.round);
-    const base = nextShoe !== String(table.shoe) || roundReset ? [] : table.results;
-    const results = [...base, result];
+    // IMPORTANT: only a real shoe-id change clears the current shoe.
+    // Never use a round reset/backwards round as a shoe-change signal.
+    const shoeChanged = nextShoe !== String(table.shoe);
+    const base = shoeChanged ? [] : table.results;
+    const results = limitToCurrentShoe([...base, result], nextRound);
     const count = stats(results);
 
     return {
@@ -176,3 +187,4 @@ export function applyLiveWait<T extends LiveRoadTable>(current: T[], payload: an
     } as T;
   });
 }
+
