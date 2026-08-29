@@ -53,7 +53,7 @@ const initialTables: TableData[] = baccaratTableIds.map((apiId) => ({
   roomId: "—", tableBadge: "—", shoe: "—", round: 0, banker: 0, player: 0, tie: 0,
   results: [], trend: "",
 }));
-const lineContactUrl = "https://line.me/ti/p/k2pkYGXGL3";
+const lineContactUrl = "https://line.me/ti/p/HM2rMNvenj";
 const resultColor = (r?: Result) => r === "莊" ? "#EF4E57" : r === "閒" ? "#2879E5" : r === "和" ? "#20B66B" : "#70889A";
 const strategies: StrategyName[] = ["平注","馬丁","達朗貝爾","Fibonacci","Paroli","1-3-2-6","Labouchere","Oscar's Grind"];
 
@@ -262,24 +262,43 @@ function eventTables(payload:any):any[]|null{const c=[payload?.msg?.tables?.tabl
 function extractMtUrlToken(value:string){try{return new URL(value.trim()).searchParams.get("token")?.trim()??""}catch{return value.trim().replace(/^token=/i,"")}}
 function resultKeyFromPayload(payload:any){const b=payload?.body??payload?.msg??payload?.data??{};return `${String(b?.shoe??"")}|${String(b?.round??"")}`}
 
-/** Keep exactly one shoe per table. Same-shoe snapshots may only fill/extend history; a new shoe replaces it. */
+/**
+ * Keep exactly one shoe per table.
+ * MT tables/tablesvg snapshots are the authoritative road for the current shoe.
+ * show_win is only a fast incremental update while waiting for the next snapshot.
+ * A real shoe-id change starts a fresh road; round changes never trigger a shoe reset.
+ */
 function applyTablesSameShoe(current: TableData[], sources: any[]): TableData[] {
   const next = applyLiveTables(current, sources) as TableData[];
   return next.map((table) => {
     const prev = current.find((x) => (x.apiId ?? `BAG${x.id}`) === (table.apiId ?? `BAG${table.id}`));
     if (!prev) return table;
+
     const prevShoe = String(prev.shoe ?? "");
     const nextShoe = String(table.shoe ?? "");
-    if (!prevShoe || prevShoe === "—" || !nextShoe || nextShoe === "—") return table;
-    if (prevShoe !== nextShoe) {
-      // Real shoe change: never carry any previous-shoe road into the new shoe.
+
+    // Only an actual shoe-id change is a shoe change.
+    if (prevShoe && prevShoe !== "—" && nextShoe && nextShoe !== "—" && prevShoe !== nextShoe) {
       return { ...table, results: [...table.results] };
     }
-    // Same shoe: never let a delayed snapshot roll the road backwards.
-    if (prev.results.length > table.results.length) {
-      return { ...table, results: [...prev.results], round: Math.max(prev.round, table.round) };
-    }
-    return table;
+
+    // Same shoe: when MT supplies a non-empty snapshot, trust it even if it is
+    // shorter than our locally appended show_win history. This lets the app
+    // automatically repair a missed/duplicate/out-of-order live event instead
+    // of requiring a manual reconnect.
+    const source = sources.find((item) => {
+      const sourceId = getApiTableId(item);
+      const tableId = table.apiId ?? `BAG${table.id}`;
+      return sourceId === tableId || String(item?.table_name ?? "") === table.id;
+    });
+    const trend = source?.trend ?? {};
+    const rawSnapshot = trend?.bead_plate2 ?? trend?.bead_plate ?? source?.bead_plate2;
+    const hasSnapshot = Array.isArray(rawSnapshot) ? rawSnapshot.length > 0 : typeof rawSnapshot === "string" && rawSnapshot.replace(/[^0-9]/g, "").length >= 2;
+
+    if (hasSnapshot) return table;
+
+    // If this packet has no road snapshot at all, do not erase the live road.
+    return { ...table, results: [...prev.results] };
   });
 }
 
@@ -489,4 +508,5 @@ const s=StyleSheet.create({
   modalShade:{flex:1,backgroundColor:"rgba(0,0,0,.72)",alignItems:"center",justifyContent:"center",padding:16},connectionModal:{width:"100%",maxWidth:760,maxHeight:"92%",backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},smallModal:{width:"100%",maxWidth:520,backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},modalHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:12},modalTitle:{color:"#fff",fontSize:17,fontWeight:"800"},modalNote:{color:"#BAC7D0",fontSize:10,lineHeight:15,backgroundColor:"#0C1721",padding:10,borderRadius:5,marginBottom:12},fieldLabel:{color:"#C6D3DC",fontSize:10,marginBottom:5,marginTop:8},modalInput:{height:42,borderWidth:1,borderColor:"#36536A",borderRadius:5,backgroundColor:"#08131D",color:"#fff",paddingHorizontal:10},mappingRow:{flexDirection:"row",gap:6,marginTop:10,flexWrap:"wrap"},mapChip:{color:"#C8D4DD",fontSize:9,backgroundColor:"#263A4C",paddingHorizontal:8,paddingVertical:6,borderRadius:4},modalActions:{flexDirection:"row",gap:7,marginTop:12,flexWrap:"wrap"},actionBtn:{height:38,paddingHorizontal:12,borderRadius:5,justifyContent:"center"},btnText:{color:"#fff",fontWeight:"900",fontSize:10},syncText:{color:"#AFC0CB",fontSize:9,marginTop:11},logBox:{height:130,backgroundColor:"#08131D",borderRadius:5,padding:9,marginTop:4},logText:{color:"#B8C8D2",fontSize:8,lineHeight:13},helpText:{color:"#D2DDE4",fontSize:11,lineHeight:18},
   mtScreen:{flex:1,backgroundColor:"#05090E"},mtTop:{minHeight:58,paddingHorizontal:14,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#10202D",borderBottomWidth:1,borderBottomColor:"#28465A"},mtTitle:{color:"#fff",fontSize:15,fontWeight:"900"},iframeWrap:{flex:1},nativeMtFallback:{flex:1,alignItems:"center",justifyContent:"center"},toast:{position:"absolute",bottom:78,left:20,right:20,backgroundColor:"#203A4E",borderRadius:8,padding:9,zIndex:200},toastText:{color:"#fff",textAlign:"center",fontSize:10}
 });
+
 
