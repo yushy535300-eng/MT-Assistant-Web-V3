@@ -32,6 +32,7 @@ import {
   buildBigRoad,
   buildDerivedRoad,
   buildRoadWindow,
+  buildAskRoad,
 } from "@/lib/road-render";
 
 type Result = RoadResult;
@@ -54,7 +55,7 @@ const initialTables: TableData[] = baccaratTableIds.map((apiId) => ({
   roomId: "—", tableBadge: "—", shoe: "—", round: 0, banker: 0, player: 0, tie: 0,
   results: [], trend: "",
 }));
-const lineContactUrl = "https://line.me/ti/p/k2pkYGXGL3";
+const lineContactUrl = "https://line.me/ti/p/HM2rMNvenj";
 const resultColor = (r?: Result) => r === "莊" ? "#EF4E57" : r === "閒" ? "#2879E5" : r === "和" ? "#20B66B" : "#70889A";
 const strategies: StrategyName[] = ["平注","馬丁","達朗貝爾","Fibonacci","Paroli","1-3-2-6","Labouchere","Oscar's Grind"];
 
@@ -68,50 +69,173 @@ type PatternInfo = {
   label: string; side?: "莊" | "閒"; run?: number;
 };
 
-function getPatternInfo(results: Result[]): PatternInfo {
-  const seq = results.filter((r): r is "莊" | "閒" => r === "莊" || r === "閒");
-  const n = seq.length;
-  if (n < 3) return { type: "資料累積中", label: "資料累積中" };
-  const last = seq[n - 1];
-  let run = 1;
-  for (let i = n - 2; i >= 0 && seq[i] === last; i--) run++;
-  if (run >= 4) return { type: "連龍", label: `${last}連龍${run}顆`, side: last, run };
-  const last3 = seq.slice(-3);
-  if (last3[0] === last3[2] && last3[0] !== last3[1]) return { type: "單跳", label: "單跳趨勢", side: last };
-  if (n >= 5) {
-    const x = seq.slice(-5);
-    if (x[0] === x[1] && x[2] === x[3] && x[0] !== x[2] && x[4] === x[0]) return { type: "雙跳", label: "雙跳趨勢", side: x[4] };
+function roadSides(results: Result[]): ("莊" | "閒")[] {
+  return results.filter((r): r is "莊" | "閒" => r === "莊" || r === "閒");
+}
+
+function columnRuns(results: Result[]) {
+  const seq = roadSides(results);
+  const runs: { side: "莊" | "閒"; length: number }[] = [];
+  for (const side of seq) {
+    const last = runs[runs.length - 1];
+    if (last?.side === side) last.length += 1;
+    else runs.push({ side, length: 1 });
   }
-  if (last3[0] === "莊" && last3[1] === "閒" && last3[2] === "閒") return { type: "一房兩廳", label: "一莊兩閒｜一房兩廳", side: "閒" };
-  if (last3[0] === "閒" && last3[1] === "莊" && last3[2] === "莊") return { type: "一房兩廳", label: "兩莊一閒｜一房兩廳", side: "莊" };
-  if (run >= 2) return { type: "一般連", label: `${last}連${run}顆`, side: last, run };
-  return { type: "混合", label: "混合走勢", side: last };
+  return runs;
+}
+
+function tailAlternating(runs: { side: "莊" | "閒"; length: number }[], size: number, len: number) {
+  if (runs.length < size) return false;
+  const x = runs.slice(-size);
+  return x.every((r) => r.length === len) && x.every((r, i) => i === 0 || r.side !== x[i - 1].side);
+}
+
+function getPatternInfo(results: Result[]): PatternInfo {
+  const seq = roadSides(results);
+  const runs = columnRuns(results);
+  if (seq.length < 3 || !runs.length) return { type: "資料累積中", label: "資料累積中" };
+  const lastRun = runs[runs.length - 1];
+
+  // 使用實際大路「柱」判斷，不再只抓 raw results 最後三顆。
+  // 使用者規則：連 4 起才叫龍；連 2/3 只叫連。
+  if (lastRun.length >= 4) return { type: "連龍", label: `${lastRun.side}龍${lastRun.length}顆`, side: lastRun.side, run: lastRun.length };
+
+  // 單跳：至少最近四柱都是 1 格。
+  if (tailAlternating(runs, 4, 1)) return { type: "單跳", label: "單跳", side: lastRun.side };
+
+  // 雙跳：至少最近三柱都是 2 格。
+  if (tailAlternating(runs, 3, 2)) return { type: "雙跳", label: "雙跳", side: lastRun.side };
+
+  // 兩閒一莊 / 兩莊一閒：
+  // 禁止只看最後 3 柱的 2-1-2 就命名。至少要看到兩次完整重複節奏，
+  // 才能確認這是一個持續牌型；否則視為轉型/混合路，再交由下三路與問路確認。
+  if (runs.length >= 6) {
+    const x = runs.slice(-6);
+    const twoPlayerOneBanker =
+      x[0].side === "閒" && x[0].length === 2 &&
+      x[1].side === "莊" && x[1].length === 1 &&
+      x[2].side === "閒" && x[2].length === 2 &&
+      x[3].side === "莊" && x[3].length === 1 &&
+      x[4].side === "閒" && x[4].length === 2 &&
+      x[5].side === "莊" && x[5].length === 1;
+    const twoBankerOnePlayer =
+      x[0].side === "莊" && x[0].length === 2 &&
+      x[1].side === "閒" && x[1].length === 1 &&
+      x[2].side === "莊" && x[2].length === 2 &&
+      x[3].side === "閒" && x[3].length === 1 &&
+      x[4].side === "莊" && x[4].length === 2 &&
+      x[5].side === "閒" && x[5].length === 1;
+    if (twoPlayerOneBanker) return { type: "一房兩廳", label: "兩閒一莊", side: "閒" };
+    if (twoBankerOnePlayer) return { type: "一房兩廳", label: "兩莊一閒", side: "莊" };
+  }
+
+  if (lastRun.length >= 2) return { type: "一般連", label: `${lastRun.side}連${lastRun.length}`, side: lastRun.side, run: lastRun.length };
+  return { type: "混合", label: "轉型／混合路", side: lastRun.side };
+}
+
+function derivedTailPreference(results: Result[], offset: 1 | 2 | 3): "莊" | "閒" | null {
+  const marks = buildDerivedRoad(results, offset, offset === 2);
+  if (!marks.length) return null;
+  const seq = marks.map(m => m.result).filter((r): r is "莊" | "閒" => r === "莊" || r === "閒");
+  if (!seq.length) return null;
+
+  // 先看尾段自己的節奏：連則續色；明顯交替則續跳。
+  const last = seq[seq.length - 1];
+  let run = 1;
+  for (let i = seq.length - 2; i >= 0 && seq[i] === last; i--) run++;
+  if (run >= 2) return last;
+  if (seq.length >= 4) {
+    const x = seq.slice(-4);
+    if (x[0] !== x[1] && x[1] !== x[2] && x[2] !== x[3]) return last === "莊" ? "閒" : "莊";
+  }
+
+  // 無明顯尾型時參考整段較近期的結構，但不把紅藍直接當莊閒。
+  const tail = seq.slice(-8);
+  let same = 0, change = 0;
+  for (let i = 1; i < tail.length; i++) tail[i] === tail[i - 1] ? same++ : change++;
+  return change > same ? (last === "莊" ? "閒" : "莊") : last;
+}
+
+function roadDecision(results: Result[]) {
+  const seq = roadSides(results);
+  if (!seq.length) return { side: "莊" as const, scoreBanker: 0, scorePlayer: 0, reason: "等待牌路資料" };
+
+  const info = getPatternInfo(results);
+  const ask = buildAskRoad(results);
+  const prefs = [
+    derivedTailPreference(results, 1),
+    derivedTailPreference(results, 2),
+    derivedTailPreference(results, 3),
+  ];
+  const bankerAsk = [ask.banker.bigEye, ask.banker.small, ask.banker.cockroach];
+  const playerAsk = [ask.player.bigEye, ask.player.small, ask.player.cockroach];
+
+  let b = 0, p = 0;
+  // 三條下三路等權重：問路新增色若符合該路目前節奏就加分。
+  prefs.forEach((pref, i) => {
+    if (!pref) return;
+    if (bankerAsk[i] === pref) b += 2;
+    if (playerAsk[i] === pref) p += 2;
+  });
+
+  const runs = columnRuns(results);
+  const last = seq[seq.length - 1];
+  // 大路整體牌型作主判斷；下三路與問路作二次確認。
+  if (info.type === "連龍") (last === "莊" ? b : p) += 4;
+  else if (info.type === "單跳") (last === "莊" ? p : b) += 4;
+  else if (info.type === "雙跳") (last === "莊" ? b : p) += 4;
+  else if (info.type === "一房兩廳" && info.side) (info.side === "莊" ? b : p) += 3;
+  else if (info.type === "一般連") (last === "莊" ? b : p) += 2;
+
+  // 全路段柱型微量參考，避免只看尾端。
+  const recentRuns = runs.slice(-10);
+  const bankerDepth = recentRuns.filter(r => r.side === "莊").reduce((s,r)=>s+r.length,0);
+  const playerDepth = recentRuns.filter(r => r.side === "閒").reduce((s,r)=>s+r.length,0);
+  if (bankerDepth > playerDepth) b += 0.5;
+  else if (playerDepth > bankerDepth) p += 0.5;
+
+  // 強制二選一；完全同分時以問路吻合數，再以目前大路轉向決勝。
+  const side: "莊" | "閒" = b === p ? (last === "莊" ? "閒" : "莊") : (b > p ? "莊" : "閒");
+  const fmt = (x: Result | null) => x === "莊" ? "紅" : x === "閒" ? "藍" : "—";
+  return {
+    side, scoreBanker: b, scorePlayer: p,
+    reason: `${info.label}｜莊問路 ${bankerAsk.map(fmt).join("・")}｜閒問路 ${playerAsk.map(fmt).join("・")}｜三路綜合 ${b.toFixed(1)}:${p.toFixed(1)}`
+  };
 }
 
 function detectPattern(results: Result[]) { return getPatternInfo(results).label; }
 
 function recommendSide(results: Result[]): "莊" | "閒" {
-  const seq = results.filter((r): r is "莊" | "閒" => r === "莊" || r === "閒");
-  if (!seq.length) return "莊";
-  const info = getPatternInfo(results), last = seq[seq.length - 1];
-  if (info.type === "連龍" || info.type === "一般連" || info.type === "雙跳") return last;
-  if (info.type === "單跳") return last === "莊" ? "閒" : "莊";
-  if (info.type === "一房兩廳") return info.side ?? last;
-  const tail = seq.slice(-8), b = tail.filter(x => x === "莊").length;
-  return b >= tail.length - b ? "莊" : "閒";
+  return roadDecision(results).side;
 }
 
 function analysisText(table?: TableData) {
   if (!table) return "等待牌局資料。";
-  const seq = table.results.filter((r): r is "莊" | "閒" => r === "莊" || r === "閒");
+  const seq = roadSides(table.results);
   if (seq.length < 3) return "目前資料累積中，第三顆開始判斷牌型。";
-  const info = getPatternInfo(table.results), side = recommendSide(table.results);
-  if (info.type === "連龍") return `目前${info.label}，已連續開出${info.run}顆${info.side}。目前輔助方向：${side}。`;
-  if (info.type === "單跳") return `目前形成單跳趨勢，第三顆已符合交替節奏。目前輔助方向：${side}。`;
-  if (info.type === "雙跳") return `目前形成雙跳趨勢，第三段第一顆已出現。目前輔助方向：${side}。`;
-  if (info.type === "一房兩廳") return `目前形成${info.label}，第三顆已符合牌型條件。目前輔助方向：${side}。`;
-  if (info.type === "一般連") return `目前${info.label}，尚未達到四顆連龍條件。目前輔助方向：${side}。`;
-  return `目前尚未形成明確牌型，最近牌路暫時偏向${side}側。`;
+
+  const info = getPatternInfo(table.results);
+  const d = roadDecision(table.results);
+  const ask = buildAskRoad(table.results);
+  const prefs = [
+    derivedTailPreference(table.results, 1),
+    derivedTailPreference(table.results, 2),
+    derivedTailPreference(table.results, 3),
+  ];
+
+  const colorName = (x: Result | null) => x === "莊" ? "紅" : x === "閒" ? "藍" : "—";
+  const prefName = (x: "莊" | "閒" | null) => x === "莊" ? "偏紅" : x === "閒" ? "偏藍" : "資料不足";
+
+  const bankerAsk = [ask.banker.bigEye, ask.banker.small, ask.banker.cockroach];
+  const playerAsk = [ask.player.bigEye, ask.player.small, ask.player.cockroach];
+
+  return [
+    `【大路】${info.label}。`,
+    `【大眼仔】${prefName(prefs[0])}；【小路】${prefName(prefs[1])}；【曱甴路】${prefName(prefs[2])}。`,
+    `【莊問路】${bankerAsk.map(colorName).join("・")}；【閒問路】${playerAsk.map(colorName).join("・")}。`,
+    `【綜合】莊 ${d.scoreBanker.toFixed(1)}／閒 ${d.scorePlayer.toFixed(1)}，整段牌路與三路問路綜合後，我會選${d.side}。`
+  ].join("
+");
 }
 
 function strategyAmount(name: StrategyName, base: number, level: number, lab: number[]) {
@@ -691,5 +815,4 @@ const s=StyleSheet.create({
   modalShade:{flex:1,backgroundColor:"rgba(0,0,0,.72)",alignItems:"center",justifyContent:"center",padding:16},connectionModal:{width:"100%",maxWidth:760,maxHeight:"92%",backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},smallModal:{width:"100%",maxWidth:520,backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},modalHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:12},modalTitle:{color:"#fff",fontSize:17,fontWeight:"800"},modalNote:{color:"#BAC7D0",fontSize:10,lineHeight:15,backgroundColor:"#0C1721",padding:10,borderRadius:5,marginBottom:12},fieldLabel:{color:"#C6D3DC",fontSize:10,marginBottom:5,marginTop:8},modalInput:{height:42,borderWidth:1,borderColor:"#36536A",borderRadius:5,backgroundColor:"#08131D",color:"#fff",paddingHorizontal:10},mappingRow:{flexDirection:"row",gap:6,marginTop:10,flexWrap:"wrap"},mapChip:{color:"#C8D4DD",fontSize:9,backgroundColor:"#263A4C",paddingHorizontal:8,paddingVertical:6,borderRadius:4},modalActions:{flexDirection:"row",gap:7,marginTop:12,flexWrap:"wrap"},actionBtn:{height:38,paddingHorizontal:12,borderRadius:5,justifyContent:"center"},btnText:{color:"#fff",fontWeight:"900",fontSize:10},syncText:{color:"#AFC0CB",fontSize:9,marginTop:11},logBox:{height:130,backgroundColor:"#08131D",borderRadius:5,padding:9,marginTop:4},logText:{color:"#B8C8D2",fontSize:8,lineHeight:13},helpText:{color:"#D2DDE4",fontSize:11,lineHeight:18},
   mtScreen:{flex:1,backgroundColor:"#05090E"},mtTop:{minHeight:58,paddingHorizontal:14,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#10202D",borderBottomWidth:1,borderBottomColor:"#28465A"},mtTitle:{color:"#fff",fontSize:15,fontWeight:"900"},iframeWrap:{flex:1},nativeMtFallback:{flex:1,alignItems:"center",justifyContent:"center"},toast:{position:"absolute",bottom:78,left:20,right:20,backgroundColor:"#203A4E",borderRadius:8,padding:9,zIndex:200},toastText:{color:"#fff",textAlign:"center",fontSize:10}
 });
-
 
