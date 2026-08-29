@@ -240,8 +240,7 @@ function analysisText(table?: TableData) {
     `【大眼仔】${prefName(prefs[0])}；【小路】${prefName(prefs[1])}；【曱甴路】${prefName(prefs[2])}。`,
     `【莊問路】${bankerAsk.map(colorName).join("・")}；【閒問路】${playerAsk.map(colorName).join("・")}。`,
     `【綜合】莊 ${d.scoreBanker.toFixed(1)}／閒 ${d.scorePlayer.toFixed(1)}，整段牌路與三路問路綜合後，我會選${d.side}。`
-  ].join("
-");
+  ].join("\n");
 }
 
 function strategyAmount(name: StrategyName, base: number, level: number, lab: number[]) {
