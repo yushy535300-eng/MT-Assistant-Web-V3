@@ -181,11 +181,17 @@ function roadDecision(results: Result[]) {
   const runs = columnRuns(results);
   const last = seq[seq.length - 1];
   // 大路整體牌型作主判斷；下三路與問路作二次確認。
-  if (info.type === "連龍") (last === "莊" ? b : p) += 4;
-  else if (info.type === "單跳") (last === "莊" ? p : b) += 4;
-  else if (info.type === "雙跳") (last === "莊" ? b : p) += 4;
-  else if (info.type === "一房兩廳" && info.side) (info.side === "莊" ? b : p) += 3;
-  else if (info.type === "一般連") (last === "莊" ? b : p) += 2;
+  if (info.type === "連龍") {
+    if (last === "莊") b += 4; else p += 4;
+  } else if (info.type === "單跳") {
+    if (last === "莊") p += 4; else b += 4;
+  } else if (info.type === "雙跳") {
+    if (last === "莊") b += 4; else p += 4;
+  } else if (info.type === "一房兩廳" && info.side) {
+    if (info.side === "莊") b += 3; else p += 3;
+  } else if (info.type === "一般連") {
+    if (last === "莊") b += 2; else p += 2;
+  }
 
   // 全路段柱型微量參考，避免只看尾端。
   const recentRuns = runs.slice(-10);
