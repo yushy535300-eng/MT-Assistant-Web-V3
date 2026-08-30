@@ -576,7 +576,9 @@ export default function HomeScreen(){
   const appendEvent=(x:string)=>setEvents(e=>[`[${new Date().toLocaleTimeString()}] ${x}`,...e].slice(0,40));
   const notify=(x:string)=>{setToast(x);setTimeout(()=>setToast(""),1800)};
   const nextAmount=Math.max(0,Math.round(strategyAmount(strategy,baseBet,strategyLevel,labSequence)));
-  const assistTable=tables.find(t=>(t.apiId??`BAG${t.id}`)===assistTableId)??tables[0];
+  // Floating assistant always reads the current live table object.
+  // roomMenuTables is only a frozen dropdown snapshot and must never drive dealer display.
+  const assistTable=useMemo(()=>tables.find(t=>(t.apiId??`BAG${t.id}`)===assistTableId)??tables[0],[tables,assistTableId]);
   const latest=assistTable?.results.at(-1);
   const recommendation=recommendSide(assistTable?.results??[]);
 
@@ -617,18 +619,22 @@ export default function HomeScreen(){
     }));
   };
   const clampPanelPosition=()=>{
+    // Mobile Safari: keep the panel where the finger releases it.
+    // Only keep a small grab area visible instead of snapping to the default position.
     const scale=desktop?assistScale:1;
-    const visualWidth=Math.min(width-16,Math.max(1,panelSizeRef.current.width*scale));
-    const visualHeight=Math.min(height-16,Math.max(1,panelSizeRef.current.height*scale));
-    const baseLeft=Math.max(0,width-74-visualWidth);
-    const baseTop=Math.max(0,height-22-visualHeight);
-    const minX=8-baseLeft;
-    const maxX=width-8-visualWidth-baseLeft;
+    const visualWidth=Math.max(1,panelSizeRef.current.width*scale);
+    const visualHeight=Math.max(1,panelSizeRef.current.height*scale);
+    const baseLeft=Math.max(8,width-74-visualWidth);
+    const baseTop=Math.max(8,height-22-visualHeight);
+    const keepX=Math.min(96,visualWidth);
+    const keepY=Math.min(48,visualHeight);
+    const minX=8-visualWidth+keepX-baseLeft;
+    const maxX=width-8-keepX-baseLeft;
     const minY=8-baseTop;
-    const maxY=height-8-visualHeight-baseTop;
+    const maxY=height-8-keepY-baseTop;
     panelPosition.stopAnimation((v:any)=>panelPosition.setValue({
-      x:Math.max(Math.min(minX,maxX),Math.min(Math.max(minX,maxX),Number(v?.x)||0)),
-      y:Math.max(Math.min(minY,maxY),Math.min(Math.max(minY,maxY),Number(v?.y)||0)),
+      x:Math.max(minX,Math.min(maxX,Number(v?.x)||0)),
+      y:Math.max(minY,Math.min(maxY,Number(v?.y)||0)),
     }));
   };
 
@@ -737,9 +743,16 @@ export default function HomeScreen(){
     const ws=new WebSocket(wsUrl);setSocket(ws);let authenticated=false,subscribed=false;
     const requestTables=(quiet=false)=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/tables",data:{gametype_id:3,game_id:1,room_id:1}}}));if(!quiet)appendEvent("已請求 15 桌歷史牌局")}};
     const requestSvg=()=>authenticated&&ws.readyState===WebSocket.OPEN&&ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));
+    // Dealer metadata can change without show_win/wait/end. Poll the authoritative
+    // table metadata lightly while connected; live game packets still arrive at full speed.
+    let dealerRefreshTimer:ReturnType<typeof setInterval>|null=null;
+    const startDealerRefresh=()=>{
+      if(dealerRefreshTimer)clearInterval(dealerRefreshTimer);
+      dealerRefreshTimer=setInterval(()=>requestTables(true),3000);
+    };
     const subscribe=()=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/mulitple_join",data:{table_id:baccaratTableIds.join(",")}}}));subscribed=true;appendEvent("已訂閱 15 桌即時事件")}};
     ws.onopen=()=>{appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
-    ws.onmessage=e=>{try{const p=JSON.parse(e.data),name=eventName(p);if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();setTimeout(requestSvg,200);setTimeout(subscribe,400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
+    ws.onmessage=e=>{try{const p=JSON.parse(e.data),name=eventName(p);if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();setTimeout(requestSvg,200);setTimeout(subscribe,400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
       updateLiveTables(c=>{
         // The first complete snapshot after every connection/reconnection is the
@@ -775,7 +788,7 @@ export default function HomeScreen(){
         return applyTablesSameShoe(c,filtered);
       });
       if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>applyDealerRealtime(applyLiveShowWin(c,p),p));setTimeout(requestSvg,350);setTimeout(()=>requestTables(true),450);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){updateLiveTables(c=>applyDealerRealtime(applyLiveWait(c,p,baccaratTableIds),p));setTimeout(()=>requestTables(true),180);return}}catch{}};
-    ws.onerror=()=>{setConnected(false);appendEvent("WebSocket 發生錯誤")};ws.onclose=()=>{setConnected(false);appendEvent("WebSocket 已中斷")};
+    ws.onerror=()=>{setConnected(false);appendEvent("WebSocket 發生錯誤")};ws.onclose=()=>{if(dealerRefreshTimer)clearInterval(dealerRefreshTimer);dealerRefreshTimer=null;setConnected(false);appendEvent("WebSocket 已中斷")};
   };
   const stopConnection=()=>{if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}reconnectingRef.current=false;awaitingFreshSnapshotRef.current=false;socket?.close();setSocket(null);setConnected(false);appendEvent("已手動中斷")};
   const syncAssist=()=>{if(socket?.readyState===WebSocket.OPEN){socket.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));appendEvent("懸浮輔助已要求同步")}else notify("尚未連線")};
@@ -799,8 +812,8 @@ export default function HomeScreen(){
     const page2=<View {...pageSwipe.panHandlers} style={s.assistPage}><View style={s.moneyGrid}><View style={s.fieldBox}><Text style={s.smallLabel}>目前本金</Text><TextInput keyboardType="numeric" value={String(bankroll)} onChangeText={v=>{const n=Math.max(0,Number(v)||0);setBankroll(n)}} style={s.moneyInput}/></View><View style={s.fieldBox}><Text style={s.smallLabel}>基本單注</Text><TextInput keyboardType="numeric" value={String(baseBet)} onChangeText={v=>setBaseBet(Math.max(0,Number(v)||0))} style={s.moneyInput}/></View><View style={s.fieldBox}><Text style={s.smallLabel}>下一注</Text><Text style={s.nextAmount}>{nextAmount.toLocaleString()}</Text></View></View><ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.strategyScroll} contentContainerStyle={s.strategyRow}>{strategies.map(x=><Pressable key={x} style={[s.strategyChip,strategy===x&&s.strategyChipActive]} onPress={()=>{setStrategy(x);setStrategyLevel(0)}}><Text style={[s.strategyChipText,strategy===x&&{color:"#fff"}]}>{x}</Text></Pressable>)}</ScrollView><View style={s.progressBox}><Text style={s.smallLabel}>策略進度</Text><Text style={s.progressText}>{strategy} · 第 {strategyLevel+1} 階　→　下一注 {nextAmount.toLocaleString()}</Text></View></View>;
     const page3=<View {...pageSwipe.panHandlers} style={s.assistPage}><View style={s.betButtons}><Pressable style={[s.betBtn,{backgroundColor:"#B8323B"}]} onPress={()=>placeManualBet("莊")}><Text style={s.betBtnText}>本局莊</Text></Pressable><Pressable style={[s.betBtn,{backgroundColor:"#1764C0"}]} onPress={()=>placeManualBet("閒")}><Text style={s.betBtnText}>本局閒</Text></Pressable><Pressable style={[s.betBtn,{backgroundColor:"#238A4B"}]} onPress={()=>placeManualBet("和")}><Text style={s.betBtnText}>和局</Text></Pressable></View><View style={s.statsGrid}><View><Text style={s.smallLabel}>目前本金</Text><Text style={s.statsValue}>{bankroll.toLocaleString()}</Text></View><View><Text style={s.smallLabel}>總損益</Text><Text style={[s.statsValue,{color:bankroll-initialBankroll>=0?"#4ED58B":"#FF6973"}]}>{(bankroll-initialBankroll>=0?"+":"")+(bankroll-initialBankroll).toLocaleString()}</Text></View><View><Text style={s.smallLabel}>勝 / 負</Text><Text style={s.statsValue}>{wins} / {losses}</Text></View><View><Text style={s.smallLabel}>勝率</Text><Text style={s.statsValue}>{decisions?((wins/decisions)*100).toFixed(1):"0.0"}%</Text></View></View><View style={s.recordBar}><Text style={s.microText}>{pendingBet?`等待開獎：${pendingBet.side} ${pendingBet.amount.toLocaleString()}`:`連${records[0]?.pnl>0?"勝":records[0]?.pnl<0?"敗":"續"} ${streak}　最大回撤 -${maxDrawdown.toLocaleString()}`}</Text><Pressable onPress={resetStats}><Text style={s.resetText}>重置統計</Text></Pressable></View><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.historyRow}>{records.slice(0,8).map((r,i)=><View key={i} style={s.historyChip}><Text style={{color:r.pnl>=0?"#53D990":"#FF7079",fontSize:9,fontWeight:"800"}}>{r.side} {r.pnl>=0?"+":""}{r.pnl.toLocaleString()}</Text></View>)}</ScrollView></View>;
     if(!floatingOpen)return null;
-    return <Animated.View onLayout={(e:any)=>{const l=e.nativeEvent?.layout;if(l?.width&&l?.height){panelSizeRef.current={width:l.width,height:l.height}}}} style={[s.floatPanel,{width:panelBaseWidth,maxWidth:width-20},insideMt?s.floatPanelMt:null,desktop&&Platform.OS==="web"?({zoom:assistScale} as any):null,{transform:panelPosition.getTranslateTransform()}]}>
-      <View style={s.floatHeader} {...panelDrag.panHandlers}><View style={s.floatHeadLeft}><Text style={s.floatTitle}>MT 懸浮輔助</Text><Text style={s.floatStatus}>{connected?"等待下一把開獎":"等待連線"}</Text></View><View style={s.row}><Pressable onPress={syncAssist} style={s.iconTextBtn}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.iconText}>同步</Text></Pressable><Pressable onPress={()=>setFloatingOpen(false)} style={s.iconBtn}><MaterialIcons name="close" size={18} color="#fff"/></Pressable></View></View>
+    return <Animated.View onLayout={(e:any)=>{const l=e.nativeEvent?.layout;if(l?.width&&l?.height){panelSizeRef.current={width:l.width,height:l.height}}}} style={[s.floatPanel,{width:panelBaseWidth,maxWidth:width-20},insideMt?s.floatPanelMt:null,desktop&&Platform.OS==="web"?({zoom:assistScale} as any):null,Platform.OS==="web"?({overscrollBehavior:"contain"} as any):null,{transform:panelPosition.getTranslateTransform()}]}>
+      <View style={[s.floatHeader,Platform.OS==="web"?({touchAction:"none",userSelect:"none",WebkitUserSelect:"none"} as any):null]} {...panelDrag.panHandlers}><View style={s.floatHeadLeft}><Text style={s.floatTitle}>MT 懸浮輔助</Text><Text style={s.floatStatus}>{connected?"等待下一把開獎":"等待連線"}</Text></View><View style={s.row}><Pressable onPress={syncAssist} style={s.iconTextBtn}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.iconText}>同步</Text></Pressable><Pressable onPress={()=>setFloatingOpen(false)} style={s.iconBtn}><MaterialIcons name="close" size={18} color="#fff"/></Pressable></View></View>
       <View style={s.selectorWrap}>
         <Pressable style={s.selector} onPress={()=>{
           if(roomDropdownOpen){ roomDropdownOpenRef.current=false; setRoomDropdownOpen(false); }
@@ -824,7 +837,7 @@ export default function HomeScreen(){
             onScroll={(e:any)=>{roomDropdownOffsetRef.current=e.nativeEvent?.contentOffset?.y??roomDropdownOffsetRef.current}}
             onWheel={(e:any)=>{e.stopPropagation?.()}}
           >
-            {roomMenuTables.map(t=>{const id=t.apiId??`BAG${t.id}`;return <Pressable key={id} style={[s.roomDropdownItem,id===assistTableId&&s.roomDropdownItemActive]} onPress={()=>{setAssistTableId(id);roomDropdownOpenRef.current=false;setRoomDropdownOpen(false)}}><View style={s.roomDropdownLeft}><Text style={s.roomDropdownText}>{id}</Text><Text numberOfLines={1} style={s.roomDropdownDealer}>荷官 {t.name||"—"}</Text></View><Text style={s.roomDropdownMeta}>第 {t.round??0} 局</Text></Pressable>})}
+            {roomMenuTables.map(t=>{const id=t.apiId??`BAG${t.id}`;return <Pressable key={id} style={[s.roomDropdownItem,id===assistTableId&&s.roomDropdownItemActive]} onPress={()=>{setAssistTableId(id);roomDropdownOpenRef.current=false;setRoomDropdownOpen(false);setRoomMenuTables([])}}><View style={s.roomDropdownLeft}><Text style={s.roomDropdownText}>{id}</Text><Text numberOfLines={1} style={s.roomDropdownDealer}>荷官 {t.name||"—"}</Text></View><Text style={s.roomDropdownMeta}>第 {t.round??0} 局</Text></Pressable>})}
           </ScrollView>
         </View>:null}
       </View>
