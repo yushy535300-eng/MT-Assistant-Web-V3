@@ -436,6 +436,32 @@ function AccessScreen({onAuthenticated}:{onAuthenticated:()=>void}){
   </ScreenContainer>;
 }
 
+function applyDealerRealtime(current: TableData[], payload: any): TableData[] {
+  const body = payload?.body ?? payload?.msg ?? payload?.data ?? payload ?? {};
+  const tableId = String(body?.table_id ?? body?.id ?? body?.room_id ?? "");
+  if (!tableId.startsWith("BAG")) return current;
+
+  const dealer = body?.dealer ?? body?.dealer_info ?? body?.dealerInfo ?? {};
+  const dealerName =
+    dealer?.nick_name ?? dealer?.nickname ?? dealer?.name ?? dealer?.username ??
+    body?.dealer_name ?? body?.dealerName;
+  const dealerPhoto =
+    body?.dealer_image ?? body?.dealer_image_url ?? body?.dealerPhoto ??
+    dealer?.avatar_url ?? dealer?.image ?? dealer?.avatar;
+
+  if (!dealerName && !dealerPhoto) return current;
+
+  return current.map((table) => {
+    if ((table.apiId ?? `BAG${table.id}`) !== tableId) return table;
+    return {
+      ...table,
+      name: dealerName ? String(dealerName) : table.name,
+      dealerPhoto: dealerPhoto ? String(dealerPhoto) : table.dealerPhoto,
+      lastUpdated: Date.now(),
+    };
+  });
+}
+
 function eventName(payload:any){return typeof payload?.action==="string"?payload.action:payload?.action?.name??payload?.name??""}
 function eventTables(payload:any):any[]|null{const c=[payload?.msg?.tables?.tables,payload?.msg?.tables,payload?.data?.tables?.tables,payload?.data?.tables,payload?.tables?.tables,payload?.tables];return c.find(Array.isArray)??null}
 function extractMtUrlToken(value:string){try{return new URL(value.trim()).searchParams.get("token")?.trim()??""}catch{return value.trim().replace(/^token=/i,"")}}
@@ -730,7 +756,7 @@ export default function HomeScreen(){
         }
         return applyTablesSameShoe(c,filtered);
       });
-      if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>applyLiveShowWin(c,p));setTimeout(requestSvg,350);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){updateLiveTables(c=>applyLiveWait(c,p,baccaratTableIds));return}}catch{}};
+      if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>applyDealerRealtime(applyLiveShowWin(c,p),p));setTimeout(requestSvg,350);setTimeout(()=>requestTables(true),450);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){updateLiveTables(c=>applyDealerRealtime(applyLiveWait(c,p,baccaratTableIds),p));setTimeout(()=>requestTables(true),180);return}}catch{}};
     ws.onerror=()=>{setConnected(false);appendEvent("WebSocket 發生錯誤")};ws.onclose=()=>{setConnected(false);appendEvent("WebSocket 已中斷")};
   };
   const stopConnection=()=>{if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}reconnectingRef.current=false;awaitingFreshSnapshotRef.current=false;socket?.close();setSocket(null);setConnected(false);appendEvent("已手動中斷")};
