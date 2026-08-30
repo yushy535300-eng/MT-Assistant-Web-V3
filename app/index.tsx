@@ -580,6 +580,24 @@ export default function HomeScreen(){
   const latest=assistTable?.results.at(-1);
   const recommendation=recommendSide(assistTable?.results??[]);
 
+  useEffect(()=>{
+    if(Platform.OS!=="web" || typeof document==="undefined") return;
+    document.title="MT Assistant";
+    let link=document.querySelector('link[rel="apple-touch-icon"]') as HTMLLinkElement | null;
+    if(!link){
+      link=document.createElement("link");
+      link.rel="apple-touch-icon";
+      document.head.appendChild(link);
+    }
+    link.href="/apple-touch-icon.png";
+    let favicon=document.querySelector('link[rel="icon"]') as HTMLLinkElement | null;
+    if(!favicon){
+      favicon=document.createElement("link");
+      favicon.rel="icon";
+      document.head.appendChild(favicon);
+    }
+    favicon.href="/apple-touch-icon.png";
+  },[]);
   useEffect(()=>()=>socket?.close(),[socket]);
   useEffect(()=>()=>{if(reconnectTimerRef.current)clearTimeout(reconnectTimerRef.current)},[]);
   useEffect(()=>()=>{if(tablesFrameRef.current!=null)cancelAnimationFrame(tablesFrameRef.current)},[]);
