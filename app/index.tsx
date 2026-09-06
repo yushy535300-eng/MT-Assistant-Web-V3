@@ -627,8 +627,10 @@ export default function HomeScreen(){
   const [peakBankroll,setPeakBankroll]=useState(100000);
   const lastBetReportOrderRef=useRef<string>("");
   const betReportBaselineReadyRef=useRef(false);
-  // First report response may arrive only after the current bet has already settled.
-  // Keep the connection start time so that first-response baselining never swallows a new order.
+  // v27: 記住「這次主連線開始追蹤」的本機時間。
+  // created_at 是秒級 Unix time；orderTimeOf() 已統一轉成毫秒。
+  // 因此即使第一包 /bet/history 晚到，連線後才建立的下注也不能被當成歷史基準吃掉。
+  const betTrackingStartedAtRef=useRef(0);
   const processedBetSnRef=useRef<Set<string>>(new Set());
   const pendingSettlementGameSnRef=useRef<Set<string>>(new Set());
   // v26: show_win/end 若帶 game_sn，先鎖定該局；正式 /bet/history 再以相同 gameSn 結算。
@@ -938,7 +940,13 @@ export default function HomeScreen(){
       for(const o of settledMainOrders){
         const id=orderIdOf(o);
         const gs=gameSnOf(o);
-        if(gs && pendingSettlementGameSnRef.current.has(gs)) continue;
+        const createdMs=orderTimeOf(o);
+        const createdAfterTrackingStarted=
+          betTrackingStartedAtRef.current>0 && createdMs>=betTrackingStartedAtRef.current;
+        // 兩種情況都不能吃成歷史：
+        // 1) show_win/end 已鎖到這個 gameSn；
+        // 2) 這筆下注 created_at 明確是在本次連線開始追蹤之後。
+        if((gs && pendingSettlementGameSnRef.current.has(gs)) || createdAfterTrackingStarted) continue;
         if(id)processedBetSnRef.current.add(id);
         if(gs)processedGameSnRef.current.add(gs);
       }
@@ -1030,6 +1038,9 @@ export default function HomeScreen(){
       return;
     }
     awaitingFreshSnapshotRef.current=true;
+    // v27: 在 WebSocket 建立前就開始計時。第一包報表即使晚到，
+    // 只要下注 created_at >= 這個時間，就必須當成新單結算馬丁。
+    betTrackingStartedAtRef.current=Date.now();
     // New manual main-WS session: reset report baseline timing, but keep already processed order IDs.
     betReportBaselineReadyRef.current=false;
     processedGameSnRef.current.clear();
