@@ -916,81 +916,77 @@ export default function HomeScreen(){
     const allOrders=readBetReportOrders(payload);
     if(!allOrders.length){appendEvent("投注報表：目前沒有注單");return;}
 
-    const sorted=[...allOrders].sort((a,b)=>orderTimeOf(a)-orderTimeOf(b));
-    const settled=sorted.filter(orderSettled);
+    // v13: Martingale reads the SAME /bet/history response that already updates 今日輸贏.
+    // Do not baseline every order and do not use order totals. Only inspect the latest
+    // SETTLED Baccarat main bet (1101 Banker / 1102 Player) and remember its betSn.
+    const settledMain=[...allOrders]
+      .filter(o=>orderSettled(o)&&mainBetSlipsOf(o).length>0)
+      .sort((a,b)=>orderTimeOf(b)-orderTimeOf(a));
 
-    // v12: Martingale shares the exact same proven /bet/history response stream as 今日輸贏.
-    // The FIRST successful report response is only a baseline: remember every order ID
-    // already visible in the report, regardless of created_at/timezone. Never settle history.
-    // From the SECOND response onward, only brand-new IDs can change Martingale.
-    // If a new order first appears unsettled, it is intentionally NOT added here; once it
-    // later becomes status=3 it will still be detected and settled exactly once.
+    const latestMain=settledMain[0];
+    if(!latestMain)return;
+
+    const id=orderIdOf(latestMain);
+    if(!id)return;
+
+    // First live report is only an anchor so reconnecting never replays historical bets.
+    // Unlike v12, we do NOT mark the whole report as processed.
     if(!betReportPrimedRef.current){
       betReportPrimedRef.current=true;
-      let baseline=0;
-      for(const o of allOrders){
-        const id=orderIdOf(o);
-        if(id && !processedBetSnRef.current.has(id)){
-          processedBetSnRef.current.add(id);
-          baseline++;
-        }
-      }
-      appendEvent(`馬丁報表基準完成｜既有 ${baseline} 筆不追算｜後續新 betSn 開始即時結算`);
+      lastBetReportOrderRef.current=id;
+      processedBetSnRef.current.add(id);
+      appendEvent(`馬丁已鎖定最新本注｜${id}｜等待下一筆莊/閒本注結算`);
       return;
     }
 
-    const fresh=settled
-      .filter(o=>{
-        const id=orderIdOf(o);
-        return !!id&&!processedBetSnRef.current.has(id);
-      })
-      .sort((a,b)=>orderTimeOf(a)-orderTimeOf(b));
+    // Same latest settled main bet = already handled. Wait for the next report change.
+    if(lastBetReportOrderRef.current===id)return;
 
-    for(const o of fresh){
-      const id=orderIdOf(o);
-      const pnl=orderPnlOf(o);
-      const amount=Math.round(orderBetOf(o));
-      const main=mainBetSlipsOf(o);
+    const main=mainBetSlipsOf(latestMain);
+    if(!main.length)return;
 
-      // Main bet only. If the settled row is not complete yet, keep it unprocessed and retry next poll.
-      if(!id||pnl===null||!main.length){
-        if(id)appendEvent(`注單 ${id} 已結算，但莊/閒本注資料尚未完整，保留等待`);
-        continue;
-      }
+    // Strictly calculate from 1101/1102 slips only. Side bets can never enter this P/L.
+    let amount=0;
+    let refund=0;
+    for(const slip of main){
+      const b=Number(String(slip?.bet??0).replace(/,/g,""));
+      const r=Number(String(slip?.refund??0).replace(/,/g,""));
+      if(Number.isFinite(b))amount+=b;
+      if(Number.isFinite(r))refund+=r;
+    }
+    if(!Number.isFinite(amount)||!Number.isFinite(refund)||amount<=0)return;
 
-      const mainCode=String(main[0]?.play_code??main[0]?.playCode??"");
-      const side:BetSide=mainCode==="1102"?"閒":"莊";
+    const pnl=refund-amount;
+    const mainCode=String(main[0]?.play_code??main[0]?.playCode??"");
+    const side:BetSide=mainCode==="1102"?"閒":"莊";
 
-      if(pnl===0){
-        appendEvent(`即時結算｜${id}｜本注 ${amount}｜和/退注｜馬丁不變`);
-        processedBetSnRef.current.add(id);
-        continue;
-      }
+    // Lock this betSn only after its main-bet settlement is fully understood.
+    lastBetReportOrderRef.current=id;
+    processedBetSnRef.current.add(id);
 
-      const win=pnl>0;
-      setBankroll(v=>Math.round(v+pnl));
-      setRecords(r=>[{
-        side,
-        result:(win?side:(side==="閒"?"莊":"閒")) as Result,
-        amount,
-        pnl:Math.round(pnl),
-        at:Date.now()
-      },...r].slice(0,30));
+    if(pnl===0){
+      appendEvent(`本注結算｜${id}｜${side} ${Math.round(amount)}｜和/退注｜馬丁不變`);
+      return;
+    }
 
-      // Martingale uses ONLY actual settled Banker/Player main-bet P/L.
-      // LOSE = +1 level, WIN = level 1, no cap. 1/3/7/15/31/...
-      if(strategyRef.current==="馬丁"){
-        setStrategyLevel(level=>{
-          const nextLevel=win?0:level+1;
-          const nextStake=baseBetRef.current*(Math.pow(2,nextLevel+1)-1);
-          appendEvent(`即時結算｜${id}｜本注 ${amount}｜${pnl>0?"+":""}${Math.round(pnl)}｜${win?"WIN":"LOSE"}`);
-          appendEvent(`馬丁｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
-          return nextLevel;
-        });
-      }
+    const win=pnl>0;
+    setBankroll(v=>Math.round(v+pnl));
+    setRecords(r=>[{
+      side,
+      result:(win?side:(side==="閒"?"莊":"閒")) as Result,
+      amount:Math.round(amount),
+      pnl:Math.round(pnl),
+      at:Date.now()
+    },...r].slice(0,30));
 
-      // Mark processed only after the settlement has been understood and state update queued.
-      processedBetSnRef.current.add(id);
+    if(strategyRef.current==="馬丁"){
+      setStrategyLevel(level=>{
+        const nextLevel=win?0:level+1;
+        const nextStake=baseBetRef.current*(Math.pow(2,nextLevel+1)-1);
+        appendEvent(`本注結算｜${id}｜${side} ${Math.round(amount)}｜${pnl>0?"+":""}${Math.round(pnl)}｜${win?"WIN":"LOSE"}`);
+        appendEvent(`馬丁｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
+        return nextLevel;
+      });
     }
   };
 
@@ -1015,6 +1011,7 @@ export default function HomeScreen(){
     // New manual main-WS session: reset report baseline timing, but keep already processed order IDs.
     betReportSessionStartRef.current=Date.now();
     betReportPrimedRef.current=false;
+    lastBetReportOrderRef.current="";
     const generation=++socketGenerationRef.current;
     const ws=new WebSocket(wsUrl);
     socketRef.current=ws;
