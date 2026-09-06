@@ -485,7 +485,11 @@ function applyDealerRealtime(current: TableData[], payload: any): TableData[] {
   });
 }
 
-function eventName(payload:any){return typeof payload?.action==="string"?payload.action:payload?.action?.name??payload?.name??""}
+function eventName(payload:any){
+  return typeof payload?.action==="string"
+    ? payload.action
+    : payload?.action?.name ?? payload?.action?.path ?? payload?.path ?? payload?.name ?? ""
+}
 function eventTables(payload:any):any[]|null{const c=[payload?.msg?.tables?.tables,payload?.msg?.tables,payload?.data?.tables?.tables,payload?.data?.tables,payload?.tables?.tables,payload?.tables];return c.find(Array.isArray)??null}
 function extractMtUrlToken(value:string){try{return new URL(value.trim()).searchParams.get("token")?.trim()??""}catch{return value.trim().replace(/^token=/i,"")}}
 function resultKeyFromPayload(payload:any){const b=payload?.body??payload?.msg??payload?.data??{};return `${String(b?.shoe??"")}|${String(b?.round??"")}`}
@@ -794,6 +798,18 @@ export default function HomeScreen(){
     }
     return [];
   };
+  const isBetReportPayload=(payload:any)=>{
+    const name=eventName(payload);
+    if(name.includes("/bet/history"))return true;
+    const orders=readBetReportOrders(payload);
+    if(!orders.length)return false;
+    return orders.some((o:any)=>
+      o && (
+        o.betSn!=null || o.bet_sn!=null || o.bet_total!=null ||
+        o.win_total!=null || Array.isArray(o.slips)
+      )
+    );
+  };
   const orderIdOf=(o:any)=>String(o?.betSn??o?.bet_sn??o?.no??o?.order_no??o?.orderNumber??o?.id??"");
   const mainBetSlipsOf=(o:any)=>Array.isArray(o?.slips)
     ? o.slips.filter((x:any)=>["莊","閒","BANKER","PLAYER"].includes(String(x?.content_name??x?.contentName??"").toUpperCase()) || ["莊","閒"].includes(String(x?.content_name??x?.contentName??"")))
@@ -902,9 +918,20 @@ export default function HomeScreen(){
   const startConnection=(autoReason?:string)=>{
     const authToken=extractMtUrlToken(token||mtUrl);
     if(!authToken){notify("請貼登入後含 token 的 MT 網址");reconnectingRef.current=false;return}
-    if(autoReason)appendEvent(`偵測牌路不同步：${autoReason}，自動重新連線確認`);
+    if(autoReason){
+      // Snapshot/封包可能短暫亂序：只記錄差異，絕不因此斷線重連。
+      appendEvent(`牌路同步差異：${autoReason}（保持連線）`);
+      reconnectingRef.current=false;
+      awaitingFreshSnapshotRef.current=false;
+      return;
+    }
+    // 只有使用者主動按「連線」才建立主 WS。
+    // 若主線仍 OPEN / CONNECTING，直接沿用，禁止重複建立。
+    if(socket && (socket.readyState===WebSocket.OPEN || socket.readyState===WebSocket.CONNECTING)){
+      appendEvent("主連線仍有效，不重複連線");
+      return;
+    }
     awaitingFreshSnapshotRef.current=true;
-    socket?.close();
     const ws=new WebSocket(wsUrl);setSocket(ws);let authenticated=false,subscribed=false;
     const requestTables=(quiet=false)=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/tables",data:{gametype_id:3,game_id:1,room_id:1}}}));if(!quiet)appendEvent("已請求 15 桌歷史牌局")}};
     const requestSvg=()=>authenticated&&ws.readyState===WebSocket.OPEN&&ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));
@@ -943,7 +970,7 @@ export default function HomeScreen(){
       // 只共用現有主 WS，不建立第二條線，也不重新驗證。
       // 報表請求序列化，避免大量請求干擾 MT。
       if(betReportInFlight){
-        if(Date.now()-betReportRequestAt<6500)return;
+        if(Date.now()-betReportRequestAt<4800)return;
         betReportInFlight=false;
       }
       betReportInFlight=true;
@@ -986,7 +1013,14 @@ export default function HomeScreen(){
         }
       }catch{}
       const p=JSON.parse(e.data),name=eventName(p);
-        if(name.includes("/bet/history")){betReportInFlight=false;applyBetReport(p);return}
+        if(isBetReportPayload(p)){
+          betReportInFlight=false;
+          const reportOrders=readBetReportOrders(p);
+          const newest=reportOrders[0];
+          appendEvent(`報表回傳｜${reportOrders.length} 筆${newest?`｜最新 ${orderIdOf(newest)||"—"}｜status ${String(newest?.status??"—")}`:""}`);
+          applyBetReport(p);
+          return;
+        }
         if(name.endsWith("/show_win")||name.endsWith("/end")||name.includes("/show_win")||name.includes("/end"))refreshBetReportAfterSettlement();if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();setTimeout(requestSvg,200);setTimeout(subscribe,400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
       updateLiveTables(c=>{
