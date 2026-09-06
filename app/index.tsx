@@ -1029,23 +1029,20 @@ export default function HomeScreen(){
     };
 
     const refreshBetReportAfterSettlement=(tableId?:string)=>{
-      // Collapse simultaneous show_win events into one immediate report check + one follow-up.
-      // This keeps Martingale realtime without creating a growing timeout/request storm.
-      appendEvent(`開牌${tableId?` ${tableId}`:""} → 檢查投注報表`);
+      // One delayed settlement check is enough. The 5s poll remains as a safety net.
+      // Avoid firing multiple report requests around every show_win on the same WS.
+      appendEvent(`開牌${tableId?` ${tableId}`:""} → 排程投注報表確認`);
       if(reportSettlementTimer)clearTimeout(reportSettlementTimer);
       reportSettlementTimer=setTimeout(()=>{
         reportSettlementTimer=null;
         if(!isCurrentSocket())return;
-        if(betReportInFlight && Date.now()-betReportRequestAt>=700)betReportInFlight=false;
-        requestBetReport();
-      },120);
-      if(reportSettlementFollowupTimer)clearTimeout(reportSettlementFollowupTimer);
-      reportSettlementFollowupTimer=setTimeout(()=>{
-        reportSettlementFollowupTimer=null;
-        if(!isCurrentSocket())return;
         if(betReportInFlight && Date.now()-betReportRequestAt>=1200)betReportInFlight=false;
         requestBetReport();
-      },2200);
+      },1500);
+      if(reportSettlementFollowupTimer){
+        clearTimeout(reportSettlementFollowupTimer);
+        reportSettlementFollowupTimer=null;
+      }
     };
 
     const startDealerRefresh=()=>{
@@ -1057,16 +1054,6 @@ export default function HomeScreen(){
     const subscribe=()=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/mulitple_join",data:{table_id:baccaratTableIds.join(",")}}}));subscribed=true;appendEvent("已訂閱 15 桌即時事件")}};
     ws.onopen=()=>{if(!isCurrentSocket())return;appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
     ws.onmessage=e=>{if(!isCurrentSocket())return;try{
-      // TEMP: 下注封包偵測，只記錄可能相關的原始訊息，不改變既有即時處理。
-      try{
-        const raw=typeof e?.data==="string"?e.data:JSON.stringify(e?.data??"");
-        const low=raw.toLowerCase();
-        const wagerWords=["bet","wager","stake","betting","bet_amount","betamount","banker","player","莊","閒","user_id","userid","member","account"];
-        if(wagerWords.some(k=>low.includes(k))){
-          const clipped=raw.length>1800?raw.slice(0,1800)+" …":raw;
-          appendEvent("🔎 下注偵測："+clipped);
-        }
-      }catch{}
       const p=JSON.parse(e.data),name=eventName(p);
         if(isBetReportPayload(p)){
           betReportInFlight=false;
@@ -1096,7 +1083,7 @@ export default function HomeScreen(){
         // a snapshot arrives out of order or is temporarily shorter.
         return applyTablesSameShoe(c,filtered);
       });
-      if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>applyDealerRealtime(applyLiveShowWin(c,p),p));scheduleSvgRefresh(350);scheduleTablesRefresh(800);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){updateLiveTables(c=>applyDealerRealtime(applyLiveWait(c,p,baccaratTableIds),p));scheduleTablesRefresh(500);return}}catch{}};
+      if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>applyDealerRealtime(applyLiveShowWin(c,p),p));scheduleTablesRefresh(1200);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){updateLiveTables(c=>applyDealerRealtime(applyLiveWait(c,p,baccaratTableIds),p));return}}catch{}};
     ws.onerror=()=>{if(!isCurrentSocket())return;setConnected(false);appendEvent("WebSocket 發生錯誤")};
     ws.onclose=()=>{
       clearSocketTimers();

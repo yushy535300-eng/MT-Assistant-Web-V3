@@ -72,9 +72,20 @@ export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): 
   const sourceShoe = String(trend?.current_shoe ?? source?.shoe ?? table.shoe ?? "—");
   const sourceRound = Number(trend?.current_round ?? source?.round ?? table.round);
   const currentShoe = String(table.shoe ?? "—");
-  const realShoeChange =
+  const shoeDiff =
     currentShoe !== "—" && sourceShoe !== "—" && currentShoe !== sourceShoe;
-  const results = mergeSnapshot(table.results, serverResults, !realShoeChange, sourceRound);
+
+  // A tables/tablesvg packet may briefly carry a stale/new shoe id while its road
+  // still belongs to the previous shoe. Never let that transient packet collapse
+  // a full road to one dot. Accept a shoe change only when the snapshot itself
+  // looks like the beginning of a fresh shoe.
+  const finiteRound = Number.isFinite(sourceRound) ? sourceRound : table.round;
+  const freshShoeSnapshot = finiteRound <= 3 && serverResults.length <= 3;
+  const acceptShoeChange = !shoeDiff || freshShoeSnapshot;
+  const effectiveShoe = shoeDiff && !acceptShoeChange ? currentShoe : sourceShoe;
+  const results = shoeDiff && !acceptShoeChange
+    ? table.results
+    : mergeSnapshot(table.results, serverResults, !shoeDiff, finiteRound);
   const count = stats(results);
   const apiId = getApiTableId(source);
   return {
@@ -91,8 +102,10 @@ export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): 
     players: String(source?.totalplayers ?? source?.total_players ?? table.players),
     roomId: String(source?.room_id ?? table.roomId ?? ""),
     tableBadge: String(source?.orderState ?? table.tableBadge ?? ""),
-    shoe: sourceShoe,
-    round: sourceRound,
+    shoe: effectiveShoe,
+    round: shoeDiff && !acceptShoeChange
+      ? table.round
+      : (Number.isFinite(sourceRound) ? sourceRound : table.round),
     ...count,
     results,
     dealerPhoto:
@@ -126,7 +139,11 @@ export function applyLiveShowWin<T extends LiveRoadTable>(current: T[], payload:
 
     const nextShoe = String(body?.shoe ?? table.shoe ?? "—");
     const nextRound = Number(body?.round ?? table.round + 1);
-    const resultKey = `${nextShoe}|${Number.isFinite(nextRound) ? nextRound : ""}`;
+    // Deduplicate against the authoritative current shoe, not a transient shoe
+    // value carried by show_win. This prevents the same round being appended twice
+    // when MT momentarily reports a different shoe id.
+    const keyShoe = String(table.shoe ?? "—") !== "—" ? String(table.shoe) : nextShoe;
+    const resultKey = `${keyShoe}|${Number.isFinite(nextRound) ? nextRound : ""}`;
     if (resultKey !== "|" && table.lastResultKey === resultKey) return table;
 
     // show_win is an incremental event only. NEVER clear/rebuild the road here.
@@ -162,8 +179,13 @@ export function applyLiveWait<T extends LiveRoadTable>(current: T[], payload: an
     return {
       ...table,
       live: true,
-      shoe: String(body?.shoe ?? table.shoe),
-      round: Number(body?.round ?? table.round),
+      // wait/end are timing events, not authoritative shoe snapshots. Never let
+      // them mutate shoe state or move round backward; both can make the next
+      // snapshot look like a false shoe change and roll the road back.
+      shoe: table.shoe,
+      round: Number.isFinite(Number(body?.round))
+        ? Math.max(table.round, Number(body?.round))
+        : table.round,
       countdown: hasCount ? Math.max(0, receivedCount) : table.countdown,
       countdownUpdatedAt: hasCount ? Date.now() : table.countdownUpdatedAt,
       lastUpdated: Date.now(),
