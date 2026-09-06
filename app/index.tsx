@@ -1,4 +1,4 @@
-import { createElement, memo, useEffect, useMemo, useRef, useState } from "react";
+
 import {
   Animated,
   Image,
@@ -611,6 +611,7 @@ export default function HomeScreen(){
   const [peakBankroll,setPeakBankroll]=useState(100000);
   const lastBetReportOrderRef=useRef<string>("");
   const betReportPrimedRef=useRef(false);
+  const processedBetSnRef=useRef<Set<string>>(new Set());
   const orbPosition=useRef(new Animated.ValueXY()).current;
   const panelPosition=useRef(new Animated.ValueXY()).current;
   const resizeStartScale=useRef(1);
@@ -828,17 +829,20 @@ export default function HomeScreen(){
   };
   const applyBetReport=(payload:any)=>{
     const orders=readBetReportOrders(payload).filter(orderSettled);
-    if(!orders.length)return;
+    if(!orders.length){appendEvent("投注報表：目前沒有已結算注單");return;}
+    appendEvent(`投注報表已更新｜${orders.length} 筆`);
 
     // First response only establishes the historical baseline.
     if(!betReportPrimedRef.current){
       betReportPrimedRef.current=true;
-      lastBetReportOrderRef.current=orders.map(orderIdOf).filter(Boolean).join("|");
-      appendEvent(`投注報表同步完成，已建立 ${orders.length} 筆基準`);
+      const ids=orders.map(orderIdOf).filter(Boolean);
+      ids.forEach(id=>processedBetSnRef.current.add(id));
+      lastBetReportOrderRef.current=ids.join("|");
+      appendEvent(`投注報表已連線｜基準 ${orders.length} 筆`);
       return;
     }
 
-    const seen=new Set(lastBetReportOrderRef.current.split("|").filter(Boolean));
+    const seen=processedBetSnRef.current;
     const fresh=orders.filter(o=>{
       const id=orderIdOf(o);
       return id&&!seen.has(id);
@@ -851,6 +855,8 @@ export default function HomeScreen(){
       const pnl=orderPnlOf(newest);
       const amount=Math.round(orderBetOf(newest));
       seen.add(orderId);
+      processedBetSnRef.current.add(orderId);
+      appendEvent(`偵測新注單｜${orderId}`);
 
       if(pnl===null){
         appendEvent(`投注報表 ${orderId}：無法判斷本注結算`);
@@ -874,11 +880,18 @@ export default function HomeScreen(){
       },...r].slice(0,30));
 
       // ROAD X Martingale: only the actual main bet settlement changes the stage.
-      setStrategyLevel(level=>outcome==="loss"?level+1:0);
-      appendEvent(`馬丁自動結算 ${orderId}：本注 ${amount}｜${pnl>0?"+":""}${Math.round(pnl)}｜${outcome==="win"?"WIN → 第1階":"LOSE → 下一階"}`);
+      if(outcome==="win")setStrategyLevel(0);
+      appendEvent(`馬丁自動結算 ${orderId}｜本注 ${amount}｜${pnl>0?"+":""}${Math.round(pnl)}｜${outcome==="win"?"WIN → 第1階":"LOSE → 下一階"}`);
+      if(outcome==="win")appendEvent(`下一注：${baseBet.toLocaleString()}`);
+      else setStrategyLevel(level=>{
+        const nextLevel=level+1;
+        const next=baseBet*(Math.pow(2,nextLevel+1)-1);
+        appendEvent(`下一注：${Math.round(next).toLocaleString()}`);
+        return nextLevel;
+      });
     }
 
-    // Keep the IDs currently returned by the report so repeated 5s refreshes cannot re-settle them.
+    // Keep a readable snapshot too; processedBetSnRef is the authoritative dedupe set.
     lastBetReportOrderRef.current=orders.map(orderIdOf).filter(Boolean).join("|");
   };
 
@@ -927,7 +940,13 @@ export default function HomeScreen(){
     const startBetReportRefresh=()=>{
       if(betReportTimer)clearInterval(betReportTimer);
       requestBetReport();
-      betReportTimer=setInterval(requestBetReport,5000);
+      betReportTimer=setInterval(requestBetReport,2000);
+    };
+    const refreshBetReportAfterSettlement=()=>{
+      // Report settlement can arrive slightly after the table result.
+      setTimeout(requestBetReport,300);
+      setTimeout(requestBetReport,1000);
+      setTimeout(requestBetReport,2000);
     };
     const subscribe=()=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/mulitple_join",data:{table_id:baccaratTableIds.join(",")}}}));subscribed=true;appendEvent("已訂閱 15 桌即時事件")}};
     ws.onopen=()=>{appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
@@ -942,7 +961,9 @@ export default function HomeScreen(){
           appendEvent("🔎 下注偵測："+clipped);
         }
       }catch{}
-      const p=JSON.parse(e.data),name=eventName(p);if(name.includes("/bet/history")){applyBetReport(p);return}if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();setTimeout(requestSvg,200);setTimeout(subscribe,400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
+      const p=JSON.parse(e.data),name=eventName(p);
+        if(name.includes("/bet/history")){applyBetReport(p);return}
+        if(name.endsWith("/show_win")||name.endsWith("/end")||name.includes("/show_win")||name.includes("/end"))refreshBetReportAfterSettlement();if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();setTimeout(requestSvg,200);setTimeout(subscribe,400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
       updateLiveTables(c=>{
         // The first complete snapshot after every connection/reconnection is the
@@ -1071,4 +1092,5 @@ const s=StyleSheet.create({
   modalShade:{flex:1,backgroundColor:"rgba(0,0,0,.72)",alignItems:"center",justifyContent:"center",padding:16},connectionModal:{width:"100%",maxWidth:760,maxHeight:"92%",backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},smallModal:{width:"100%",maxWidth:520,backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},modalHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:12},modalTitle:{color:"#fff",fontSize:17,fontWeight:"800"},modalNote:{color:"#BAC7D0",fontSize:10,lineHeight:15,backgroundColor:"#0C1721",padding:10,borderRadius:5,marginBottom:12},fieldLabel:{color:"#C6D3DC",fontSize:10,marginBottom:5,marginTop:8},modalInput:{height:42,borderWidth:1,borderColor:"#36536A",borderRadius:5,backgroundColor:"#08131D",color:"#fff",paddingHorizontal:10},mappingRow:{flexDirection:"row",gap:6,marginTop:10,flexWrap:"wrap"},mapChip:{color:"#C8D4DD",fontSize:9,backgroundColor:"#263A4C",paddingHorizontal:8,paddingVertical:6,borderRadius:4},modalActions:{flexDirection:"row",gap:7,marginTop:12,flexWrap:"wrap"},actionBtn:{height:38,paddingHorizontal:12,borderRadius:5,justifyContent:"center"},btnText:{color:"#fff",fontWeight:"900",fontSize:10},syncText:{color:"#AFC0CB",fontSize:9,marginTop:11},logBox:{height:130,backgroundColor:"#08131D",borderRadius:5,padding:9,marginTop:4},logText:{color:"#B8C8D2",fontSize:8,lineHeight:13},helpText:{color:"#D2DDE4",fontSize:11,lineHeight:18},
   mtScreen:{flex:1,backgroundColor:"#05090E"},mtTop:{minHeight:58,paddingHorizontal:14,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#10202D",borderBottomWidth:1,borderBottomColor:"#28465A"},mtTitle:{color:"#fff",fontSize:15,fontWeight:"900"},iframeWrap:{flex:1},nativeMtFallback:{flex:1,alignItems:"center",justifyContent:"center"},toast:{position:"absolute",bottom:78,left:20,right:20,backgroundColor:"#203A4E",borderRadius:8,padding:9,zIndex:200},toastText:{color:"#fff",textAlign:"center",fontSize:10}
 });
+
 
