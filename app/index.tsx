@@ -70,7 +70,7 @@ function openThreads() {
 }
 
 type PatternInfo = {
-  type: "資料累積中" | "一房兩廳" | "單跳" | "雙跳" | "連龍" | "一般連" | "混合";
+  type: "資料累積中" | "單跳" | "單跳已破" | "雙跳" | "連龍" | "觀察中";
   label: string; side?: "莊" | "閒"; run?: number;
 };
 
@@ -99,43 +99,39 @@ function getPatternInfo(results: Result[]): PatternInfo {
   const seq = roadSides(results);
   const runs = columnRuns(results);
   if (seq.length < 3 || !runs.length) return { type: "資料累積中", label: "資料累積中" };
+
   const lastRun = runs[runs.length - 1];
 
-  // 使用實際大路「柱」判斷，不再只抓 raw results 最後三顆。
-  // 使用者規則：連 4 起才叫龍；連 2/3 只叫連。
-  if (lastRun.length >= 4) return { type: "連龍", label: `${lastRun.side}龍${lastRun.length}顆`, side: lastRun.side, run: lastRun.length };
-
-  // 單跳：至少最近四柱都是 1 格。
-  if (tailAlternating(runs, 4, 1)) return { type: "單跳", label: "單跳", side: lastRun.side };
-
-  // 雙跳：至少最近三柱都是 2 格。
-  if (tailAlternating(runs, 3, 2)) return { type: "雙跳", label: "雙跳", side: lastRun.side };
-
-  // 兩閒一莊 / 兩莊一閒：
-  // 禁止只看最後 3 柱的 2-1-2 就命名。至少要看到兩次完整重複節奏，
-  // 才能確認這是一個持續牌型；否則視為轉型/混合路，再交由下三路與問路確認。
-  if (runs.length >= 6) {
-    const x = runs.slice(-6);
-    const twoPlayerOneBanker =
-      x[0].side === "閒" && x[0].length === 2 &&
-      x[1].side === "莊" && x[1].length === 1 &&
-      x[2].side === "閒" && x[2].length === 2 &&
-      x[3].side === "莊" && x[3].length === 1 &&
-      x[4].side === "閒" && x[4].length === 2 &&
-      x[5].side === "莊" && x[5].length === 1;
-    const twoBankerOnePlayer =
-      x[0].side === "莊" && x[0].length === 2 &&
-      x[1].side === "閒" && x[1].length === 1 &&
-      x[2].side === "莊" && x[2].length === 2 &&
-      x[3].side === "閒" && x[3].length === 1 &&
-      x[4].side === "莊" && x[4].length === 2 &&
-      x[5].side === "閒" && x[5].length === 1;
-    if (twoPlayerOneBanker) return { type: "一房兩廳", label: "兩閒一莊", side: "閒" };
-    if (twoBankerOnePlayer) return { type: "一房兩廳", label: "兩莊一閒", side: "莊" };
+  // 固定規則：同邊 1~3 顆不命名為「連」；第 4 顆起才叫龍。
+  if (lastRun.length >= 4) {
+    return { type: "連龍", label: `${lastRun.side}龍${lastRun.length}顆`, side: lastRun.side, run: lastRun.length };
   }
 
-  if (lastRun.length >= 2) return { type: "一般連", label: `${lastRun.side}連${lastRun.length}`, side: lastRun.side, run: lastRun.length };
-  return { type: "混合", label: "轉型／混合路", side: lastRun.side };
+  // 長單跳優先：只要目前尾段仍是連續 1 格柱，就維持「單跳」。
+  let singleTail = 0;
+  for (let i = runs.length - 1; i >= 0 && runs[i].length === 1; i--) singleTail++;
+  if (singleTail >= 4) {
+    return { type: "單跳", label: "單跳", side: lastRun.side };
+  }
+
+  // 若上一段已經形成長單跳，而最新一柱變成 2/3 格，只表示單跳剛被破壞，
+  // 絕不能改叫「莊連2 / 閒連2 / 莊連3 / 閒連3」。
+  if (lastRun.length >= 2 && lastRun.length <= 3) {
+    let previousSingles = 0;
+    for (let i = runs.length - 2; i >= 0 && runs[i].length === 1; i--) previousSingles++;
+    if (previousSingles >= 4) {
+      return { type: "單跳已破", label: "單跳已破", side: lastRun.side, run: lastRun.length };
+    }
+  }
+
+  // 雙跳必須是實際大路尾段至少 3 柱連續 2 格，不能靠零碎 2 格硬湊。
+  if (tailAlternating(runs, 3, 2)) {
+    return { type: "雙跳", label: "雙跳", side: lastRun.side };
+  }
+
+  // 「兩閒一莊 / 一房兩廳」先不靠簡單 2-1 柱長猜，避免再次誤判。
+  // 沒有符合已確認規則時，只顯示觀察中，不發明牌型名稱。
+  return { type: "觀察中", label: "牌型觀察中", side: lastRun.side };
 }
 
 function derivedTailPreference(results: Result[], offset: 1 | 2 | 3): "莊" | "閒" | null {
@@ -192,10 +188,8 @@ function roadDecision(results: Result[]) {
     if (last === "莊") p += 4; else b += 4;
   } else if (info.type === "雙跳") {
     if (last === "莊") b += 4; else p += 4;
-  } else if (info.type === "一房兩廳" && info.side) {
-    if (info.side === "莊") b += 3; else p += 3;
-  } else if (info.type === "一般連") {
-    if (last === "莊") b += 2; else p += 2;
+  } else if (info.type === "單跳已破") {
+    // 單跳剛破型時不把 2/3 顆當成連；交由三條下三路＋問路決定。
   }
 
   // 全路段柱型微量參考，避免只看尾端。
@@ -615,6 +609,7 @@ export default function HomeScreen(){
   const [peakBankroll,setPeakBankroll]=useState(100000);
   const lastBetReportOrderRef=useRef<string>("");
   const betReportPrimedRef=useRef(false);
+  const betReportSessionStartRef=useRef<number>(Date.now());
   const processedBetSnRef=useRef<Set<string>>(new Set());
   const orbPosition=useRef(new Animated.ValueXY()).current;
   const panelPosition=useRef(new Animated.ValueXY()).current;
@@ -810,6 +805,14 @@ export default function HomeScreen(){
       )
     );
   };
+  const orderTimeOf=(o:any)=>{
+    const raw=o?.created_at??o?.settled_at??o?.updated_at??o?.time??0;
+    if(typeof raw==="number")return raw>1e12?raw:raw*1000;
+    const n=Number(raw);
+    if(Number.isFinite(n)&&n>0)return n>1e12?n:n*1000;
+    const d=Date.parse(String(raw??""));
+    return Number.isFinite(d)?d:0;
+  };
   const orderIdOf=(o:any)=>String(o?.betSn??o?.bet_sn??o?.no??o?.order_no??o?.orderNumber??o?.id??"");
   const mainBetSlipsOf=(o:any)=>Array.isArray(o?.slips)
     ? o.slips.filter((x:any)=>["莊","閒","BANKER","PLAYER"].includes(String(x?.content_name??x?.contentName??"").toUpperCase()) || ["莊","閒"].includes(String(x?.content_name??x?.contentName??"")))
@@ -847,71 +850,93 @@ export default function HomeScreen(){
   };
   const applyBetReport=(payload:any)=>{
     const allOrders=readBetReportOrders(payload);
-    if(!allOrders.length){appendEvent("投注報表：目前沒有注單");return;}
+    if(!allOrders.length){
+      appendEvent("📥 BET HISTORY｜0 筆");
+      return;
+    }
 
-    // Only status=3 (or an explicit completed state) may enter settlement logic.
-    const settled=allOrders.filter(orderSettled);
+    const sorted=[...allOrders].sort((a,b)=>orderTimeOf(a)-orderTimeOf(b));
+    const newest=sorted[sorted.length-1];
+    const newestId=orderIdOf(newest);
+    lastBetReportOrderRef.current=newestId;
 
-    // Establish historical baseline once per app session.
-    // Importantly, unfinished rows are NOT added to processed.
+    appendEvent(`📥 BET HISTORY｜${allOrders.length} 筆｜最新 ${newestId||"—"}｜status ${String(newest?.status??"—")}`);
+
+    const settled=sorted.filter(orderSettled);
+
+    // 第一份報表只把「本次主連線建立以前」的歷史單設成基準。
+    // 關鍵：如果第一份報表拖到下注結算後才回來，連線後產生的新單不能被基準吞掉。
     if(!betReportPrimedRef.current){
       betReportPrimedRef.current=true;
+      let baseline=0;
       for(const o of settled){
         const id=orderIdOf(o);
-        if(id)processedBetSnRef.current.add(id);
+        const t=orderTimeOf(o);
+        if(id && t>0 && t < betReportSessionStartRef.current-1000){
+          processedBetSnRef.current.add(id);
+          baseline++;
+        }
       }
-      appendEvent(`投注報表即時同步啟動｜已結算基準 ${settled.length} 筆`);
-      return;
+      appendEvent(`投注報表基準完成｜歷史 ${baseline} 筆｜連線後新單保留檢查`);
     }
 
     const fresh=settled
       .filter(o=>{
         const id=orderIdOf(o);
-        return id&&!processedBetSnRef.current.has(id);
+        return !!id && !processedBetSnRef.current.has(id);
       })
-      .sort((a,b)=>Number(a?.created_at??0)-Number(b?.created_at??0));
+      .sort((a,b)=>orderTimeOf(a)-orderTimeOf(b));
 
     for(const o of fresh){
       const id=orderIdOf(o);
       const pnl=orderPnlOf(o);
       const amount=Math.round(orderBetOf(o));
+      const main=mainBetSlipsOf(o);
 
-      // Do not consume the betSn until settlement has actually been understood.
-      if(!id||pnl===null){
-        if(id)appendEvent(`注單 ${id} 已結算，但本注輸贏尚無法解析，保留等待下次`);
+      // 已結算但本注還解析不到：絕不 processed，下一次繼續抓。
+      if(!id || pnl===null || !main.length){
+        if(id)appendEvent(`⏳ ${id}｜status 3｜本注資料尚未完整，保留等待`);
         continue;
       }
 
-      const main=mainBetSlipsOf(o);
-      const side=String(main?.[0]?.content_name??"")==="閒"?"閒":"莊";
+      const rawSide=String(main[0]?.content_name??main[0]?.contentName??"").toUpperCase();
+      const side:BetSide=(rawSide==="閒"||rawSide==="PLAYER")?"閒":"莊";
+      const refund=main.reduce((sum:number,x:any)=>{
+        const n=Number(String(x?.refund??x?.win??0).replace(/,/g,""));
+        return sum+(Number.isFinite(n)?n:0);
+      },0);
+
+      appendEvent(`結算確認｜${id}｜${side} ${amount}｜refund ${Math.round(refund)}｜PNL ${Math.round(pnl)}`);
 
       if(pnl===0){
-        appendEvent(`即時結算｜${id}｜本注 ${amount}｜0｜和/退注，馬丁不變`);
+        appendEvent(`馬丁｜和/退注｜維持第 ${strategyLevel+1} 階`);
         processedBetSnRef.current.add(id);
+        appendEvent(`processed｜${id}`);
         continue;
       }
 
       const win=pnl>0;
       setBankroll(v=>Math.round(v+pnl));
       setRecords(r=>[{
-        side:side as BetSide,
+        side,
         result:(win?side:(side==="閒"?"莊":"閒")) as Result,
         amount,
         pnl:Math.round(pnl),
         at:Date.now()
       },...r].slice(0,30));
 
-      // Update the EXISTING Martingale state first.
+      // 只更新原本的 Martingale state。LOSE +1；WIN 回第 1 階；不設上限。
       setStrategyLevel(level=>{
         const nextLevel=win?0:level+1;
         const nextStake=baseBet*(Math.pow(2,nextLevel+1)-1);
-        appendEvent(`即時結算｜${id}｜本注 ${amount}｜${pnl>0?"+":""}${Math.round(pnl)}｜${win?"WIN":"LOSE"}`);
-        appendEvent(`馬丁｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
+        appendEvent(`即時結算｜${id}｜${win?"WIN":"LOSE"}｜第 ${level+1} 階 → 第 ${nextLevel+1} 階`);
+        appendEvent(`下一注｜${Math.round(nextStake).toLocaleString()}`);
         return nextLevel;
       });
 
-      // Mark processed only AFTER the Martingale update has been queued.
+      // 一定最後才 processed。
       processedBetSnRef.current.add(id);
+      appendEvent(`processed｜${id}`);
     }
   };
 
@@ -932,6 +957,8 @@ export default function HomeScreen(){
       return;
     }
     awaitingFreshSnapshotRef.current=true;
+    betReportSessionStartRef.current=Date.now();
+    betReportPrimedRef.current=false;
     const ws=new WebSocket(wsUrl);setSocket(ws);let authenticated=false,subscribed=false;
     const requestTables=(quiet=false)=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/tables",data:{gametype_id:3,game_id:1,room_id:1}}}));if(!quiet)appendEvent("已請求 15 桌歷史牌局")}};
     const requestSvg=()=>authenticated&&ws.readyState===WebSocket.OPEN&&ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));
@@ -941,6 +968,7 @@ export default function HomeScreen(){
     let betReportTimer:ReturnType<typeof setInterval>|null=null;
     let betReportInFlight=false;
     let betReportRequestAt=0;
+    let betReportRequestSeq=0;
 
     const reportPayload=()=>{
       const now=new Date();
@@ -967,15 +995,19 @@ export default function HomeScreen(){
 
     const requestBetReport=()=>{
       if(!authenticated||ws.readyState!==WebSocket.OPEN)return;
-      // 只共用現有主 WS，不建立第二條線，也不重新驗證。
-      // 報表請求序列化，避免大量請求干擾 MT。
-      if(betReportInFlight){
-        if(Date.now()-betReportRequestAt<2200)return;
-        betReportInFlight=false;
-      }
+      if(betReportInFlight && Date.now()-betReportRequestAt<700)return;
+
+      // 舊請求超過 0.7 秒只解除「報表鎖」，不動主 WebSocket。
       betReportInFlight=true;
       betReportRequestAt=Date.now();
-      try{ws.send(JSON.stringify(reportPayload()))}catch{betReportInFlight=false}
+      const seq=++betReportRequestSeq;
+      appendEvent(`📤 BET HISTORY #${seq}`);
+
+      try{
+        ws.send(JSON.stringify(reportPayload()));
+      }catch{
+        betReportInFlight=false;
+      }
     };
 
     const startBetReportRefresh=()=>{
@@ -986,24 +1018,13 @@ export default function HomeScreen(){
     };
 
     const refreshBetReportAfterSettlement=(tableId?:string)=>{
-      // 每桌收到正式開牌結果，只把它當成「檢查本人投注報表」的觸發器。
-      // 不用桌面結果直接判定本人輸贏；最終仍以 bet/history 的本注實際結算為準。
-      appendEvent(`開牌${tableId?` ${tableId}`:""} → 檢查投注報表`);
+      appendEvent(`🎲 ${tableId||"牌桌"} show_win → 檢查投注報表`);
 
-      const checkReport=(delay:number)=>setTimeout(()=>{
-        // 報表請求仍共用唯一已 authenticate 的主 WS。
-        // 絕不 close / reconnect / 再 authenticate。
-        if(betReportInFlight && Date.now()-betReportRequestAt>=700){
-          betReportInFlight=false;
-        }
-        requestBetReport();
-      },delay);
-
-      // 立即抓；考慮後台結算寫入稍慢，再補抓 0.9 / 2.2 / 4.5 秒。
-      checkReport(0);
-      checkReport(900);
-      checkReport(2200);
-      checkReport(4500);
+      // show_win 是主要觸發。報表可能延遲寫入，因此在同一條 WS 上短暫補查。
+      // 任何一次都禁止 close / reconnect / authenticate。
+      [0,1000,2200,4500].forEach(delay=>{
+        setTimeout(()=>requestBetReport(),delay);
+      });
     };
 
     const startDealerRefresh=()=>{
@@ -1013,22 +1034,9 @@ export default function HomeScreen(){
     const subscribe=()=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/mulitple_join",data:{table_id:baccaratTableIds.join(",")}}}));subscribed=true;appendEvent("已訂閱 15 桌即時事件")}};
     ws.onopen=()=>{appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
     ws.onmessage=e=>{try{
-      // TEMP: 下注封包偵測，只記錄可能相關的原始訊息，不改變既有即時處理。
-      try{
-        const raw=typeof e?.data==="string"?e.data:JSON.stringify(e?.data??"");
-        const low=raw.toLowerCase();
-        const wagerWords=["bet","wager","stake","betting","bet_amount","betamount","banker","player","莊","閒","user_id","userid","member","account"];
-        if(wagerWords.some(k=>low.includes(k))){
-          const clipped=raw.length>1800?raw.slice(0,1800)+" …":raw;
-          appendEvent("🔎 下注偵測："+clipped);
-        }
-      }catch{}
       const p=JSON.parse(e.data),name=eventName(p);
         if(isBetReportPayload(p)){
           betReportInFlight=false;
-          const reportOrders=readBetReportOrders(p);
-          const newest=reportOrders[0];
-          appendEvent(`報表回傳｜${reportOrders.length} 筆${newest?`｜最新 ${orderIdOf(newest)||"—"}｜status ${String(newest?.status??"—")}`:""}`);
           applyBetReport(p);
           return;
         }
@@ -1062,9 +1070,8 @@ export default function HomeScreen(){
           if(serverResults.length!==local.results.length||serverResults.some((r,i)=>r!==local.results[i])){mismatchTable=id;break}
         }
 
-        if(mismatchTable&&!reconnectingRef.current&&Date.now()>=reconnectCooldownUntilRef.current){
-          reconnectingRef.current=true;
-          reconnectTimerRef.current=setTimeout(()=>startConnection(`${mismatchTable} 本靴牌路與 MT snapshot 不一致`),250);
+        if(mismatchTable){
+          appendEvent(`牌路 snapshot 差異｜${mismatchTable}（保持連線，等待下一份資料校正）`);
           // Keep the currently displayed road until the fresh connection confirms it.
           return c;
         }
@@ -1159,7 +1166,7 @@ const s=StyleSheet.create({
   tableBody:{flexDirection:"row",height:176,backgroundColor:"#fff",overflow:"hidden"},tableBodyDesktop:{height:190},tableBodyMobile:{height:164},dealer:{width:112,backgroundColor:"#F2F0EC",padding:4,justifyContent:"flex-end"},dealerDesktop:{width:"21.88%"},dealerMobile:{width:"21.88%",minWidth:76},photo:{position:"absolute",top:3,left:3,right:3,height:112,backgroundColor:"#DCE2E6",alignItems:"center",justifyContent:"center",overflow:"hidden"},photoDesktop:{height:"82%"},photoMobile:{height:"80%"},photoImage:{width:"100%",height:"100%",resizeMode:"cover"},crown:{fontSize:30,color:"#C5A24C"},dealerName:{color:"#fff",backgroundColor:"#873B96",alignSelf:"flex-start",paddingHorizontal:5,paddingVertical:2,fontSize:11,fontWeight:"900",lineHeight:14},meta:{color:"#526371",fontSize:8.5,fontWeight:"700",lineHeight:11,marginTop:1},
   roadArea:{flex:1,flexDirection:"row",backgroundColor:"#fff",minWidth:0,overflow:"hidden"},roadAreaDesktop:{},beadPane:{width:"32%",height:"100%",flexShrink:0,borderRightWidth:1,borderColor:"#C9D2D9",overflow:"hidden",backgroundColor:"#FFFFFF"},beadPaneDesktop:{width:"32%"},beadGrid:{width:"100%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",backgroundColor:"#FFFFFF"},beadCell:{width:"16.6666667%",height:"16.6666667%",flexGrow:0,flexShrink:0,borderRightWidth:1,borderBottomWidth:1,borderColor:"#D9DEE3",alignItems:"center",justifyContent:"center",backgroundColor:"#FFFFFF"},beadCellDesktop:{},beadDot:{width:"72%",aspectRatio:1,borderRadius:999,borderWidth:1,alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:.10,shadowRadius:1,elevation:1},beadDotDesktop:{width:"70%"},beadDotText:{color:"#FFFFFF",fontSize:8,fontWeight:"900",lineHeight:10,textAlign:"center"},beadDotTextDesktop:{fontSize:9,lineHeight:11},roadStack:{flex:1,minWidth:0,height:"100%"},bigGrid:{width:"100%",height:"62%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch"},bigGridDesktop:{},bigCell:{width:"6.6666667%",height:"16.6666667%",borderRightWidth:1,borderBottomWidth:1,borderColor:"#DDE4E9",alignItems:"center",justifyContent:"center",overflow:"hidden"},bigCellDesktop:{},bigMark:{width:"72%",maxWidth:"78%",aspectRatio:1,borderRadius:999,borderWidth:1.35,backgroundColor:"transparent",alignItems:"center",justifyContent:"center"},bigMarkDesktop:{width:"70%",borderWidth:1.2},tieNumber:{color:"#20B66B",fontSize:7,fontWeight:"900",lineHeight:8},tieNumberDesktop:{fontSize:7,lineHeight:8},lowerArea:{width:"100%",height:"38%",flexDirection:"row",borderTopWidth:1,borderTopColor:"#CCD6DE"},lowerAreaDesktop:{},lowerPane:{width:"33.333333%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",borderRightWidth:1,borderRightColor:"#DDE4E9"},lowerCell:{width:"10%",height:"16.6666667%",alignItems:"center",justifyContent:"center",borderRightWidth:.5,borderBottomWidth:.5,borderColor:"#E4E8EB",overflow:"hidden"},lowerCellDesktop:{},lowerHollow:{width:"55%",aspectRatio:1,borderRadius:999,borderWidth:1.4,backgroundColor:"transparent"},lowerSolid:{width:"52%",aspectRatio:1,borderRadius:999},lowerSlash:{width:"58%",height:2,borderRadius:2,transform:[{rotate:"-45deg"}]},
   orb:{position:"absolute",right:16,bottom:24,zIndex:90,width:50,height:50,borderRadius:25,backgroundColor:"#153B59",borderWidth:2,borderColor:"#66A9F1",alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:.45,shadowRadius:9,elevation:12,touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},orbMt:{bottom:34},orbStatus:{position:"absolute",right:4,top:4,width:8,height:8,borderRadius:4,borderWidth:1,borderColor:"#fff"},
-  floatPanel:{position:"absolute",right:74,bottom:22,zIndex:100,backgroundColor:"rgba(13,26,39,.96)",borderWidth:1,borderColor:"#385975",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:14,elevation:15},floatPanelMt:{zIndex:9999},floatHeader:{height:38,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#14283B",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},floatHeadLeft:{flexDirection:"row",alignItems:"center",gap:8},floatTitle:{color:"#F0F5F9",fontWeight:"900",fontSize:12},floatStatus:{color:"#56D48C",fontSize:8},iconBtn:{width:27,height:27,borderRadius:5,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},iconTextBtn:{height:27,paddingHorizontal:7,borderRadius:5,backgroundColor:"#214A70",flexDirection:"row",gap:3,alignItems:"center"},iconText:{color:"#fff",fontSize:8,fontWeight:"800"},selectorWrap:{marginHorizontal:6,marginTop:6,position:"relative",zIndex:130},selector:{height:38,paddingHorizontal:9,borderWidth:1,borderColor:"#31516B",borderRadius:5,backgroundColor:"#09151F",flexDirection:"row",alignItems:"center",justifyContent:"space-between"},selectorLeft:{flexDirection:"row",alignItems:"center",gap:4},selectorValue:{color:"#F0F5F8",fontSize:11,fontWeight:"900"},selectorMeta:{color:"#B6C5D0",fontSize:9},roomDropdown:{position:"absolute",left:0,right:0,top:42,maxHeight:205,backgroundColor:"#0A1722",borderWidth:1,borderColor:"#345A76",borderRadius:6,zIndex:160,elevation:30,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:10},roomDropdownScroll:{height:205,maxHeight:205,overflow:"scroll"},roomDropdownContent:{paddingBottom:2},roomDropdownItem:{minHeight:42,paddingHorizontal:10,paddingVertical:5,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#183044"},roomDropdownItemActive:{backgroundColor:"#1B5B88"},roomDropdownLeft:{flex:1,minWidth:0,paddingRight:8},roomDropdownText:{color:"#EDF5FA",fontSize:10,fontWeight:"900"},roomDropdownDealer:{color:"#AFC1CD",fontSize:8,marginTop:2},roomDropdownMeta:{color:"#8EA7B9",fontSize:8,fontWeight:"800"},assistPage:{padding:6,minHeight:150},decisionRow:{flexDirection:"row",gap:5},decisionBox:{flex:1,minHeight:68,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,padding:7},smallLabel:{color:"#FFFFFF",fontSize:12,fontWeight:"900"},latestLine:{flexDirection:"row",alignItems:"center",gap:7,marginTop:7},glowDot:{width:17,height:17,borderRadius:8.5,shadowOpacity:1,shadowRadius:10,elevation:8},latestText:{fontSize:16,fontWeight:"900"},detectText:{color:"#FFFFFF",fontSize:14,fontWeight:"900",marginTop:7},recommendText:{fontSize:17,fontWeight:"900",marginTop:7},microText:{color:"#FFFFFF",fontSize:12,fontWeight:"900",marginTop:4},aiBox:{marginTop:5,backgroundColor:"#0B1925",borderRadius:5,padding:7},aiTitle:{color:"#B7D3E6",fontSize:11,fontWeight:"900"},aiText:{color:"#C6D2DB",fontSize:11,lineHeight:17,marginTop:5},moneyGrid:{flexDirection:"row",gap:5},fieldBox:{flex:1,backgroundColor:"#102335",borderRadius:5,padding:7,minHeight:58},moneyInput:{color:"#fff",fontSize:13,fontWeight:"900",padding:0,marginTop:5},nextAmount:{color:"#54D79A",fontSize:15,fontWeight:"900",marginTop:6},strategyScroll:{marginTop:6,maxHeight:30},strategyRow:{gap:4},strategyChip:{height:25,paddingHorizontal:8,borderRadius:4,backgroundColor:"#172B3B",justifyContent:"center"},strategyChipActive:{backgroundColor:"#2B78B5"},strategyChipText:{color:"#AABCC8",fontSize:7.5,fontWeight:"800"},progressBox:{marginTop:6,backgroundColor:"#0B1925",borderRadius:5,padding:7},progressText:{color:"#DDE9F0",fontSize:9,fontWeight:"800",marginTop:4},recommendHeader:{flexDirection:"row",alignItems:"center",justifyContent:"space-between"},martinResetMini:{paddingHorizontal:7,height:20,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetMiniText:{color:"#fff",fontSize:8,fontWeight:"900"},martinResetBtn:{marginTop:7,height:27,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetText:{color:"#fff",fontSize:9,fontWeight:"900"},betButtons:{flexDirection:"row",gap:5},betBtn:{flex:1,height:38,borderRadius:5,alignItems:"center",justifyContent:"center"},betBtnText:{color:"#fff",fontSize:12,fontWeight:"900"},statsGrid:{marginTop:6,backgroundColor:"#102335",borderRadius:5,padding:7,flexDirection:"row",justifyContent:"space-between"},statsValue:{color:"#fff",fontSize:11,fontWeight:"900",marginTop:3},recordBar:{marginTop:5,flexDirection:"row",justifyContent:"space-between",alignItems:"center"},resetText:{color:"#51BDF1",fontSize:8,fontWeight:"900"},historyRow:{gap:4,marginTop:5},historyChip:{backgroundColor:"#142A3B",borderRadius:4,paddingHorizontal:6,paddingVertical:4},pageDots:{height:19,flexDirection:"row",gap:7,alignItems:"center",justifyContent:"center"},pageDot:{width:6,height:6,borderRadius:3,backgroundColor:"#526574"},pageDotActive:{backgroundColor:"#fff"},resizeHandle:{position:"absolute",right:0,bottom:0,width:34,height:34,borderTopLeftRadius:9,backgroundColor:"#153A55",borderLeftWidth:1,borderTopWidth:1,borderColor:"#4C7896",alignItems:"center",justifyContent:"center",zIndex:190,cursor:"nwse-resize" as any},resizeText:{color:"#9CC5E4",fontSize:7,fontWeight:"900"},
+  floatPanel:{position:"absolute",right:74,bottom:22,zIndex:100,backgroundColor:"rgba(13,26,39,.96)",borderWidth:1,borderColor:"#385975",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:14,elevation:15},floatPanelMt:{zIndex:9999},floatHeader:{height:38,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#14283B",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},floatHeadLeft:{flexDirection:"row",alignItems:"center",gap:8},floatTitle:{color:"#F0F5F9",fontWeight:"900",fontSize:12},floatStatus:{color:"#56D48C",fontSize:8},iconBtn:{width:27,height:27,borderRadius:5,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},iconTextBtn:{height:27,paddingHorizontal:7,borderRadius:5,backgroundColor:"#214A70",flexDirection:"row",gap:3,alignItems:"center"},iconText:{color:"#fff",fontSize:8,fontWeight:"800"},selectorWrap:{marginHorizontal:6,marginTop:6,position:"relative",zIndex:130},selector:{height:38,paddingHorizontal:9,borderWidth:1,borderColor:"#31516B",borderRadius:5,backgroundColor:"#09151F",flexDirection:"row",alignItems:"center",justifyContent:"space-between"},selectorLeft:{flexDirection:"row",alignItems:"center",gap:4},selectorValue:{color:"#F0F5F8",fontSize:11,fontWeight:"900"},selectorMeta:{color:"#B6C5D0",fontSize:9},roomDropdown:{position:"absolute",left:0,right:0,top:42,maxHeight:205,backgroundColor:"#0A1722",borderWidth:1,borderColor:"#345A76",borderRadius:6,zIndex:160,elevation:30,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:10},roomDropdownScroll:{height:205,maxHeight:205,overflow:"scroll"},roomDropdownContent:{paddingBottom:2},roomDropdownItem:{minHeight:42,paddingHorizontal:10,paddingVertical:5,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#183044"},roomDropdownItemActive:{backgroundColor:"#1B5B88"},roomDropdownLeft:{flex:1,minWidth:0,paddingRight:8},roomDropdownText:{color:"#EDF5FA",fontSize:10,fontWeight:"900"},roomDropdownDealer:{color:"#AFC1CD",fontSize:8,marginTop:2},roomDropdownMeta:{color:"#8EA7B9",fontSize:8,fontWeight:"800"},assistPage:{padding:6,minHeight:150},decisionRow:{flexDirection:"row",gap:5},decisionBox:{flex:1,minHeight:68,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,padding:7},smallLabel:{color:"#FFFFFF",fontSize:13,fontWeight:"900"},latestLine:{flexDirection:"row",alignItems:"center",gap:7,marginTop:7},glowDot:{width:17,height:17,borderRadius:8.5,shadowOpacity:1,shadowRadius:10,elevation:8},latestText:{fontSize:16,fontWeight:"900"},detectText:{color:"#FFFFFF",fontSize:14,fontWeight:"900",marginTop:7},recommendText:{fontSize:17,fontWeight:"900",marginTop:7},microText:{color:"#FFFFFF",fontSize:13,fontWeight:"900",marginTop:4},aiBox:{marginTop:5,backgroundColor:"#0B1925",borderRadius:5,padding:7},aiTitle:{color:"#B7D3E6",fontSize:11,fontWeight:"900"},aiText:{color:"#C6D2DB",fontSize:11,lineHeight:17,marginTop:5},moneyGrid:{flexDirection:"row",gap:5},fieldBox:{flex:1,backgroundColor:"#102335",borderRadius:5,padding:7,minHeight:58},moneyInput:{color:"#fff",fontSize:13,fontWeight:"900",padding:0,marginTop:5},nextAmount:{color:"#54D79A",fontSize:15,fontWeight:"900",marginTop:6},strategyScroll:{marginTop:6,maxHeight:30},strategyRow:{gap:4},strategyChip:{height:25,paddingHorizontal:8,borderRadius:4,backgroundColor:"#172B3B",justifyContent:"center"},strategyChipActive:{backgroundColor:"#2B78B5"},strategyChipText:{color:"#AABCC8",fontSize:7.5,fontWeight:"800"},progressBox:{marginTop:6,backgroundColor:"#0B1925",borderRadius:5,padding:7},progressText:{color:"#DDE9F0",fontSize:9,fontWeight:"800",marginTop:4},recommendHeader:{flexDirection:"row",alignItems:"center",justifyContent:"space-between"},martinResetMini:{paddingHorizontal:7,height:20,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetMiniText:{color:"#fff",fontSize:8,fontWeight:"900"},martinResetBtn:{marginTop:7,height:27,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetText:{color:"#fff",fontSize:9,fontWeight:"900"},betButtons:{flexDirection:"row",gap:5},betBtn:{flex:1,height:38,borderRadius:5,alignItems:"center",justifyContent:"center"},betBtnText:{color:"#fff",fontSize:12,fontWeight:"900"},statsGrid:{marginTop:6,backgroundColor:"#102335",borderRadius:5,padding:7,flexDirection:"row",justifyContent:"space-between"},statsValue:{color:"#fff",fontSize:11,fontWeight:"900",marginTop:3},recordBar:{marginTop:5,flexDirection:"row",justifyContent:"space-between",alignItems:"center"},resetText:{color:"#51BDF1",fontSize:8,fontWeight:"900"},historyRow:{gap:4,marginTop:5},historyChip:{backgroundColor:"#142A3B",borderRadius:4,paddingHorizontal:6,paddingVertical:4},pageDots:{height:19,flexDirection:"row",gap:7,alignItems:"center",justifyContent:"center"},pageDot:{width:6,height:6,borderRadius:3,backgroundColor:"#526574"},pageDotActive:{backgroundColor:"#fff"},resizeHandle:{position:"absolute",right:0,bottom:0,width:34,height:34,borderTopLeftRadius:9,backgroundColor:"#153A55",borderLeftWidth:1,borderTopWidth:1,borderColor:"#4C7896",alignItems:"center",justifyContent:"center",zIndex:190,cursor:"nwse-resize" as any},resizeText:{color:"#9CC5E4",fontSize:7,fontWeight:"900"},
   loginScreen:{flex:1,backgroundColor:"#020A12",alignItems:"center",justifyContent:"center",padding:18,overflow:"hidden"},loginVideo:{...StyleSheet.absoluteFillObject},loginShade:{...StyleSheet.absoluteFillObject,backgroundColor:"rgba(2,10,18,.46)"},loginPanel:{width:"100%",maxWidth:480,backgroundColor:"rgba(7,31,44,.76)",borderWidth:1,borderColor:"rgba(82,151,177,.62)",borderRadius:18,padding:18,shadowColor:"#000",shadowOpacity:.4,shadowRadius:20,elevation:14},loginTopline:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:26},loginTopText:{color:"#A9BED0",fontSize:9,letterSpacing:1.8,fontWeight:"700"},loginSafe:{color:"#39E0B0",fontSize:9,fontWeight:"800"},loginHero:{flexDirection:"row",alignItems:"stretch",width:"100%",marginBottom:16,minHeight:112},loginHeroMobile:{minHeight:108},loginBrandMobile:{flex:1.9,gap:8,paddingRight:7},loginTitleMobile:{fontSize:23,letterSpacing:-.45},threadsCardMobile:{flex:.82,minWidth:166,marginLeft:7,paddingHorizontal:10},loginBrand:{flex:1.9,flexDirection:"row",alignItems:"center",justifyContent:"flex-start",gap:13,paddingLeft:2,paddingRight:12},loginBrandCopy:{flexShrink:1},loginIcon:{width:56,height:56,borderRadius:14,borderWidth:1,borderColor:"#D5A82F",alignItems:"center",justifyContent:"center",backgroundColor:"rgba(245,198,74,.08)"},loginKicker:{color:"#8DB4CE",fontSize:10,letterSpacing:1.5,fontWeight:"800"},loginTitle:{color:"#F5F8FA",fontSize:28,fontWeight:"900",marginTop:5},loginSub:{color:"#91A7B8",fontSize:11.5,marginTop:4},loginSubMobile:{fontSize:9.5,letterSpacing:-.2},loginHeroDivider:{width:1,marginVertical:7,backgroundColor:"rgba(111,169,197,.25)"},threadsCard:{flex:.9,minWidth:142,marginLeft:13,paddingHorizontal:14,paddingVertical:9,borderRadius:15,borderWidth:1,borderColor:"rgba(108,177,205,.40)",backgroundColor:"rgba(3,18,29,.32)",justifyContent:"center"},threadsHead:{flexDirection:"row",alignItems:"center",gap:6},threadsLogo:{width:32,height:32,borderRadius:9,borderWidth:1,borderColor:"rgba(224,243,255,.52)",backgroundColor:"rgba(255,255,255,.07)",alignItems:"center",justifyContent:"center"},threadsLogoText:{color:"#F5FBFF",fontSize:22,fontWeight:"900",lineHeight:26},threadsLabel:{color:"#A9C4D6",fontSize:9,fontWeight:"900",letterSpacing:1.35},threadsName:{color:"#F5F9FC",fontSize:17,fontWeight:"900",marginTop:6},threadsAccount:{color:"#56D7D0",fontSize:14,fontWeight:"900",marginTop:1},threadsFollow:{height:34,marginTop:6,borderRadius:8,borderWidth:1,borderColor:"rgba(78,192,235,.65)",backgroundColor:"rgba(23,128,180,.22)",flexDirection:"row",alignItems:"center",justifyContent:"center",gap:4},threadsFollowPressed:{opacity:.72,transform:[{scale:.985}]},threadsFollowText:{color:"#EAF8FF",fontSize:10,fontWeight:"900",letterSpacing:1.15},loginDivider:{height:1,backgroundColor:"rgba(109,157,184,.32)",marginBottom:20},loginHint:{color:"#A7B8C5",fontSize:11,marginBottom:11},kickNotice:{color:"#FFB4B9",fontSize:10,fontWeight:"800",lineHeight:15,backgroundColor:"rgba(132,35,45,.22)",borderWidth:1,borderColor:"rgba(255,105,115,.35)",borderRadius:7,paddingHorizontal:10,paddingVertical:8,marginTop:-8,marginBottom:14},loginLabel:{color:"#B9C8D3",fontSize:11,fontWeight:"700",marginBottom:6},loginInput:{height:48,backgroundColor:"rgba(2,17,28,.68)",borderRadius:8,borderWidth:1,borderColor:"#385B70",color:"#fff",paddingHorizontal:14,fontSize:14,marginBottom:14},passwordWrap:{height:48,backgroundColor:"rgba(2,17,28,.68)",borderRadius:8,borderWidth:1,borderColor:"#385B70",flexDirection:"row",alignItems:"center",marginBottom:16},passwordInput:{flex:1,height:"100%",color:"#fff",paddingHorizontal:14,fontSize:14},eyeBtn:{width:46,height:"100%",alignItems:"center",justifyContent:"center"},loginBtn:{height:50,backgroundColor:"#168CEB",borderRadius:8,alignItems:"center",justifyContent:"center",flexDirection:"row",gap:8},loginBtnText:{color:"#fff",fontSize:14,fontWeight:"900"},error:{color:"#FF959C",fontSize:11,textAlign:"center",marginTop:10},loginFooterRow:{marginTop:10,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:7,flexWrap:"nowrap"},loginFooterLeft:{flexDirection:"row",alignItems:"center",gap:4},loginFooterDivider:{color:"rgba(145,171,188,.55)",fontSize:10},loginFoot:{color:"#71899A",fontSize:8.5,textAlign:"center"},loginHelp:{color:"#42B9F5",fontSize:10,fontWeight:"800",textAlign:"center",marginTop:0},
   modalShade:{flex:1,backgroundColor:"rgba(0,0,0,.72)",alignItems:"center",justifyContent:"center",padding:16},connectionModal:{width:"100%",maxWidth:760,maxHeight:"92%",backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},smallModal:{width:"100%",maxWidth:520,backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},modalHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:12},modalTitle:{color:"#fff",fontSize:17,fontWeight:"800"},modalNote:{color:"#BAC7D0",fontSize:10,lineHeight:15,backgroundColor:"#0C1721",padding:10,borderRadius:5,marginBottom:12},fieldLabel:{color:"#C6D3DC",fontSize:10,marginBottom:5,marginTop:8},modalInput:{height:42,borderWidth:1,borderColor:"#36536A",borderRadius:5,backgroundColor:"#08131D",color:"#fff",paddingHorizontal:10},mappingRow:{flexDirection:"row",gap:6,marginTop:10,flexWrap:"wrap"},mapChip:{color:"#C8D4DD",fontSize:9,backgroundColor:"#263A4C",paddingHorizontal:8,paddingVertical:6,borderRadius:4},modalActions:{flexDirection:"row",gap:7,marginTop:12,flexWrap:"wrap"},actionBtn:{height:38,paddingHorizontal:12,borderRadius:5,justifyContent:"center"},btnText:{color:"#fff",fontWeight:"900",fontSize:10},syncText:{color:"#AFC0CB",fontSize:9,marginTop:11},logBox:{height:130,backgroundColor:"#08131D",borderRadius:5,padding:9,marginTop:4},logText:{color:"#B8C8D2",fontSize:8,lineHeight:13},helpText:{color:"#D2DDE4",fontSize:11,lineHeight:18},
   mtScreen:{flex:1,backgroundColor:"#05090E"},mtTop:{minHeight:58,paddingHorizontal:14,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#10202D",borderBottomWidth:1,borderBottomColor:"#28465A"},mtTitle:{color:"#fff",fontSize:15,fontWeight:"900"},iframeWrap:{flex:1},nativeMtFallback:{flex:1,alignItems:"center",justifyContent:"center"},toast:{position:"absolute",bottom:78,left:20,right:20,backgroundColor:"#203A4E",borderRadius:8,padding:9,zIndex:200},toastText:{color:"#fff",textAlign:"center",fontSize:10}
