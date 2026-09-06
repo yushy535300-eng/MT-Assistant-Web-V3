@@ -622,6 +622,9 @@ export default function HomeScreen(){
   const [peakBankroll,setPeakBankroll]=useState(100000);
   const lastBetReportOrderRef=useRef<string>("");
   const betReportPrimedRef=useRef(false);
+  // First report response may arrive only after the current bet has already settled.
+  // Keep the connection start time so that first-response baselining never swallows a new order.
+  const betReportSessionStartRef=useRef<number>(Date.now());
   const processedBetSnRef=useRef<Set<string>>(new Set());
   const orbPosition=useRef(new Animated.ValueXY()).current;
   const panelPosition=useRef(new Animated.ValueXY()).current;
@@ -823,6 +826,14 @@ export default function HomeScreen(){
       )
     );
   };
+  const orderTimeOf=(o:any)=>{
+    const raw=o?.created_at??o?.settled_at??o?.updated_at??o?.time??0;
+    if(typeof raw==="number")return raw>1e12?raw:raw*1000;
+    const n=Number(raw);
+    if(Number.isFinite(n)&&n>0)return n>1e12?n:n*1000;
+    const d=Date.parse(String(raw??""));
+    return Number.isFinite(d)?d:0;
+  };
   const orderIdOf=(o:any)=>String(o?.betSn??o?.bet_sn??o?.no??o?.order_no??o?.orderNumber??o?.id??"");
   const mainBetSlipsOf=(o:any)=>Array.isArray(o?.slips)
     ? o.slips.filter((x:any)=>["莊","閒","BANKER","PLAYER"].includes(String(x?.content_name??x?.contentName??"").toUpperCase()) || ["莊","閒"].includes(String(x?.content_name??x?.contentName??"")))
@@ -862,44 +873,49 @@ export default function HomeScreen(){
     const allOrders=readBetReportOrders(payload);
     if(!allOrders.length){appendEvent("投注報表：目前沒有注單");return;}
 
-    // Only status=3 (or an explicit completed state) may enter settlement logic.
-    const settled=allOrders.filter(orderSettled);
+    const sorted=[...allOrders].sort((a,b)=>orderTimeOf(a)-orderTimeOf(b));
+    const settled=sorted.filter(orderSettled);
 
-    // Establish historical baseline once per app session.
-    // Importantly, unfinished rows are NOT added to processed.
+    // First response: baseline ONLY orders that definitely existed before this main WS session.
+    // This fixes the old bug where a newly-settled current bet was marked processed before Martingale saw it.
     if(!betReportPrimedRef.current){
       betReportPrimedRef.current=true;
+      let baseline=0;
       for(const o of settled){
         const id=orderIdOf(o);
-        if(id)processedBetSnRef.current.add(id);
+        const t=orderTimeOf(o);
+        if(id && t>0 && t < betReportSessionStartRef.current-1000){
+          processedBetSnRef.current.add(id);
+          baseline++;
+        }
       }
-      appendEvent(`投注報表即時同步啟動｜已結算基準 ${settled.length} 筆`);
-      return;
+      appendEvent(`投注報表基準完成｜歷史 ${baseline} 筆｜本次連線新單保留`);
     }
 
     const fresh=settled
       .filter(o=>{
         const id=orderIdOf(o);
-        return id&&!processedBetSnRef.current.has(id);
+        return !!id&&!processedBetSnRef.current.has(id);
       })
-      .sort((a,b)=>Number(a?.created_at??0)-Number(b?.created_at??0));
+      .sort((a,b)=>orderTimeOf(a)-orderTimeOf(b));
 
     for(const o of fresh){
       const id=orderIdOf(o);
       const pnl=orderPnlOf(o);
       const amount=Math.round(orderBetOf(o));
+      const main=mainBetSlipsOf(o);
 
-      // Do not consume the betSn until settlement has actually been understood.
-      if(!id||pnl===null){
-        if(id)appendEvent(`注單 ${id} 已結算，但本注輸贏尚無法解析，保留等待下次`);
+      // Main bet only. If the settled row is not complete yet, keep it unprocessed and retry next poll.
+      if(!id||pnl===null||!main.length){
+        if(id)appendEvent(`注單 ${id} 已結算，但莊/閒本注資料尚未完整，保留等待`);
         continue;
       }
 
-      const main=mainBetSlipsOf(o);
-      const side=String(main?.[0]?.content_name??"")==="閒"?"閒":"莊";
+      const rawSide=String(main[0]?.content_name??main[0]?.contentName??"").toUpperCase();
+      const side:BetSide=(rawSide==="閒"||rawSide==="PLAYER")?"閒":"莊";
 
       if(pnl===0){
-        appendEvent(`即時結算｜${id}｜本注 ${amount}｜0｜和/退注，馬丁不變`);
+        appendEvent(`即時結算｜${id}｜本注 ${amount}｜和/退注｜馬丁不變`);
         processedBetSnRef.current.add(id);
         continue;
       }
@@ -907,23 +923,26 @@ export default function HomeScreen(){
       const win=pnl>0;
       setBankroll(v=>Math.round(v+pnl));
       setRecords(r=>[{
-        side:side as BetSide,
+        side,
         result:(win?side:(side==="閒"?"莊":"閒")) as Result,
         amount,
         pnl:Math.round(pnl),
         at:Date.now()
       },...r].slice(0,30));
 
-      // Update the EXISTING Martingale state first.
-      setStrategyLevel(level=>{
-        const nextLevel=win?0:level+1;
-        const nextStake=baseBet*(Math.pow(2,nextLevel+1)-1);
-        appendEvent(`即時結算｜${id}｜本注 ${amount}｜${pnl>0?"+":""}${Math.round(pnl)}｜${win?"WIN":"LOSE"}`);
-        appendEvent(`馬丁｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
-        return nextLevel;
-      });
+      // Martingale uses ONLY actual settled Banker/Player main-bet P/L.
+      // LOSE = +1 level, WIN = level 1, no cap. 1/3/7/15/31/...
+      if(strategy==="馬丁"){
+        setStrategyLevel(level=>{
+          const nextLevel=win?0:level+1;
+          const nextStake=baseBet*(Math.pow(2,nextLevel+1)-1);
+          appendEvent(`即時結算｜${id}｜本注 ${amount}｜${pnl>0?"+":""}${Math.round(pnl)}｜${win?"WIN":"LOSE"}`);
+          appendEvent(`馬丁｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
+          return nextLevel;
+        });
+      }
 
-      // Mark processed only AFTER the Martingale update has been queued.
+      // Mark processed only after the settlement has been understood and state update queued.
       processedBetSnRef.current.add(id);
     }
   };
@@ -946,6 +965,9 @@ export default function HomeScreen(){
       return;
     }
     awaitingFreshSnapshotRef.current=true;
+    // New manual main-WS session: reset report baseline timing, but keep already processed order IDs.
+    betReportSessionStartRef.current=Date.now();
+    betReportPrimedRef.current=false;
     const generation=++socketGenerationRef.current;
     const ws=new WebSocket(wsUrl);
     socketRef.current=ws;
