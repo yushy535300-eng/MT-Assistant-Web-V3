@@ -629,7 +629,6 @@ export default function HomeScreen(){
   const betReportPrimedRef=useRef(false);
   // First report response may arrive only after the current bet has already settled.
   // Keep the connection start time so that first-response baselining never swallows a new order.
-  const betReportSessionStartRef=useRef<number>(Date.now());
   const processedBetSnRef=useRef<Set<string>>(new Set());
   const orbPosition=useRef(new Animated.ValueXY()).current;
   const panelPosition=useRef(new Animated.ValueXY()).current;
@@ -780,7 +779,7 @@ export default function HomeScreen(){
       setRecords(r=>[{side:pending.side,result:actual,amount:pending.amount,pnl:Math.round(pnl),at:Date.now()},...r].slice(0,30));
       if(outcome!=="push"){
         setStrategyLevel(level=>{
-          if(strategy==="馬丁") return outcome==="loss"?level+1:0;
+          if(strategy==="馬丁") return level; // v21: 馬丁只由正式 /bet/history 的最新本注結算推進
           if(strategy==="達朗貝爾") return outcome==="loss"?Math.min(level+1,20):Math.max(0,level-1);
           if(strategy==="Fibonacci") return outcome==="loss"?Math.min(level+1,10):Math.max(0,level-2);
           if(strategy==="Paroli") return outcome==="win"?(level>=2?0:level+1):0;
@@ -913,76 +912,74 @@ export default function HomeScreen(){
     return walk(payload,0);
   };
   const applyBetReport=(payload:any)=>{
-    // v19: ONLY Martingale logic is changed here. 今日輸贏 / member-me-win / WS stay exactly as v17.
-    // Every official /bet/history response is scanned for settled Banker/Player main slips
-    // created after THIS manual WS session started. This avoids the old "first report swallows the bet" bug.
+    // v21: 馬丁只看「最新一筆已正式結算的莊/閒本注」。
+    // 今日輸贏、member/me/win、WS、牌路都不在這裡修改。
     const allOrders=readBetReportOrders(payload);
     if(!allOrders.length)return;
 
-    const sessionStart=betReportSessionStartRef.current;
-    const candidates=[...allOrders]
-      .filter(o=>{
-        if(!orderIdOf(o) || !orderSettled(o) || mainBetSlipsOf(o).length===0)return false;
-        const t=orderTimeOf(o);
-        return t>0 && t>=sessionStart;
-      })
-      .sort((a,b)=>orderTimeOf(a)-orderTimeOf(b));
+    // 先排除所有旁注，只留下至少有一個精確「莊 / 閒」slip 且已結算的 order。
+    const latestOrder=[...allOrders]
+      .filter(o=>!!orderIdOf(o) && orderSettled(o) && mainBetSlipsOf(o).length>0)
+      .sort((a,b)=>orderTimeOf(b)-orderTimeOf(a))[0];
+    if(!latestOrder)return;
 
-    // Mark report engine ready, but NEVER baseline/consume a current-session bet without settling it.
+    const betSn=orderIdOf(latestOrder);
+    const mainSlip=mainBetSlipsOf(latestOrder)[0];
+    if(!betSn||!mainSlip)return;
+
+    const contentName=String(mainSlip?.content_name??mainSlip?.contentName??"").trim();
+    if(contentName!=="莊" && contentName!=="閒")return;
+
+    // 第一次拿到正式報表只記住目前最新 betSn，避免把開程式前的舊單算進馬丁。
     if(!betReportPrimedRef.current){
       betReportPrimedRef.current=true;
-      appendEvent(`馬丁報表已就緒｜本次連線後待處理 ${candidates.length} 筆本注`);
+      lastBetReportOrderRef.current=betSn;
+      processedBetSnRef.current.add(betSn);
+      appendEvent(`馬丁基準｜目前最新本注 ${betSn}｜等待下一筆新結算`);
+      return;
     }
 
-    for(const o of candidates){
-      const id=orderIdOf(o);
-      const main=mainBetSlipsOf(o);
-      for(const slip of main){
-        const contentName=String(slip?.content_name??slip?.contentName??"").trim();
-        if(contentName!=="莊" && contentName!=="閒")continue;
-        const settlementKey=`${id}|${contentName}`;
-        if(processedBetSnRef.current.has(settlementKey))continue;
+    // 報表會重複回傳同一筆；betSn 沒變就絕對不重算。
+    if(lastBetReportOrderRef.current===betSn || processedBetSnRef.current.has(betSn))return;
 
-        const side:BetSide=contentName==="閒"?"閒":"莊";
-        const amount=Number(String(slip?.bet??"").replace(/,/g,""));
-        const refund=Number(String(slip?.refund??slip?.win??"").replace(/,/g,""));
-        if(!Number.isFinite(amount)||amount<=0||!Number.isFinite(refund)){
-          appendEvent(`馬丁略過 ${settlementKey}｜本注金額無法解析`);
-          continue;
-        }
+    const side:BetSide=contentName==="閒"?"閒":"莊";
+    const amount=Number(String(mainSlip?.bet??"").replace(/,/g,""));
+    const refund=Number(String(mainSlip?.refund??mainSlip?.win??"").replace(/,/g,""));
+    if(!Number.isFinite(amount)||amount<=0||!Number.isFinite(refund)){
+      appendEvent(`馬丁略過 ${betSn}｜本注金額無法解析`);
+      return;
+    }
 
-        // Only consume after a settled exact 莊/閒 slip is fully parseable.
-        processedBetSnRef.current.add(settlementKey);
-        lastBetReportOrderRef.current=settlementKey;
-        const pnl=refund-amount;
+    // 先記住 betSn，再做 UI 更新；同一封包/下一次 5 秒刷新都不會重複結算。
+    lastBetReportOrderRef.current=betSn;
+    processedBetSnRef.current.add(betSn);
 
-        if(pnl===0){
-          appendEvent(`本注結算｜${settlementKey}｜${side} ${Math.round(amount)}｜和/退注｜馬丁不變`);
-          continue;
-        }
+    const pnl=refund-amount;
+    if(pnl===0){
+      appendEvent(`本注結算｜${betSn}｜${side} ${Math.round(amount)}｜和/退注｜馬丁不變`);
+      return;
+    }
 
-        const win=pnl>0;
-        setBankroll(v=>Math.round(v+pnl));
-        setRecords(r=>[{
-          side,
-          result:(win?side:(side==="閒"?"莊":"閒")) as Result,
-          amount:Math.round(amount),
-          pnl:Math.round(pnl),
-          at:Date.now()
-        },...r].slice(0,30));
+    const win=pnl>0;
+    setBankroll(v=>Math.round(v+pnl));
+    setRecords(r=>[{
+      side,
+      result:(win?side:(side==="閒"?"莊":"閒")) as Result,
+      amount:Math.round(amount),
+      pnl:Math.round(pnl),
+      at:Date.now()
+    },...r].slice(0,30));
 
-        if(strategyRef.current==="馬丁"){
-          setStrategyLevel(level=>{
-            const nextLevel=win?0:level+1;
-            const nextStake=baseBetRef.current*(Math.pow(2,nextLevel+1)-1);
-            appendEvent(`本注結算｜${settlementKey}｜${side} ${Math.round(amount)}｜${pnl>0?"+":""}${Math.round(pnl)}｜${win?"WIN":"LOSE"}`);
-            appendEvent(`馬丁｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
-            return nextLevel;
-          });
-        }else{
-          appendEvent(`本注結算｜${settlementKey}｜${side} ${Math.round(amount)}｜${pnl>0?"+":""}${Math.round(pnl)}｜目前策略 ${strategyRef.current}`);
-        }
-      }
+    if(strategyRef.current==="馬丁"){
+      setStrategyLevel(level=>{
+        const nextLevel=win?0:level+1;
+        const nextStake=baseBetRef.current*(Math.pow(2,nextLevel+1)-1);
+        appendEvent(`本注結算｜${betSn}｜${side} ${Math.round(amount)}｜${pnl>0?"+":""}${Math.round(pnl)}｜${win?"WIN":"LOSE"}`);
+        appendEvent(`馬丁｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
+        return nextLevel;
+      });
+    }else{
+      appendEvent(`本注結算｜${betSn}｜${side} ${Math.round(amount)}｜${pnl>0?"+":""}${Math.round(pnl)}｜目前策略 ${strategyRef.current}`);
     }
   };
 
@@ -1005,7 +1002,6 @@ export default function HomeScreen(){
     }
     awaitingFreshSnapshotRef.current=true;
     // New manual main-WS session: reset report baseline timing, but keep already processed order IDs.
-    betReportSessionStartRef.current=Date.now();
     betReportPrimedRef.current=false;
     lastBetReportOrderRef.current="";
     const generation=++socketGenerationRef.current;
