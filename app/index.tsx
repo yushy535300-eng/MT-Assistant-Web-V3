@@ -866,17 +866,46 @@ export default function HomeScreen(){
     return /settled|finished|completed|done|結算完成|已派彩/.test(status);
   };
   const readTodayPnl=(payload:any)=>{
+    const toNumber=(raw:any)=>{
+      const n=Number(String(raw??"").replace(/,/g,""));
+      return Number.isFinite(n)?n:null;
+    };
+    // Fast paths for the normal /bet/history response.
     const candidates=[
       payload?.msg?.total?.all?.w,
       payload?.data?.total?.all?.w,
       payload?.body?.total?.all?.w,
       payload?.msg?.data?.total?.all?.w,
+      payload?.data?.msg?.total?.all?.w,
+      payload?.body?.msg?.total?.all?.w,
     ];
     for(const raw of candidates){
-      const n=Number(String(raw??"").replace(/,/g,""));
-      if(Number.isFinite(n))return n;
+      const n=toNumber(raw);
+      if(n!==null)return n;
     }
-    return null;
+    // Some MT packets wrap msg/data/body one extra level. Find total.all.w
+    // without depending on that wrapper shape, but keep traversal shallow.
+    const seen=new Set<any>();
+    const walk=(node:any,depth:number):number|null=>{
+      if(node==null||depth>5)return null;
+      if(typeof node==="string"){
+        const t=node.trim();
+        if((t.startsWith("{")||t.startsWith("["))&&t.length<200000){
+          try{return walk(JSON.parse(t),depth+1)}catch{}
+        }
+        return null;
+      }
+      if(typeof node!=="object"||seen.has(node))return null;
+      seen.add(node);
+      const direct=toNumber(node?.total?.all?.w);
+      if(direct!==null)return direct;
+      for(const key of ["msg","data","body","result","response","payload"]){
+        const found=walk(node?.[key],depth+1);
+        if(found!==null)return found;
+      }
+      return null;
+    };
+    return walk(payload,0);
   };
   const applyBetReport=(payload:any)=>{
     const allOrders=readBetReportOrders(payload);
@@ -1070,10 +1099,15 @@ export default function HomeScreen(){
         if(betReportInFlight && Date.now()-betReportRequestAt>=1200)betReportInFlight=false;
         requestBetReport();
       },1500);
-      if(reportSettlementFollowupTimer){
-        clearTimeout(reportSettlementFollowupTimer);
+      if(reportSettlementFollowupTimer)clearTimeout(reportSettlementFollowupTimer);
+      // The first response can arrive before the casino report total is committed.
+      // One follow-up catches that server-side delay; the normal 5s poll remains only a safety net.
+      reportSettlementFollowupTimer=setTimeout(()=>{
         reportSettlementFollowupTimer=null;
-      }
+        if(!isCurrentSocket())return;
+        if(betReportInFlight && Date.now()-betReportRequestAt>=1200)betReportInFlight=false;
+        requestBetReport();
+      },3500);
     };
 
     const startDealerRefresh=()=>{
@@ -1092,7 +1126,12 @@ export default function HomeScreen(){
           const newest=reportOrders[0];
           appendEvent(`報表回傳｜${reportOrders.length} 筆${newest?`｜最新 ${orderIdOf(newest)||"—"}｜status ${String(newest?.status??"—")}`:""}`);
           const reportTodayPnl=readTodayPnl(p);
-          if(reportTodayPnl!==null)setTodayPnl(reportTodayPnl);
+          if(reportTodayPnl!==null){
+            setTodayPnl(reportTodayPnl);
+            appendEvent(`今日輸贏同步｜${reportTodayPnl>0?"+":""}${reportTodayPnl.toLocaleString()}`);
+          }else{
+            appendEvent("今日輸贏同步｜此報表封包未找到 total.all.w");
+          }
           applyBetReport(p);
           return;
         }
