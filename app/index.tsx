@@ -929,94 +929,88 @@ export default function HomeScreen(){
     appendEvent(`馬丁追單｜已記錄下注局 ${gameSn}`);
   };
   const applyBetReport=(payload:any)=>{
-    // v23：正式結算唯一判斷來源仍是 /bet/history。
-    // 優先用已捕捉的下注 game_sn 精準找 gameSn；若主 WS 沒有回送下注封包，
-    // 就用「基準之後新出現的 gameSn」判定新結算，避免把 play_id / winner / play_code 混用。
-    // 今日輸贏邏輯完全不在這裡修改。
+    // v24：馬丁只看正式 /bet/history 新增的「莊/閒本注」結算。
+    // 不依賴 iframe 的 /bet Request、不猜 play_id / winner，也不碰今日輸贏邏輯。
     const allOrders=readBetReportOrders(payload);
     if(!allOrders.length)return;
 
     const settledMainOrders=[...allOrders]
-      .filter(o=>!!orderIdOf(o) && !!gameSnOf(o) && orderSettled(o) && mainBetSlipsOf(o).length>0)
-      .sort((a,b)=>orderTimeOf(b)-orderTimeOf(a));
+      .filter(o=>!!orderIdOf(o) && orderSettled(o) && mainBetSlipsOf(o).length>0)
+      .sort((a,b)=>orderTimeOf(a)-orderTimeOf(b)); // 舊 → 新，避免短時間多筆結算漏階
     if(!settledMainOrders.length)return;
 
-    // 第一次報表只建立連線前基準，不把歷史單拿來升降階。
+    // 第一次收到正式報表：把「當下已存在」的本注全部設為基準。
+    // 之後只處理真正新出現的 betSn，絕不把歷史下注拿來升降階。
     if(!betReportBaselineReadyRef.current){
-      const baseline=settledMainOrders[0];
       betReportBaselineReadyRef.current=true;
-      lastBetReportOrderRef.current=orderIdOf(baseline);
-      lastBetReportGameSnRef.current=gameSnOf(baseline);
-      processedBetSnRef.current.add(orderIdOf(baseline));
-      appendEvent(`馬丁開始追蹤｜基準局 ${gameSnOf(baseline)}｜${orderIdOf(baseline)}`);
+      for(const o of settledMainOrders){
+        const id=orderIdOf(o);
+        if(id)processedBetSnRef.current.add(id);
+      }
+      const latest=settledMainOrders[settledMainOrders.length-1];
+      lastBetReportOrderRef.current=orderIdOf(latest);
+      lastBetReportGameSnRef.current=gameSnOf(latest);
+      appendEvent(`馬丁開始追蹤｜已建立 ${settledMainOrders.length} 筆正式本注基準`);
       return;
     }
 
-    const wantedGameSn=trackedBetGameSnRef.current;
-    let target:any=null;
-    if(wantedGameSn){
-      target=settledMainOrders.find(o=>gameSnOf(o)===wantedGameSn)??null;
-      if(!target)return; // 已知自己下哪局，就等該局正式 status=3，不拿別局代替。
-    }else{
-      target=settledMainOrders.find(o=>{
-        const id=orderIdOf(o), gs=gameSnOf(o);
-        return !!id && !!gs && !processedBetSnRef.current.has(id) && gs!==lastBetReportGameSnRef.current;
-      })??null;
-      if(!target)return;
-    }
+    // 同一份報表若一次多出不只一筆，全部依時間順序處理，不能只拿「最新一筆」。
+    const freshOrders=settledMainOrders.filter(o=>{
+      const id=orderIdOf(o);
+      return !!id && !processedBetSnRef.current.has(id);
+    });
+    if(!freshOrders.length)return;
 
-    const betSn=orderIdOf(target);
-    const gameSn=gameSnOf(target);
-    if(!betSn||!gameSn||processedBetSnRef.current.has(betSn))return;
+    for(const target of freshOrders){
+      const betSn=orderIdOf(target);
+      const gameSn=gameSnOf(target);
+      if(!betSn||processedBetSnRef.current.has(betSn))continue;
 
-    const mainSlips=mainBetSlipsOf(target);
-    // 正常莊/閒本注只應有一筆；若同一 order 有其他旁注，mainBetSlipsOf 已排除。
-    const mainSlip=mainSlips[0];
-    if(!mainSlip)return;
-    const contentName=String(mainSlip?.content_name??mainSlip?.contentName??"").trim();
-    if(contentName!=="莊" && contentName!=="閒")return;
+      const mainSlip=mainBetSlipsOf(target)[0];
+      if(!mainSlip)continue;
+      const contentName=String(mainSlip?.content_name??mainSlip?.contentName??"").trim();
+      if(contentName!=="莊" && contentName!=="閒")continue;
 
-    const side:BetSide=contentName==="閒"?"閒":"莊";
-    const amount=Number(String(mainSlip?.bet??"").replace(/,/g,""));
-    const refund=Number(String(mainSlip?.refund??mainSlip?.win??"").replace(/,/g,""));
-    if(!Number.isFinite(amount)||amount<=0||!Number.isFinite(refund)){
-      appendEvent(`馬丁略過 ${gameSn}｜本注金額解析失敗`);
-      return;
-    }
+      const side:BetSide=contentName==="閒"?"閒":"莊";
+      const amount=Number(String(mainSlip?.bet??"").replace(/,/g,""));
+      const refund=Number(String(mainSlip?.refund??mainSlip?.win??"").replace(/,/g,""));
+      if(!Number.isFinite(amount)||amount<=0||!Number.isFinite(refund)){
+        appendEvent(`馬丁略過 ${gameSn||betSn}｜本注金額解析失敗`);
+        continue;
+      }
 
-    // status=3 + content_name 莊/閒 + refund-bet 才能推進馬丁。
-    processedBetSnRef.current.add(betSn);
-    lastBetReportOrderRef.current=betSn;
-    lastBetReportGameSnRef.current=gameSn;
-    if(wantedGameSn===gameSn)trackedBetGameSnRef.current="";
+      // 先去重；status=3 已由 orderSettled 過濾。
+      processedBetSnRef.current.add(betSn);
+      lastBetReportOrderRef.current=betSn;
+      if(gameSn)lastBetReportGameSnRef.current=gameSn;
 
-    const pnl=refund-amount;
-    appendEvent(`馬丁正式結算｜${gameSn}｜${betSn}｜${side}｜下注 ${Math.round(amount)}｜返還 ${Math.round(refund)}｜本注 ${pnl>0?"+":""}${Math.round(pnl)}`);
+      const pnl=refund-amount;
+      appendEvent(`馬丁正式結算｜${gameSn||"—"}｜${betSn}｜${side}｜下注 ${Math.round(amount)}｜返還 ${Math.round(refund)}｜本注 ${pnl>0?"+":""}${Math.round(pnl)}`);
 
-    if(pnl===0){
-      appendEvent(`馬丁｜和局/退注｜階級維持`);
-      return;
-    }
+      // 和局/退注：refund === bet，階級完全不變。
+      if(Math.abs(pnl)<0.000001){
+        appendEvent(`馬丁｜和局/退注｜階級維持`);
+        continue;
+      }
 
-    const win=pnl>0;
-    setBankroll(v=>Math.round(v+pnl));
-    setRecords(r=>[{
-      side,
-      result:(win?side:(side==="閒"?"莊":"閒")) as Result,
-      amount:Math.round(amount),
-      pnl:Math.round(pnl),
-      at:Date.now()
-    },...r].slice(0,30));
+      const win=pnl>0;
+      setBankroll(v=>Math.round(v+pnl));
+      setRecords(r=>[{
+        side,
+        result:(win?side:(side==="閒"?"莊":"閒")) as Result,
+        amount:Math.round(amount),
+        pnl:Math.round(pnl),
+        at:Date.now()
+      },...r].slice(0,30));
 
-    if(strategyRef.current==="馬丁"){
-      setStrategyLevel(level=>{
-        const nextLevel=win?0:level+1;
-        const nextStake=baseBetRef.current*(Math.pow(2,nextLevel+1)-1);
-        appendEvent(`馬丁階級｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
-        return nextLevel;
-      });
-    }else{
-      appendEvent(`馬丁未套用｜目前選擇策略 ${strategyRef.current}`);
+      if(strategyRef.current==="馬丁"){
+        setStrategyLevel(level=>{
+          const nextLevel=win?0:level+1;
+          const nextStake=baseBetRef.current*(Math.pow(2,nextLevel+1)-1);
+          appendEvent(`馬丁階級｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
+          return nextLevel;
+        });
+      }
     }
   };
 
