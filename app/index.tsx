@@ -912,6 +912,7 @@ export default function HomeScreen(){
     // 同一 token 不再建立第二條 authenticate 連線，避免 MT 被伺服器踢下線。
     let dealerRefreshTimer:ReturnType<typeof setInterval>|null=null;
     let betReportTimer:ReturnType<typeof setInterval>|null=null;
+    let betReportInFlight=false;
     let betReportRequestAt=0;
 
     const reportPayload=()=>{
@@ -939,23 +940,32 @@ export default function HomeScreen(){
 
     const requestBetReport=()=>{
       if(!authenticated||ws.readyState!==WebSocket.OPEN)return;
-      // 不鎖 in-flight：原站 sendApi 本來就允許同一 WS 上連續 API 請求。
+      // 只共用現有主 WS，不建立第二條線，也不重新驗證。
+      // 報表請求序列化，避免大量請求干擾 MT。
+      if(betReportInFlight){
+        if(Date.now()-betReportRequestAt<6500)return;
+        betReportInFlight=false;
+      }
+      betReportInFlight=true;
       betReportRequestAt=Date.now();
-      try{ws.send(JSON.stringify(reportPayload()))}catch{}
+      try{ws.send(JSON.stringify(reportPayload()))}catch{betReportInFlight=false}
     };
 
     const startBetReportRefresh=()=>{
       if(betReportTimer)clearInterval(betReportTimer);
       requestBetReport();
-      betReportTimer=setInterval(requestBetReport,1000);
+      // 跟原站投注報表刷新節奏一致，降低對 MT 主連線的壓力。
+      betReportTimer=setInterval(requestBetReport,5000);
     };
 
     const refreshBetReportAfterSettlement=()=>{
       // 結算後加速抓報表，但絕不重新 authenticate / 重建 MT session。
-      setTimeout(requestBetReport,150);
-      setTimeout(requestBetReport,600);
-      setTimeout(requestBetReport,1200);
-      setTimeout(requestBetReport,2200);
+      // 結算後只補抓一次；不重連、不重新 authenticate。
+      setTimeout(()=>{
+        if(betReportInFlight&&Date.now()-betReportRequestAt<2500)return;
+        if(betReportInFlight)betReportInFlight=false;
+        requestBetReport();
+      },2100);
     };
 
     const startDealerRefresh=()=>{
@@ -976,6 +986,7 @@ export default function HomeScreen(){
         }
       }catch{}
       const p=JSON.parse(e.data),name=eventName(p);
+        if(name.includes("/bet/history")){betReportInFlight=false;applyBetReport(p);return}
         if(name.endsWith("/show_win")||name.endsWith("/end")||name.includes("/show_win")||name.includes("/end"))refreshBetReportAfterSettlement();if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();setTimeout(requestSvg,200);setTimeout(subscribe,400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
       updateLiveTables(c=>{
@@ -1012,7 +1023,7 @@ export default function HomeScreen(){
         return applyTablesSameShoe(c,filtered);
       });
       if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>applyDealerRealtime(applyLiveShowWin(c,p),p));setTimeout(requestSvg,350);setTimeout(()=>requestTables(true),450);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){updateLiveTables(c=>applyDealerRealtime(applyLiveWait(c,p,baccaratTableIds),p));setTimeout(()=>requestTables(true),180);return}}catch{}};
-    ws.onerror=()=>{setConnected(false);appendEvent("WebSocket 發生錯誤")};ws.onclose=()=>{if(dealerRefreshTimer)clearInterval(dealerRefreshTimer);dealerRefreshTimer=null;if(betReportTimer)clearInterval(betReportTimer);betReportTimer=null;setConnected(false);appendEvent("WebSocket 已中斷")};
+    ws.onerror=()=>{setConnected(false);appendEvent("WebSocket 發生錯誤")};ws.onclose=()=>{if(dealerRefreshTimer)clearInterval(dealerRefreshTimer);dealerRefreshTimer=null;if(betReportTimer)clearInterval(betReportTimer);betReportTimer=null;betReportInFlight=false;setConnected(false);appendEvent("WebSocket 已中斷")};
   };
   const stopConnection=()=>{if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}reconnectingRef.current=false;awaitingFreshSnapshotRef.current=false;socket?.close();setSocket(null);setConnected(false);appendEvent("已手動中斷")};
   const syncAssist=()=>{if(socket?.readyState===WebSocket.OPEN){socket.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));appendEvent("懸浮輔助已要求同步")}else notify("尚未連線")};
