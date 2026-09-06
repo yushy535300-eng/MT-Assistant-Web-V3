@@ -615,7 +615,12 @@ export default function HomeScreen(){
   const [baseBet,setBaseBet]=useState(1000);
   const [strategy,setStrategy]=useState<StrategyName>("馬丁");
   const [strategyLevel,setStrategyLevel]=useState(0);
+  const strategyRef=useRef<StrategyName>("馬丁");
+  const baseBetRef=useRef(baseBet);
+  useEffect(()=>{strategyRef.current=strategy},[strategy]);
+  useEffect(()=>{baseBetRef.current=baseBet},[baseBet]);
   const [todayPnl,setTodayPnl]=useState<number|null>(null);
+  const todayPnlRef=useRef<number|null>(null);
   const [labSequence,setLabSequence]=useState<number[]>([1,2,3,4]);
   const [pendingBet,setPendingBet]=useState<PendingBet>(null);
   const [records,setRecords]=useState<BetRecord[]>([]);
@@ -970,10 +975,10 @@ export default function HomeScreen(){
 
       // Martingale uses ONLY actual settled Banker/Player main-bet P/L.
       // LOSE = +1 level, WIN = level 1, no cap. 1/3/7/15/31/...
-      if(strategy==="馬丁"){
+      if(strategyRef.current==="馬丁"){
         setStrategyLevel(level=>{
           const nextLevel=win?0:level+1;
-          const nextStake=baseBet*(Math.pow(2,nextLevel+1)-1);
+          const nextStake=baseBetRef.current*(Math.pow(2,nextLevel+1)-1);
           appendEvent(`即時結算｜${id}｜本注 ${amount}｜${pnl>0?"+":""}${Math.round(pnl)}｜${win?"WIN":"LOSE"}`);
           appendEvent(`馬丁｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
           return nextLevel;
@@ -1024,6 +1029,14 @@ export default function HomeScreen(){
     let subscribeTimer:ReturnType<typeof setTimeout>|null=null;
     let betReportInFlight=false;
     let betReportRequestAt=0;
+    // Short-lived settlement sync cycle. We cannot observe the cross-origin MT report UI
+    // directly, so after show_win we query the SAME authenticated report endpoint
+    // sequentially until its server-side aggregate/order data actually changes.
+    let reportSyncActive=false;
+    let reportSyncDeadline=0;
+    let reportSyncBaselinePnl:number|null=null;
+    let reportSyncBaselineProcessed=0;
+    let reportSyncTimer:ReturnType<typeof setTimeout>|null=null;
 
     const isCurrentSocket=()=>socketGenerationRef.current===generation && socketRef.current===ws;
     const clearSocketTimers=()=>{
@@ -1032,6 +1045,8 @@ export default function HomeScreen(){
       if(tablesRefreshTimer)clearTimeout(tablesRefreshTimer); tablesRefreshTimer=null;
       if(reportSettlementTimer)clearTimeout(reportSettlementTimer); reportSettlementTimer=null;
       if(reportSettlementFollowupTimer)clearTimeout(reportSettlementFollowupTimer); reportSettlementFollowupTimer=null;
+      if(reportSyncTimer)clearTimeout(reportSyncTimer); reportSyncTimer=null;
+      reportSyncActive=false;
       if(svgRefreshTimer)clearTimeout(svgRefreshTimer); svgRefreshTimer=null;
       if(subscribeTimer)clearTimeout(subscribeTimer); subscribeTimer=null;
     };
@@ -1073,7 +1088,8 @@ export default function HomeScreen(){
       // 只共用現有主 WS，不建立第二條線，也不重新驗證。
       // 報表請求序列化，避免大量請求干擾 MT。
       if(betReportInFlight){
-        if(Date.now()-betReportRequestAt<2200)return;
+        // Never stack report requests. A missing response may be retried after 2s.
+        if(Date.now()-betReportRequestAt<2000)return;
         betReportInFlight=false;
       }
       betReportInFlight=true;
@@ -1088,28 +1104,33 @@ export default function HomeScreen(){
       betReportTimer=setInterval(requestBetReport,5000);
     };
 
-    const refreshBetReportAfterSettlement=(tableId?:string)=>{
-      // One delayed settlement check is enough. The 5s poll remains as a safety net.
-      // Avoid firing multiple report requests around every show_win on the same WS.
-      appendEvent(`開牌${tableId?` ${tableId}`:""} → 排程投注報表確認`);
-      if(reportSettlementTimer)clearTimeout(reportSettlementTimer);
-      reportSettlementTimer=setTimeout(()=>{
-        reportSettlementTimer=null;
-        if(!isCurrentSocket())return;
-        if(betReportInFlight && Date.now()-betReportRequestAt>=1200)betReportInFlight=false;
+    const scheduleSettlementReportProbe=(delay=320)=>{
+      if(reportSyncTimer)clearTimeout(reportSyncTimer);
+      reportSyncTimer=setTimeout(()=>{
+        reportSyncTimer=null;
+        if(!isCurrentSocket()||!reportSyncActive)return;
+        if(Date.now()>=reportSyncDeadline){
+          reportSyncActive=false;
+          appendEvent("結算報表快速同步結束｜保留 5 秒安全同步");
+          return;
+        }
         requestBetReport();
-      },1500);
-      if(reportSettlementFollowupTimer)clearTimeout(reportSettlementFollowupTimer);
-      // The first response can arrive before the casino report total is committed.
-      // One follow-up catches that server-side delay; the normal 5s poll remains only a safety net.
-      reportSettlementFollowupTimer=setTimeout(()=>{
-        reportSettlementFollowupTimer=null;
-        if(!isCurrentSocket())return;
-        if(betReportInFlight && Date.now()-betReportRequestAt>=1200)betReportInFlight=false;
-        requestBetReport();
-      },3500);
+      },delay);
     };
 
+    const refreshBetReportAfterSettlement=(tableId?:string)=>{
+      // Start a response-driven fast sync window on the SAME authenticated WS.
+      // There is never a second socket. Each next probe is scheduled only after
+      // the previous /bet/history response returns, so requests cannot pile up.
+      appendEvent(`開牌${tableId?` ${tableId}`:""} → 啟動結算報表即時同步`);
+      reportSyncActive=true;
+      reportSyncDeadline=Date.now()+12000;
+      reportSyncBaselinePnl=todayPnlRef.current;
+      reportSyncBaselineProcessed=processedBetSnRef.current.size;
+      if(reportSyncTimer)clearTimeout(reportSyncTimer);
+      reportSyncTimer=null;
+      requestBetReport();
+    };
     const startDealerRefresh=()=>{
       if(dealerRefreshTimer)clearInterval(dealerRefreshTimer);
       // Safety-net metadata refresh only. Live table events still update immediately.
@@ -1127,12 +1148,34 @@ export default function HomeScreen(){
           appendEvent(`報表回傳｜${reportOrders.length} 筆${newest?`｜最新 ${orderIdOf(newest)||"—"}｜status ${String(newest?.status??"—")}`:""}`);
           const reportTodayPnl=readTodayPnl(p);
           if(reportTodayPnl!==null){
+            const changed=todayPnlRef.current!==reportTodayPnl;
+            todayPnlRef.current=reportTodayPnl;
             setTodayPnl(reportTodayPnl);
-            appendEvent(`今日輸贏同步｜${reportTodayPnl>0?"+":""}${reportTodayPnl.toLocaleString()}`);
+            if(changed)appendEvent(`今日輸贏即時更新｜${reportTodayPnl>0?"+":""}${reportTodayPnl.toLocaleString()}`);
           }else{
             appendEvent("今日輸贏同步｜此報表封包未找到 total.all.w");
           }
+          const processedBefore=processedBetSnRef.current.size;
           applyBetReport(p);
+          const processedAfter=processedBetSnRef.current.size;
+
+          if(reportSyncActive){
+            const totalChanged=reportTodayPnl!==null && reportSyncBaselinePnl!==null && reportTodayPnl!==reportSyncBaselinePnl;
+            const mainSettlementProcessed=processedAfter>Math.max(processedBefore,reportSyncBaselineProcessed);
+            // A newly processed Banker/Player settlement is definitive for Martingale.
+            // totalChanged is definitive for 今日輸贏. If only one arrives first, keep
+            // probing briefly so the other field can catch up in the same settlement.
+            if(mainSettlementProcessed && (totalChanged || reportTodayPnl===null)){
+              reportSyncActive=false;
+              if(reportSyncTimer)clearTimeout(reportSyncTimer);
+              reportSyncTimer=null;
+              appendEvent("結算報表已追上｜今日輸贏＋馬丁已同步");
+            }else if(Date.now()<reportSyncDeadline){
+              scheduleSettlementReportProbe(320);
+            }else{
+              reportSyncActive=false;
+            }
+          }
           return;
         }
         if(name.endsWith("/show_win")||name.includes("/show_win")){
