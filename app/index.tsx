@@ -627,6 +627,7 @@ export default function HomeScreen(){
   const [peakBankroll,setPeakBankroll]=useState(100000);
   const lastBetReportOrderRef=useRef<string>("");
   const betReportPrimedRef=useRef(false);
+  const martingaleOrderStateRef=useRef<Map<string,"pending"|"settled">>(new Map());
   // First report response may arrive only after the current bet has already settled.
   // Keep the connection start time so that first-response baselining never swallows a new order.
   const betReportSessionStartRef=useRef<number>(Date.now());
@@ -916,77 +917,96 @@ export default function HomeScreen(){
     const allOrders=readBetReportOrders(payload);
     if(!allOrders.length){appendEvent("投注報表：目前沒有注單");return;}
 
-    // v13: Martingale reads the SAME /bet/history response that already updates 今日輸贏.
-    // Do not baseline every order and do not use order totals. Only inspect the latest
-    // SETTLED Baccarat main bet (1101 Banker / 1102 Player) and remember its betSn.
-    const settledMain=[...allOrders]
-      .filter(o=>orderSettled(o)&&mainBetSlipsOf(o).length>0)
-      .sort((a,b)=>orderTimeOf(b)-orderTimeOf(a));
+    // v14: track every Baccarat main bet by settlement state.
+    // This is more reliable than comparing only the latest betSn because the SAME
+    // betSn can first appear pending and later become status=3.
+    const mainOrders=[...allOrders]
+      .filter(o=>mainBetSlipsOf(o).length>0 && !!orderIdOf(o))
+      .sort((a,b)=>orderTimeOf(a)-orderTimeOf(b));
+    if(!mainOrders.length)return;
 
-    const latestMain=settledMain[0];
-    if(!latestMain)return;
-
-    const id=orderIdOf(latestMain);
-    if(!id)return;
-
-    // First live report is only an anchor so reconnecting never replays historical bets.
-    // Unlike v12, we do NOT mark the whole report as processed.
+    // First report establishes current state only. Historical settled bets are anchored;
+    // pending bets remain pending so their later status=3 transition still gets processed.
     if(!betReportPrimedRef.current){
       betReportPrimedRef.current=true;
-      lastBetReportOrderRef.current=id;
+      let pendingCount=0, settledCount=0;
+      for(const o of mainOrders){
+        const id=orderIdOf(o);
+        const settled=orderSettled(o);
+        martingaleOrderStateRef.current.set(id,settled?"settled":"pending");
+        if(settled){
+          processedBetSnRef.current.add(id);
+          lastBetReportOrderRef.current=id;
+          settledCount++;
+        }else pendingCount++;
+      }
+      appendEvent(`馬丁狀態建立｜已結算 ${settledCount}｜待結算 ${pendingCount}`);
+      return;
+    }
+
+    for(const o of mainOrders){
+      const id=orderIdOf(o);
+      const settled=orderSettled(o);
+      const previous=martingaleOrderStateRef.current.get(id);
+
+      if(!settled){
+        martingaleOrderStateRef.current.set(id,"pending");
+        continue;
+      }
+      if(previous==="settled")continue;
+
+      const main=mainBetSlipsOf(o);
+      if(!main.length)continue;
+
+      let amount=0, refund=0;
+      let valid=true;
+      for(const slip of main){
+        const b=Number(String(slip?.bet??"").replace(/,/g,""));
+        const r=Number(String(slip?.refund??"").replace(/,/g,""));
+        if(!Number.isFinite(b)||!Number.isFinite(r)){valid=false;break;}
+        amount+=b;
+        refund+=r;
+      }
+      if(!valid||amount<=0){
+        appendEvent(`馬丁略過 ${id}｜本注金額無法解析`);
+        continue;
+      }
+
+      const pnl=refund-amount;
+      const mainCode=String(main[0]?.play_code??main[0]?.playCode??"");
+      const side:BetSide=mainCode==="1102"?"閒":"莊";
+
+      // Only mark this exact main bet settled after its 1101/1102 data is usable.
+      martingaleOrderStateRef.current.set(id,"settled");
       processedBetSnRef.current.add(id);
-      appendEvent(`馬丁已鎖定最新本注｜${id}｜等待下一筆莊/閒本注結算`);
-      return;
-    }
+      lastBetReportOrderRef.current=id;
 
-    // Same latest settled main bet = already handled. Wait for the next report change.
-    if(lastBetReportOrderRef.current===id)return;
+      if(pnl===0){
+        appendEvent(`本注結算｜${id}｜${side} ${Math.round(amount)}｜和/退注｜馬丁不變`);
+        continue;
+      }
 
-    const main=mainBetSlipsOf(latestMain);
-    if(!main.length)return;
+      const win=pnl>0;
+      setBankroll(v=>Math.round(v+pnl));
+      setRecords(r=>[{
+        side,
+        result:(win?side:(side==="閒"?"莊":"閒")) as Result,
+        amount:Math.round(amount),
+        pnl:Math.round(pnl),
+        at:Date.now()
+      },...r].slice(0,30));
 
-    // Strictly calculate from 1101/1102 slips only. Side bets can never enter this P/L.
-    let amount=0;
-    let refund=0;
-    for(const slip of main){
-      const b=Number(String(slip?.bet??0).replace(/,/g,""));
-      const r=Number(String(slip?.refund??0).replace(/,/g,""));
-      if(Number.isFinite(b))amount+=b;
-      if(Number.isFinite(r))refund+=r;
-    }
-    if(!Number.isFinite(amount)||!Number.isFinite(refund)||amount<=0)return;
-
-    const pnl=refund-amount;
-    const mainCode=String(main[0]?.play_code??main[0]?.playCode??"");
-    const side:BetSide=mainCode==="1102"?"閒":"莊";
-
-    // Lock this betSn only after its main-bet settlement is fully understood.
-    lastBetReportOrderRef.current=id;
-    processedBetSnRef.current.add(id);
-
-    if(pnl===0){
-      appendEvent(`本注結算｜${id}｜${side} ${Math.round(amount)}｜和/退注｜馬丁不變`);
-      return;
-    }
-
-    const win=pnl>0;
-    setBankroll(v=>Math.round(v+pnl));
-    setRecords(r=>[{
-      side,
-      result:(win?side:(side==="閒"?"莊":"閒")) as Result,
-      amount:Math.round(amount),
-      pnl:Math.round(pnl),
-      at:Date.now()
-    },...r].slice(0,30));
-
-    if(strategyRef.current==="馬丁"){
-      setStrategyLevel(level=>{
-        const nextLevel=win?0:level+1;
-        const nextStake=baseBetRef.current*(Math.pow(2,nextLevel+1)-1);
-        appendEvent(`本注結算｜${id}｜${side} ${Math.round(amount)}｜${pnl>0?"+":""}${Math.round(pnl)}｜${win?"WIN":"LOSE"}`);
-        appendEvent(`馬丁｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
-        return nextLevel;
-      });
+      if(strategyRef.current==="馬丁"){
+        setStrategyLevel(level=>{
+          const nextLevel=win?0:level+1;
+          const nextStake=baseBetRef.current*(Math.pow(2,nextLevel+1)-1);
+          appendEvent(`本注結算｜${id}｜${side} ${Math.round(amount)}｜${pnl>0?"+":""}${Math.round(pnl)}｜${win?"WIN":"LOSE"}`);
+          appendEvent(`馬丁｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
+          return nextLevel;
+        });
+      }else{
+        appendEvent(`本注結算｜${id}｜${side} ${Math.round(amount)}｜${pnl>0?"+":""}${Math.round(pnl)}｜目前策略 ${strategyRef.current}`);
+      }
     }
   };
 
@@ -1012,6 +1032,7 @@ export default function HomeScreen(){
     betReportSessionStartRef.current=Date.now();
     betReportPrimedRef.current=false;
     lastBetReportOrderRef.current="";
+    martingaleOrderStateRef.current.clear();
     const generation=++socketGenerationRef.current;
     const ws=new WebSocket(wsUrl);
     socketRef.current=ws;
