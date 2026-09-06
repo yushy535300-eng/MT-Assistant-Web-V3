@@ -56,20 +56,13 @@ function stats(results: RoadResult[]) {
 }
 
 function mergeSnapshot(local: RoadResult[], server: RoadResult[], sameShoe: boolean, round: number) {
-  // A shoe change always starts a fresh road.
-  if (!sameShoe) return server;
+  // Only an actual Shoe ID change starts a fresh road.
+  if (!sameShoe) return server.length ? server : local;
 
-  // The server bead plate is the authoritative snapshot whenever it is available.
-  // This prevents results from an older shoe being kept just because the local array is longer.
-  if (server.length) {
-    return Number.isFinite(round) && round >= 0 ? server.slice(0, round) : server;
-  }
-
-  // If the round counter has moved backwards/reset, never keep more local results than the current round.
-  if (Number.isFinite(round) && round >= 0 && local.length > round) {
-    return local.slice(0, round);
-  }
-
+  // Same Shoe must move forward, never backward. MT snapshots can arrive one packet
+  // behind show_win, so a shorter snapshot must not make the UI flash back.
+  if (server.length > local.length) return server;
+  if (server.length === local.length && server.length) return server;
   return local;
 }
 
@@ -78,9 +71,10 @@ export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): 
   const serverResults = parseBeadPlate(trend?.bead_plate2 ?? trend?.bead_plate ?? source?.bead_plate2);
   const sourceShoe = String(trend?.current_shoe ?? source?.shoe ?? table.shoe ?? "—");
   const sourceRound = Number(trend?.current_round ?? source?.round ?? table.round);
-  const sameShoe = sourceShoe === String(table.shoe);
-  const roundReset = Number.isFinite(sourceRound) && sourceRound < Number(table.round);
-  const results = mergeSnapshot(table.results, serverResults, sameShoe && !roundReset, sourceRound);
+  const currentShoe = String(table.shoe ?? "—");
+  const realShoeChange =
+    currentShoe !== "—" && sourceShoe !== "—" && currentShoe !== sourceShoe;
+  const results = mergeSnapshot(table.results, serverResults, !realShoeChange, sourceRound);
   const count = stats(results);
   const apiId = getApiTableId(source);
   return {
@@ -135,18 +129,18 @@ export function applyLiveShowWin<T extends LiveRoadTable>(current: T[], payload:
     const resultKey = `${nextShoe}|${Number.isFinite(nextRound) ? nextRound : ""}`;
     if (resultKey !== "|" && table.lastResultKey === resultKey) return table;
 
-    // Clear on a real shoe-id change OR when the round counter resets/backtracks.
-    // Some feeds update the shoe id slightly later than the first round of a new shoe.
-    const roundReset = Number.isFinite(nextRound) && nextRound <= Number(table.round);
-    const base = nextShoe !== String(table.shoe) || roundReset ? [] : table.results;
-    const results = [...base, result];
+    // show_win is an incremental event only. NEVER clear/rebuild the road here.
+    // MT can send a transient/stale shoe or round value in show_win; using it as a
+    // reset signal causes the UI to collapse to one dot until /tables arrives.
+    // A new shoe is accepted only from the authoritative /tables snapshot.
+    const results = [...table.results, result];
     const count = stats(results);
 
     return {
       ...table,
       live: true,
-      shoe: nextShoe,
-      round: Number.isFinite(nextRound) ? nextRound : table.round + 1,
+      shoe: String(table.shoe ?? "—") !== "—" ? table.shoe : nextShoe,
+      round: Number.isFinite(nextRound) ? Math.max(table.round, nextRound) : table.round + 1,
       ...count,
       results,
       countdown: 0,

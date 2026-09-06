@@ -514,10 +514,9 @@ function applyTablesSameShoe(current: TableData[], sources: any[]): TableData[] 
       return { ...table, results: [...table.results] };
     }
 
-    // Same shoe: when MT supplies a non-empty snapshot, trust it even if it is
-    // shorter than our locally appended show_win history. This lets the app
-    // automatically repair a missed/duplicate/out-of-order live event instead
-    // of requiring a manual reconnect.
+    // Same shoe: never let a stale/short snapshot roll the visible road backward.
+    // show_win appends immediately; a later full snapshot may extend/correct it,
+    // but a shorter same-shoe snapshot must not erase already visible history.
     const source = sources.find((item) => {
       const sourceId = getApiTableId(item);
       const tableId = table.apiId ?? `BAG${table.id}`;
@@ -527,7 +526,12 @@ function applyTablesSameShoe(current: TableData[], sources: any[]): TableData[] 
     const rawSnapshot = trend?.bead_plate2 ?? trend?.bead_plate ?? source?.bead_plate2;
     const hasSnapshot = Array.isArray(rawSnapshot) ? rawSnapshot.length > 0 : typeof rawSnapshot === "string" && rawSnapshot.replace(/[^0-9]/g, "").length >= 2;
 
-    if (hasSnapshot) return table;
+    if (hasSnapshot) {
+      // Full/equal snapshot is safe. A shorter same-shoe snapshot is stale: keep
+      // the current road while still accepting fresh metadata from the packet.
+      if (table.results.length >= prev.results.length) return table;
+      return { ...table, results: [...prev.results] };
+    }
 
     // If this packet has no road snapshot at all, do not erase the live road.
     return { ...table, results: [...prev.results] };
@@ -578,6 +582,9 @@ export default function HomeScreen(){
   const [mtUrl,setMtUrl]=useState("");
   const [wsUrl]=useState("wss://a1.ofalive99.net/game/ws");
   const [socket,setSocket]=useState<WebSocket|null>(null);
+  // Single authoritative game socket. State is only for UI; lifecycle uses this ref.
+  const socketRef=useRef<WebSocket|null>(null);
+  const socketGenerationRef=useRef(0);
   const reconnectingRef=useRef(false);
   const reconnectCooldownUntilRef=useRef(0);
   const awaitingFreshSnapshotRef=useRef(false);
@@ -649,7 +656,13 @@ export default function HomeScreen(){
     }
     favicon.href="/apple-touch-icon.png";
   },[]);
-  useEffect(()=>()=>socket?.close(),[socket]);
+  // Unmount only: close the one authoritative socket. Do not tie cleanup to React state changes.
+  useEffect(()=>()=>{
+    socketGenerationRef.current+=1;
+    const ws=socketRef.current;
+    socketRef.current=null;
+    try{ws?.close()}catch{}
+  },[]);
   useEffect(()=>()=>{if(reconnectTimerRef.current)clearTimeout(reconnectTimerRef.current)},[]);
   useEffect(()=>()=>{if(tablesFrameRef.current!=null)cancelAnimationFrame(tablesFrameRef.current)},[]);
   useEffect(()=>{setPeakBankroll(p=>Math.max(p,bankroll))},[bankroll]);
@@ -927,20 +940,50 @@ export default function HomeScreen(){
     }
     // 只有使用者主動按「連線」才建立主 WS。
     // 若主線仍 OPEN / CONNECTING，直接沿用，禁止重複建立。
-    if(socket && (socket.readyState===WebSocket.OPEN || socket.readyState===WebSocket.CONNECTING)){
+    const activeSocket=socketRef.current;
+    if(activeSocket && (activeSocket.readyState===WebSocket.OPEN || activeSocket.readyState===WebSocket.CONNECTING)){
       appendEvent("主連線仍有效，不重複連線");
       return;
     }
     awaitingFreshSnapshotRef.current=true;
-    const ws=new WebSocket(wsUrl);setSocket(ws);let authenticated=false,subscribed=false;
+    const generation=++socketGenerationRef.current;
+    const ws=new WebSocket(wsUrl);
+    socketRef.current=ws;
+    setSocket(ws);
+    let authenticated=false,subscribed=false;
     const requestTables=(quiet=false)=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/tables",data:{gametype_id:3,game_id:1,room_id:1}}}));if(!quiet)appendEvent("已請求 15 桌歷史牌局")}};
     const requestSvg=()=>authenticated&&ws.readyState===WebSocket.OPEN&&ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));
     // 投注報表與牌路共用唯一已驗證的遊戲 WebSocket。
     // 同一 token 不再建立第二條 authenticate 連線，避免 MT 被伺服器踢下線。
     let dealerRefreshTimer:ReturnType<typeof setInterval>|null=null;
     let betReportTimer:ReturnType<typeof setInterval>|null=null;
+    let tablesRefreshTimer:ReturnType<typeof setTimeout>|null=null;
+    let reportSettlementTimer:ReturnType<typeof setTimeout>|null=null;
+    let reportSettlementFollowupTimer:ReturnType<typeof setTimeout>|null=null;
+    let svgRefreshTimer:ReturnType<typeof setTimeout>|null=null;
+    let subscribeTimer:ReturnType<typeof setTimeout>|null=null;
     let betReportInFlight=false;
     let betReportRequestAt=0;
+
+    const isCurrentSocket=()=>socketGenerationRef.current===generation && socketRef.current===ws;
+    const clearSocketTimers=()=>{
+      if(dealerRefreshTimer)clearInterval(dealerRefreshTimer); dealerRefreshTimer=null;
+      if(betReportTimer)clearInterval(betReportTimer); betReportTimer=null;
+      if(tablesRefreshTimer)clearTimeout(tablesRefreshTimer); tablesRefreshTimer=null;
+      if(reportSettlementTimer)clearTimeout(reportSettlementTimer); reportSettlementTimer=null;
+      if(reportSettlementFollowupTimer)clearTimeout(reportSettlementFollowupTimer); reportSettlementFollowupTimer=null;
+      if(svgRefreshTimer)clearTimeout(svgRefreshTimer); svgRefreshTimer=null;
+      if(subscribeTimer)clearTimeout(subscribeTimer); subscribeTimer=null;
+    };
+    // Collapse bursts from 15 tables into one snapshot request.
+    const scheduleTablesRefresh=(delay=700)=>{
+      if(tablesRefreshTimer)clearTimeout(tablesRefreshTimer);
+      tablesRefreshTimer=setTimeout(()=>{tablesRefreshTimer=null;if(isCurrentSocket())requestTables(true)},delay);
+    };
+    const scheduleSvgRefresh=(delay=350)=>{
+      if(svgRefreshTimer)clearTimeout(svgRefreshTimer);
+      svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},delay);
+    };
 
     const reportPayload=()=>{
       const now=new Date();
@@ -986,33 +1029,34 @@ export default function HomeScreen(){
     };
 
     const refreshBetReportAfterSettlement=(tableId?:string)=>{
-      // 每桌收到正式開牌結果，只把它當成「檢查本人投注報表」的觸發器。
-      // 不用桌面結果直接判定本人輸贏；最終仍以 bet/history 的本注實際結算為準。
+      // Collapse simultaneous show_win events into one immediate report check + one follow-up.
+      // This keeps Martingale realtime without creating a growing timeout/request storm.
       appendEvent(`開牌${tableId?` ${tableId}`:""} → 檢查投注報表`);
-
-      const checkReport=(delay:number)=>setTimeout(()=>{
-        // 報表請求仍共用唯一已 authenticate 的主 WS。
-        // 絕不 close / reconnect / 再 authenticate。
-        if(betReportInFlight && Date.now()-betReportRequestAt>=700){
-          betReportInFlight=false;
-        }
+      if(reportSettlementTimer)clearTimeout(reportSettlementTimer);
+      reportSettlementTimer=setTimeout(()=>{
+        reportSettlementTimer=null;
+        if(!isCurrentSocket())return;
+        if(betReportInFlight && Date.now()-betReportRequestAt>=700)betReportInFlight=false;
         requestBetReport();
-      },delay);
-
-      // 立即抓；考慮後台結算寫入稍慢，再補抓 0.9 / 2.2 / 4.5 秒。
-      checkReport(0);
-      checkReport(900);
-      checkReport(2200);
-      checkReport(4500);
+      },120);
+      if(reportSettlementFollowupTimer)clearTimeout(reportSettlementFollowupTimer);
+      reportSettlementFollowupTimer=setTimeout(()=>{
+        reportSettlementFollowupTimer=null;
+        if(!isCurrentSocket())return;
+        if(betReportInFlight && Date.now()-betReportRequestAt>=1200)betReportInFlight=false;
+        requestBetReport();
+      },2200);
     };
 
     const startDealerRefresh=()=>{
       if(dealerRefreshTimer)clearInterval(dealerRefreshTimer);
-      dealerRefreshTimer=setInterval(()=>requestTables(true),3000);
+      // Safety-net metadata refresh only. Live table events still update immediately.
+      // 10s avoids hammering /tables continuously for 15 tables.
+      dealerRefreshTimer=setInterval(()=>{if(isCurrentSocket())requestTables(true)},10000);
     };
     const subscribe=()=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/mulitple_join",data:{table_id:baccaratTableIds.join(",")}}}));subscribed=true;appendEvent("已訂閱 15 桌即時事件")}};
-    ws.onopen=()=>{appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
-    ws.onmessage=e=>{try{
+    ws.onopen=()=>{if(!isCurrentSocket())return;appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
+    ws.onmessage=e=>{if(!isCurrentSocket())return;try{
       // TEMP: 下注封包偵測，只記錄可能相關的原始訊息，不改變既有即時處理。
       try{
         const raw=typeof e?.data==="string"?e.data:JSON.stringify(e?.data??"");
@@ -1035,7 +1079,7 @@ export default function HomeScreen(){
         if(name.endsWith("/show_win")||name.includes("/show_win")){
           const winTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"");
           refreshBetReportAfterSettlement(winTableId);
-        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();setTimeout(requestSvg,200);setTimeout(subscribe,400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
+        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200);subscribeTimer=setTimeout(()=>{subscribeTimer=null;if(isCurrentSocket())subscribe()},400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
       updateLiveTables(c=>{
         // The first complete snapshot after every connection/reconnection is the
@@ -1048,33 +1092,35 @@ export default function HomeScreen(){
           return applyTablesSameShoe(c,filtered);
         }
 
-        let mismatchTable="";
-        for(const source of filtered){
-          const id=getApiTableId(source);
-          const local=c.find(t=>(t.apiId??`BAG${t.id}`)===id);
-          if(!local)continue;
-          const trend=source?.trend??{};
-          const sourceShoe=String(trend?.current_shoe??source?.shoe??"");
-          const serverResults=parseBeadPlate(trend?.bead_plate2??trend?.bead_plate??source?.bead_plate2);
-          if(!serverResults.length)continue;
-          // A real shoe change is normal and must not be treated as corruption.
-          if(sourceShoe&&sourceShoe!=="—"&&String(local.shoe)!=="—"&&sourceShoe!==String(local.shoe))continue;
-          if(serverResults.length!==local.results.length||serverResults.some((r,i)=>r!==local.results[i])){mismatchTable=id;break}
-        }
-
-        if(mismatchTable&&!reconnectingRef.current&&Date.now()>=reconnectCooldownUntilRef.current){
-          reconnectingRef.current=true;
-          reconnectTimerRef.current=setTimeout(()=>startConnection(`${mismatchTable} 本靴牌路與 MT snapshot 不一致`),250);
-          // Keep the currently displayed road until the fresh connection confirms it.
-          return c;
-        }
+        // Same connection, same Shoe: reconcile in place. Never reconnect just because
+        // a snapshot arrives out of order or is temporarily shorter.
         return applyTablesSameShoe(c,filtered);
       });
-      if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>applyDealerRealtime(applyLiveShowWin(c,p),p));setTimeout(requestSvg,350);setTimeout(()=>requestTables(true),450);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){updateLiveTables(c=>applyDealerRealtime(applyLiveWait(c,p,baccaratTableIds),p));setTimeout(()=>requestTables(true),180);return}}catch{}};
-    ws.onerror=()=>{setConnected(false);appendEvent("WebSocket 發生錯誤")};ws.onclose=()=>{if(dealerRefreshTimer)clearInterval(dealerRefreshTimer);dealerRefreshTimer=null;if(betReportTimer)clearInterval(betReportTimer);betReportTimer=null;betReportInFlight=false;setConnected(false);appendEvent("WebSocket 已中斷")};
+      if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>applyDealerRealtime(applyLiveShowWin(c,p),p));scheduleSvgRefresh(350);scheduleTablesRefresh(800);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){updateLiveTables(c=>applyDealerRealtime(applyLiveWait(c,p,baccaratTableIds),p));scheduleTablesRefresh(500);return}}catch{}};
+    ws.onerror=()=>{if(!isCurrentSocket())return;setConnected(false);appendEvent("WebSocket 發生錯誤")};
+    ws.onclose=()=>{
+      clearSocketTimers();
+      betReportInFlight=false;
+      if(!isCurrentSocket())return;
+      socketRef.current=null;
+      setSocket(null);
+      setConnected(false);
+      appendEvent("WebSocket 已中斷");
+    };
   };
-  const stopConnection=()=>{if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}reconnectingRef.current=false;awaitingFreshSnapshotRef.current=false;socket?.close();setSocket(null);setConnected(false);appendEvent("已手動中斷")};
-  const syncAssist=()=>{if(socket?.readyState===WebSocket.OPEN){socket.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));appendEvent("懸浮輔助已要求同步")}else notify("尚未連線")};
+  const stopConnection=()=>{
+    if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}
+    reconnectingRef.current=false;
+    awaitingFreshSnapshotRef.current=false;
+    socketGenerationRef.current+=1;
+    const ws=socketRef.current;
+    socketRef.current=null;
+    try{ws?.close()}catch{}
+    setSocket(null);
+    setConnected(false);
+    appendEvent("已手動中斷");
+  };
+  const syncAssist=()=>{const ws=socketRef.current;if(ws?.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));appendEvent("懸浮輔助已要求同步")}else notify("尚未連線")};
   const openMtPlatform=(table?:TableData)=>{if(table)setAssistTableId(table.apiId??`BAG${table.id}`);if(!(mtUrl.trim()||token.trim())){notify("請先在連線設定填入 MT 平台網址");setConnectionOpen(true);return}setMtOpen(true)};
   const action=(kind:string,table:TableData)=>{if(kind==="MT平台")openMtPlatform(table);else if(kind==="分析")setAnalysisTable(table);else notify(`已關注百家樂 ${table.id}`)};
   const actionRef=useRef(action);
