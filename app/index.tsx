@@ -626,7 +626,7 @@ export default function HomeScreen(){
   const [records,setRecords]=useState<BetRecord[]>([]);
   const [peakBankroll,setPeakBankroll]=useState(100000);
   const lastBetReportOrderRef=useRef<string>("");
-  const betReportPrimedRef=useRef(false);
+  const betReportBaselineReadyRef=useRef(false);
   // First report response may arrive only after the current bet has already settled.
   // Keep the connection start time so that first-response baselining never swallows a new order.
   const processedBetSnRef=useRef<Set<string>>(new Set());
@@ -912,51 +912,52 @@ export default function HomeScreen(){
     return walk(payload,0);
   };
   const applyBetReport=(payload:any)=>{
-    // v21: 馬丁只看「最新一筆已正式結算的莊/閒本注」。
-    // 今日輸贏、member/me/win、WS、牌路都不在這裡修改。
+    // v22: 馬丁只追「最新一筆已正式結算的莊/閒本注」。
+    // 今日輸贏、member/me/win、WS、牌路一律不在這裡修改。
     const allOrders=readBetReportOrders(payload);
     if(!allOrders.length)return;
 
-    // 先排除所有旁注，只留下至少有一個精確「莊 / 閒」slip 且已結算的 order。
-    const latestOrder=[...allOrders]
+    const settledMainOrders=[...allOrders]
       .filter(o=>!!orderIdOf(o) && orderSettled(o) && mainBetSlipsOf(o).length>0)
-      .sort((a,b)=>orderTimeOf(b)-orderTimeOf(a))[0];
+      .sort((a,b)=>orderTimeOf(b)-orderTimeOf(a));
+    const latestOrder=settledMainOrders[0];
     if(!latestOrder)return;
 
     const betSn=orderIdOf(latestOrder);
     const mainSlip=mainBetSlipsOf(latestOrder)[0];
     if(!betSn||!mainSlip)return;
-
     const contentName=String(mainSlip?.content_name??mainSlip?.contentName??"").trim();
     if(contentName!=="莊" && contentName!=="閒")return;
 
-    // 第一次拿到正式報表只記住目前最新 betSn，避免把開程式前的舊單算進馬丁。
-    if(!betReportPrimedRef.current){
-      betReportPrimedRef.current=true;
+    // 連線後第一次成功取得正式報表，只建立「目前最新一筆」基準。
+    // 從第二次開始，只要最新 betSn 改變，就是新的已結算本注。
+    if(!betReportBaselineReadyRef.current){
+      betReportBaselineReadyRef.current=true;
       lastBetReportOrderRef.current=betSn;
       processedBetSnRef.current.add(betSn);
-      appendEvent(`馬丁基準｜目前最新本注 ${betSn}｜等待下一筆新結算`);
+      appendEvent(`馬丁開始追蹤｜基準本注 ${betSn}｜${contentName}`);
       return;
     }
 
-    // 報表會重複回傳同一筆；betSn 沒變就絕對不重算。
-    if(lastBetReportOrderRef.current===betSn || processedBetSnRef.current.has(betSn))return;
+    if(lastBetReportOrderRef.current===betSn)return;
 
     const side:BetSide=contentName==="閒"?"閒":"莊";
     const amount=Number(String(mainSlip?.bet??"").replace(/,/g,""));
     const refund=Number(String(mainSlip?.refund??mainSlip?.win??"").replace(/,/g,""));
     if(!Number.isFinite(amount)||amount<=0||!Number.isFinite(refund)){
-      appendEvent(`馬丁略過 ${betSn}｜本注金額無法解析`);
+      appendEvent(`馬丁略過新本注 ${betSn}｜金額解析失敗`);
       return;
     }
 
-    // 先記住 betSn，再做 UI 更新；同一封包/下一次 5 秒刷新都不會重複結算。
+    // 先鎖定這個最新 betSn，避免同一筆報表重複刷新造成連升。
     lastBetReportOrderRef.current=betSn;
     processedBetSnRef.current.add(betSn);
 
     const pnl=refund-amount;
+    appendEvent(`馬丁新本注｜${betSn}｜${side}｜下注 ${Math.round(amount)}｜返還 ${Math.round(refund)}｜本注 ${pnl>0?"+":""}${Math.round(pnl)}`);
+
     if(pnl===0){
-      appendEvent(`本注結算｜${betSn}｜${side} ${Math.round(amount)}｜和/退注｜馬丁不變`);
+      appendEvent(`馬丁｜和局/退注｜階級維持`);
       return;
     }
 
@@ -974,12 +975,11 @@ export default function HomeScreen(){
       setStrategyLevel(level=>{
         const nextLevel=win?0:level+1;
         const nextStake=baseBetRef.current*(Math.pow(2,nextLevel+1)-1);
-        appendEvent(`本注結算｜${betSn}｜${side} ${Math.round(amount)}｜${pnl>0?"+":""}${Math.round(pnl)}｜${win?"WIN":"LOSE"}`);
-        appendEvent(`馬丁｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
+        appendEvent(`馬丁階級｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
         return nextLevel;
       });
     }else{
-      appendEvent(`本注結算｜${betSn}｜${side} ${Math.round(amount)}｜${pnl>0?"+":""}${Math.round(pnl)}｜目前策略 ${strategyRef.current}`);
+      appendEvent(`馬丁未套用｜目前選擇策略 ${strategyRef.current}`);
     }
   };
 
@@ -1002,7 +1002,7 @@ export default function HomeScreen(){
     }
     awaitingFreshSnapshotRef.current=true;
     // New manual main-WS session: reset report baseline timing, but keep already processed order IDs.
-    betReportPrimedRef.current=false;
+    betReportBaselineReadyRef.current=false;
     lastBetReportOrderRef.current="";
     const generation=++socketGenerationRef.current;
     const ws=new WebSocket(wsUrl);
