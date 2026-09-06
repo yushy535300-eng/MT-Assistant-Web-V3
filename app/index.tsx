@@ -1074,7 +1074,7 @@ export default function HomeScreen(){
         },
         body:{
           begin_at:begin.toISOString(),
-          cur:0,
+          cur:1,
           end_at:end.toISOString(),
           room_id:1,
           s:8,
@@ -1089,7 +1089,7 @@ export default function HomeScreen(){
       // 報表請求序列化，避免大量請求干擾 MT。
       if(betReportInFlight){
         // Never stack report requests. A missing response may be retried after 2s.
-        if(Date.now()-betReportRequestAt<2000)return;
+        if(Date.now()-betReportRequestAt<1500)return;
         betReportInFlight=false;
       }
       betReportInFlight=true;
@@ -1100,8 +1100,9 @@ export default function HomeScreen(){
     const startBetReportRefresh=()=>{
       if(betReportTimer)clearInterval(betReportTimer);
       requestBetReport();
-      // 5 秒輪詢只當安全網；主要觸發點是每桌正式 show_win。
-      betReportTimer=setInterval(requestBetReport,5000);
+      // 2 秒安全同步：使用與 MT 報表相同的 cur:1 request。
+      // 快速結算追蹤仍由 show_win/end 觸發，這個 interval 只負責漏事件保險。
+      betReportTimer=setInterval(requestBetReport,2000);
     };
 
     const scheduleSettlementReportProbe=(delay=320)=>{
@@ -1111,7 +1112,7 @@ export default function HomeScreen(){
         if(!isCurrentSocket()||!reportSyncActive)return;
         if(Date.now()>=reportSyncDeadline){
           reportSyncActive=false;
-          appendEvent("結算報表快速同步結束｜保留 5 秒安全同步");
+          appendEvent("結算報表快速同步結束｜保留 2 秒安全同步");
           return;
         }
         requestBetReport();
@@ -1198,7 +1199,12 @@ export default function HomeScreen(){
         // a snapshot arrives out of order or is temporarily shorter.
         return applyTablesSameShoe(c,filtered);
       });
-      if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>applyDealerRealtime(applyLiveShowWin(c,p),p));scheduleTablesRefresh(1200);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){updateLiveTables(c=>applyDealerRealtime(applyLiveWait(c,p,baccaratTableIds),p));return}}catch{}};
+      if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>applyDealerRealtime(applyLiveShowWin(c,p),p));scheduleTablesRefresh(1200);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){
+          if(name.endsWith("/end")){
+            const endTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"");
+            refreshBetReportAfterSettlement(endTableId);
+          }
+          updateLiveTables(c=>applyDealerRealtime(applyLiveWait(c,p,baccaratTableIds),p));return}}catch{}};
     ws.onerror=()=>{if(!isCurrentSocket())return;setConnected(false);appendEvent("WebSocket 發生錯誤")};
     ws.onclose=()=>{
       clearSocketTimers();
