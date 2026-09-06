@@ -768,7 +768,7 @@ export default function HomeScreen(){
       setRecords(r=>[{side:pending.side,result:actual,amount:pending.amount,pnl:Math.round(pnl),at:Date.now()},...r].slice(0,30));
       if(outcome!=="push"){
         setStrategyLevel(level=>{
-          if(strategy==="馬丁") return outcome==="loss"?Math.min(level+1,10):0;
+          if(strategy==="馬丁") return outcome==="loss"?level+1:0;
           if(strategy==="達朗貝爾") return outcome==="loss"?Math.min(level+1,20):Math.max(0,level-1);
           if(strategy==="Fibonacci") return outcome==="loss"?Math.min(level+1,10):Math.max(0,level-2);
           if(strategy==="Paroli") return outcome==="win"?(level>=2?0:level+1):0;
@@ -981,23 +981,29 @@ export default function HomeScreen(){
     const startBetReportRefresh=()=>{
       if(betReportTimer)clearInterval(betReportTimer);
       requestBetReport();
-      // 跟原站投注報表刷新節奏一致，降低對 MT 主連線的壓力。
+      // 5 秒輪詢只當安全網；主要觸發點是每桌正式 show_win。
       betReportTimer=setInterval(requestBetReport,5000);
     };
 
-    const refreshBetReportAfterSettlement=()=>{
-      // 結算後加速抓報表，但絕不重新 authenticate / 重建 MT session。
-      // 結算後只補抓一次；不重連、不重新 authenticate。
-      // 結算後在同一條已驗證 WS 上重新要求「權威快照 + 投注報表」，
-      // 模擬手動重新連線會拿到新資料的效果，但絕不 close / reconnect / authenticate。
-      const refreshOnce=(delay:number)=>setTimeout(()=>{
-        requestTables(true);
-        if(betReportInFlight && Date.now()-betReportRequestAt>=1200)betReportInFlight=false;
+    const refreshBetReportAfterSettlement=(tableId?:string)=>{
+      // 每桌收到正式開牌結果，只把它當成「檢查本人投注報表」的觸發器。
+      // 不用桌面結果直接判定本人輸贏；最終仍以 bet/history 的本注實際結算為準。
+      appendEvent(`開牌${tableId?` ${tableId}`:""} → 檢查投注報表`);
+
+      const checkReport=(delay:number)=>setTimeout(()=>{
+        // 報表請求仍共用唯一已 authenticate 的主 WS。
+        // 絕不 close / reconnect / 再 authenticate。
+        if(betReportInFlight && Date.now()-betReportRequestAt>=700){
+          betReportInFlight=false;
+        }
         requestBetReport();
       },delay);
-      refreshOnce(1200);
-      refreshOnce(3200);
-      refreshOnce(6200);
+
+      // 立即抓；考慮後台結算寫入稍慢，再補抓 0.9 / 2.2 / 4.5 秒。
+      checkReport(0);
+      checkReport(900);
+      checkReport(2200);
+      checkReport(4500);
     };
 
     const startDealerRefresh=()=>{
@@ -1026,7 +1032,10 @@ export default function HomeScreen(){
           applyBetReport(p);
           return;
         }
-        if(name.endsWith("/show_win")||name.endsWith("/end")||name.includes("/show_win")||name.includes("/end"))refreshBetReportAfterSettlement();if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();setTimeout(requestSvg,200);setTimeout(subscribe,400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
+        if(name.endsWith("/show_win")||name.includes("/show_win")){
+          const winTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"");
+          refreshBetReportAfterSettlement(winTableId);
+        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();setTimeout(requestSvg,200);setTimeout(subscribe,400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
       updateLiveTables(c=>{
         // The first complete snapshot after every connection/reconnection is the
