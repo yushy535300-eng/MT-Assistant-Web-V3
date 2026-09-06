@@ -919,20 +919,24 @@ export default function HomeScreen(){
     const sorted=[...allOrders].sort((a,b)=>orderTimeOf(a)-orderTimeOf(b));
     const settled=sorted.filter(orderSettled);
 
-    // First response: baseline ONLY orders that definitely existed before this main WS session.
-    // This fixes the old bug where a newly-settled current bet was marked processed before Martingale saw it.
+    // v12: Martingale shares the exact same proven /bet/history response stream as 今日輸贏.
+    // The FIRST successful report response is only a baseline: remember every order ID
+    // already visible in the report, regardless of created_at/timezone. Never settle history.
+    // From the SECOND response onward, only brand-new IDs can change Martingale.
+    // If a new order first appears unsettled, it is intentionally NOT added here; once it
+    // later becomes status=3 it will still be detected and settled exactly once.
     if(!betReportPrimedRef.current){
       betReportPrimedRef.current=true;
       let baseline=0;
-      for(const o of settled){
+      for(const o of allOrders){
         const id=orderIdOf(o);
-        const t=orderTimeOf(o);
-        if(id && t>0 && t < betReportSessionStartRef.current-1000){
+        if(id && !processedBetSnRef.current.has(id)){
           processedBetSnRef.current.add(id);
           baseline++;
         }
       }
-      appendEvent(`投注報表基準完成｜歷史 ${baseline} 筆｜本次連線新單保留`);
+      appendEvent(`馬丁報表基準完成｜既有 ${baseline} 筆不追算｜後續新 betSn 開始即時結算`);
+      return;
     }
 
     const fresh=settled
