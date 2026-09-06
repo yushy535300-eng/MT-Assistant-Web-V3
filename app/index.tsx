@@ -1021,7 +1021,8 @@ export default function HomeScreen(){
     // 投注報表與牌路共用唯一已驗證的遊戲 WebSocket。
     // 同一 token 不再建立第二條 authenticate 連線，避免 MT 被伺服器踢下線。
     let dealerRefreshTimer:ReturnType<typeof setInterval>|null=null;
-    let betReportTimer:ReturnType<typeof setInterval>|null=null;
+    let betReportTimer:ReturnType<typeof setTimeout>|null=null;
+    let dataSessionRefreshTimer:ReturnType<typeof setInterval>|null=null;
     let tablesRefreshTimer:ReturnType<typeof setTimeout>|null=null;
     let reportSettlementTimer:ReturnType<typeof setTimeout>|null=null;
     let reportSettlementFollowupTimer:ReturnType<typeof setTimeout>|null=null;
@@ -1037,11 +1038,13 @@ export default function HomeScreen(){
     let reportSyncBaselinePnl:number|null=null;
     let reportSyncBaselineProcessed=0;
     let reportSyncTimer:ReturnType<typeof setTimeout>|null=null;
+    const memberWinSeen=new Set<string>();
 
     const isCurrentSocket=()=>socketGenerationRef.current===generation && socketRef.current===ws;
     const clearSocketTimers=()=>{
       if(dealerRefreshTimer)clearInterval(dealerRefreshTimer); dealerRefreshTimer=null;
-      if(betReportTimer)clearInterval(betReportTimer); betReportTimer=null;
+      if(betReportTimer)clearTimeout(betReportTimer); betReportTimer=null;
+      if(dataSessionRefreshTimer)clearInterval(dataSessionRefreshTimer); dataSessionRefreshTimer=null;
       if(tablesRefreshTimer)clearTimeout(tablesRefreshTimer); tablesRefreshTimer=null;
       if(reportSettlementTimer)clearTimeout(reportSettlementTimer); reportSettlementTimer=null;
       if(reportSettlementFollowupTimer)clearTimeout(reportSettlementFollowupTimer); reportSettlementFollowupTimer=null;
@@ -1061,9 +1064,11 @@ export default function HomeScreen(){
     };
 
     const reportPayload=()=>{
+      // Match MT/ROAD X exactly: current LOCAL calendar date with literal Z boundaries.
+      // Recomputed for every request, so 00:00 automatically switches to the new day's report.
       const now=new Date();
-      const begin=new Date(now); begin.setUTCHours(0,0,0,0);
-      const end=new Date(now); end.setUTCHours(23,59,59,0);
+      const y=now.getFullYear(),m=String(now.getMonth()+1).padStart(2,"0"),d=String(now.getDate()).padStart(2,"0");
+      const day=`${y}-${m}-${d}`;
       return {
         method:"GET",
         action:{
@@ -1073,9 +1078,9 @@ export default function HomeScreen(){
           path:"/api/v1/gametype/3/game/1/bet/history"
         },
         body:{
-          begin_at:begin.toISOString(),
+          begin_at:`${day}T00:00:00.000Z`,
           cur:1,
-          end_at:end.toISOString(),
+          end_at:`${day}T23:59:59.000Z`,
           room_id:1,
           s:8,
           table_id:0
@@ -1097,40 +1102,58 @@ export default function HomeScreen(){
       try{ws.send(JSON.stringify(reportPayload()))}catch{betReportInFlight=false}
     };
 
-    const startBetReportRefresh=()=>{
-      if(betReportTimer)clearInterval(betReportTimer);
-      requestBetReport();
-      // 2 秒安全同步：使用與 MT 報表相同的 cur:1 request。
-      // 快速結算追蹤仍由 show_win/end 觸發，這個 interval 只負責漏事件保險。
-      betReportTimer=setInterval(requestBetReport,2000);
+    const scheduleBetReportLoop=(delay=5000)=>{
+      if(betReportTimer)clearTimeout(betReportTimer);
+      betReportTimer=setTimeout(()=>{
+        betReportTimer=null;
+        if(isCurrentSocket()&&authenticated&&!betReportInFlight)requestBetReport();
+      },Math.max(250,delay));
     };
 
-    const scheduleSettlementReportProbe=(delay=320)=>{
+    const startBetReportRefresh=()=>{
+      if(betReportTimer)clearTimeout(betReportTimer);
+      betReportTimer=null;
+      // ROAD X / MT lifecycle: fetch immediately after authenticate, then response-paced 5s.
+      requestBetReport();
+    };
+
+    const scheduleSettlementReportProbe=(delay:number)=>{
       if(reportSyncTimer)clearTimeout(reportSyncTimer);
       reportSyncTimer=setTimeout(()=>{
         reportSyncTimer=null;
         if(!isCurrentSocket()||!reportSyncActive)return;
-        if(Date.now()>=reportSyncDeadline){
-          reportSyncActive=false;
-          appendEvent("結算報表快速同步結束｜保留 2 秒安全同步");
-          return;
-        }
+        if(Date.now()>=reportSyncDeadline){reportSyncActive=false;return;}
         requestBetReport();
       },delay);
     };
 
     const refreshBetReportAfterSettlement=(tableId?:string)=>{
-      // Start a response-driven fast sync window on the SAME authenticated WS.
-      // There is never a second socket. Each next probe is scheduled only after
-      // the previous /bet/history response returns, so requests cannot pile up.
-      appendEvent(`開牌${tableId?` ${tableId}`:""} → 啟動結算報表即時同步`);
+      appendEvent(`開牌${tableId?` ${tableId}`:""} → 觸發正式報表同步`);
       reportSyncActive=true;
-      reportSyncDeadline=Date.now()+12000;
+      reportSyncDeadline=Date.now()+8000;
       reportSyncBaselinePnl=todayPnlRef.current;
       reportSyncBaselineProcessed=processedBetSnRef.current.size;
       if(reportSyncTimer)clearTimeout(reportSyncTimer);
       reportSyncTimer=null;
       requestBetReport();
+      // Same settlement burst used by the proven ROAD X flow.
+      scheduleSettlementReportProbe(900);
+    };
+
+    const refreshDataSession=()=>{
+      if(!isCurrentSocket()||!authenticated||ws.readyState!==WebSocket.OPEN)return;
+      // Re-run post-auth DATA initialization on the SAME socket. Never reconnect/re-authenticate.
+      subscribed=false;
+      requestTables(true);
+      setTimeout(()=>{if(isCurrentSocket()&&authenticated)requestSvg()},25);
+      setTimeout(()=>{if(isCurrentSocket()&&authenticated)subscribe()},50);
+      setTimeout(()=>{if(isCurrentSocket()&&authenticated&&!betReportInFlight)requestBetReport()},80);
+      setTimeout(()=>{if(isCurrentSocket()&&authenticated&&!betReportInFlight)requestBetReport()},900);
+    };
+
+    const startDataSessionRefresh=()=>{
+      if(dataSessionRefreshTimer)clearInterval(dataSessionRefreshTimer);
+      dataSessionRefreshTimer=setInterval(refreshDataSession,15000);
     };
     const startDealerRefresh=()=>{
       if(dealerRefreshTimer)clearInterval(dealerRefreshTimer);
@@ -1159,6 +1182,8 @@ export default function HomeScreen(){
           const processedBefore=processedBetSnRef.current.size;
           applyBetReport(p);
           const processedAfter=processedBetSnRef.current.size;
+          // Official response re-anchors the display; schedule the next normal refresh from THIS response.
+          scheduleBetReportLoop(5000);
 
           if(reportSyncActive){
             const totalChanged=reportTodayPnl!==null && reportSyncBaselinePnl!==null && reportTodayPnl!==reportSyncBaselinePnl;
@@ -1172,17 +1197,40 @@ export default function HomeScreen(){
               reportSyncTimer=null;
               appendEvent("結算報表已追上｜今日輸贏＋馬丁已同步");
             }else if(Date.now()<reportSyncDeadline){
-              scheduleSettlementReportProbe(320);
+              scheduleSettlementReportProbe(900);
             }else{
               reportSyncActive=false;
             }
           }
           return;
         }
+        if(name.includes("/api/v1/member/me/win")){
+          const span=p?.msg?.span??p?.body?.span??p?.span;
+          if(span){
+            const tableId=String(span?.table_id??"").toUpperCase();
+            const shoe=String(span?.shoe??"");
+            const round=Number(span?.round)||0;
+            const points=Number(span?.points);
+            const key=`${tableId}|${shoe}|${round}`;
+            if(Number.isFinite(points)&&!memberWinSeen.has(key)){
+              memberWinSeen.add(key);
+              // points is whole-round account P/L: use ONLY for immediate total display, never Martingale.
+              if(todayPnlRef.current!==null){
+                const optimistic=Number(todayPnlRef.current)+points;
+                todayPnlRef.current=optimistic;
+                setTodayPnl(optimistic);
+              }
+              appendEvent(`MT 即時結算 ${tableId||"—"} 第${round||"—"}局｜補抓官方報表`);
+            }
+            setTimeout(()=>{if(isCurrentSocket()&&!betReportInFlight)requestBetReport()},80);
+            setTimeout(()=>{if(isCurrentSocket()&&!betReportInFlight)requestBetReport()},650);
+          }
+          return;
+        }
         if(name.endsWith("/show_win")||name.includes("/show_win")){
           const winTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"");
           refreshBetReportAfterSettlement(winTableId);
-        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200);subscribeTimer=setTimeout(()=>{subscribeTimer=null;if(isCurrentSocket())subscribe()},400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
+        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200);subscribeTimer=setTimeout(()=>{subscribeTimer=null;if(isCurrentSocket())subscribe()},400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
       updateLiveTables(c=>{
         // The first complete snapshot after every connection/reconnection is the
