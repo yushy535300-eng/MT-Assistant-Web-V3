@@ -630,10 +630,12 @@ export default function HomeScreen(){
   // First report response may arrive only after the current bet has already settled.
   // Keep the connection start time so that first-response baselining never swallows a new order.
   const processedBetSnRef=useRef<Set<string>>(new Set());
-  // v23: 以正式報表的 gameSn 作為「哪一局」的主鍵；betSn 只做同局去重。
-  // 若主 WS 有收到下注 /bet 封包，也會暫存該 game_sn，結算時優先精準對同一局。
+  const pendingSettlementGameSnRef=useRef<Set<string>>(new Set());
+  // v26: show_win/end 若帶 game_sn，先鎖定該局；正式 /bet/history 再以相同 gameSn 結算。
+  // v25: gameSn 是正式結算追蹤的主鍵；betSn 只作同一 gameSn 下的二次去重。
+  // 不依賴 iframe /bet Request，直接由正式 /bet/history 建立並追蹤 gameSn。
+  const processedGameSnRef=useRef<Set<string>>(new Set());
   const lastBetReportGameSnRef=useRef<string>("");
-  const trackedBetGameSnRef=useRef<string>("");
   const orbPosition=useRef(new Animated.ValueXY()).current;
   const panelPosition=useRef(new Animated.ValueXY()).current;
   const panelSizeRef=useRef({width:panelBaseWidth,height:245});
@@ -916,21 +918,9 @@ export default function HomeScreen(){
     return walk(payload,0);
   };
   const gameSnOf=(o:any)=>String(o?.gameSn??o?.game_sn??"").trim();
-  const captureBetRequest=(payload:any)=>{
-    // 只在「同一條既有主 WS」真的收到 /bet 封包時記錄，不建立第二條連線、不碰 iframe。
-    const name=eventName(payload);
-    if(!name.includes("/room/")||!name.endsWith("/bet"))return;
-    const method=String(payload?.method??"").toUpperCase();
-    if(method && method!=="POST")return;
-    const gameSn=String(payload?.body?.game_sn??payload?.body?.gameSn??"").trim();
-    const slips=payload?.body?.order?.slips;
-    if(!gameSn||!Array.isArray(slips)||!slips.length)return;
-    trackedBetGameSnRef.current=gameSn;
-    appendEvent(`馬丁追單｜已記錄下注局 ${gameSn}`);
-  };
   const applyBetReport=(payload:any)=>{
-    // v24：馬丁只看正式 /bet/history 新增的「莊/閒本注」結算。
-    // 不依賴 iframe 的 /bet Request、不猜 play_id / winner，也不碰今日輸贏邏輯。
+    // v25：gameSn 精準追蹤。只看正式 /bet/history 的莊/閒本注結算。
+    // gameSn 判斷「哪一局」，betSn 只負責同局二次去重；不猜 play_id / winner。
     const allOrders=readBetReportOrders(payload);
     if(!allOrders.length)return;
 
@@ -943,28 +933,34 @@ export default function HomeScreen(){
     // 之後只處理真正新出現的 betSn，絕不把歷史下注拿來升降階。
     if(!betReportBaselineReadyRef.current){
       betReportBaselineReadyRef.current=true;
+      // 若基準報表剛好撞上 show_win/end：pending gameSn 不能被吃成歷史基準。
+      // 其餘既有結算才標記為歷史。
       for(const o of settledMainOrders){
         const id=orderIdOf(o);
+        const gs=gameSnOf(o);
+        if(gs && pendingSettlementGameSnRef.current.has(gs)) continue;
         if(id)processedBetSnRef.current.add(id);
+        if(gs)processedGameSnRef.current.add(gs);
       }
       const latest=settledMainOrders[settledMainOrders.length-1];
       lastBetReportOrderRef.current=orderIdOf(latest);
       lastBetReportGameSnRef.current=gameSnOf(latest);
-      appendEvent(`馬丁開始追蹤｜已建立 ${settledMainOrders.length} 筆正式本注基準`);
-      return;
+      appendEvent(`馬丁 gameSn 基準完成｜${processedGameSnRef.current.size} 局`);
     }
 
-    // 同一份報表若一次多出不只一筆，全部依時間順序處理，不能只拿「最新一筆」。
+    // 優先處理 show_win/end 已鎖定的 gameSn；同時保留「基準後新出現 gameSn」作安全網。
     const freshOrders=settledMainOrders.filter(o=>{
       const id=orderIdOf(o);
-      return !!id && !processedBetSnRef.current.has(id);
+      const gs=gameSnOf(o);
+      if(!id || !gs || processedGameSnRef.current.has(gs) || processedBetSnRef.current.has(id)) return false;
+      return pendingSettlementGameSnRef.current.has(gs) || betReportBaselineReadyRef.current;
     });
     if(!freshOrders.length)return;
 
     for(const target of freshOrders){
       const betSn=orderIdOf(target);
       const gameSn=gameSnOf(target);
-      if(!betSn||processedBetSnRef.current.has(betSn))continue;
+      if(!betSn||!gameSn||processedBetSnRef.current.has(betSn)||processedGameSnRef.current.has(gameSn))continue;
 
       const mainSlip=mainBetSlipsOf(target)[0];
       if(!mainSlip)continue;
@@ -981,11 +977,13 @@ export default function HomeScreen(){
 
       // 先去重；status=3 已由 orderSettled 過濾。
       processedBetSnRef.current.add(betSn);
+      processedGameSnRef.current.add(gameSn);
+      pendingSettlementGameSnRef.current.delete(gameSn);
       lastBetReportOrderRef.current=betSn;
-      if(gameSn)lastBetReportGameSnRef.current=gameSn;
+      lastBetReportGameSnRef.current=gameSn;
 
       const pnl=refund-amount;
-      appendEvent(`馬丁正式結算｜${gameSn||"—"}｜${betSn}｜${side}｜下注 ${Math.round(amount)}｜返還 ${Math.round(refund)}｜本注 ${pnl>0?"+":""}${Math.round(pnl)}`);
+      appendEvent(`馬丁 gameSn 結算｜${gameSn}｜${side}｜下注 ${Math.round(amount)}｜返還 ${Math.round(refund)}｜本注 ${pnl>0?"+":""}${Math.round(pnl)}`);
 
       // 和局/退注：refund === bet，階級完全不變。
       if(Math.abs(pnl)<0.000001){
@@ -1034,9 +1032,10 @@ export default function HomeScreen(){
     awaitingFreshSnapshotRef.current=true;
     // New manual main-WS session: reset report baseline timing, but keep already processed order IDs.
     betReportBaselineReadyRef.current=false;
+    processedGameSnRef.current.clear();
+    pendingSettlementGameSnRef.current.clear();
     lastBetReportOrderRef.current="";
     lastBetReportGameSnRef.current="";
-    trackedBetGameSnRef.current="";
     const generation=++socketGenerationRef.current;
     const ws=new WebSocket(wsUrl);
     socketRef.current=ws;
@@ -1153,8 +1152,17 @@ export default function HomeScreen(){
       },delay);
     };
 
-    const refreshBetReportAfterSettlement=(tableId?:string)=>{
-      appendEvent(`開牌${tableId?` ${tableId}`:""} → 觸發正式報表同步`);
+    const rememberSettlementGameSn=(packet:any)=>{
+      const roots=[packet,packet?.body,packet?.msg,packet?.data,packet?.body?.span,packet?.msg?.span];
+      for(const x of roots){
+        const gs=String(x?.game_sn??x?.gameSn??"").trim();
+        if(gs){pendingSettlementGameSnRef.current.add(gs);return gs;}
+      }
+      return "";
+    };
+    const refreshBetReportAfterSettlement=(tableId?:string,packet?:any)=>{
+      const gs=packet?rememberSettlementGameSn(packet):"";
+      appendEvent(`開牌${tableId?` ${tableId}`:""}${gs?`｜gameSn ${gs}`:""} → 觸發正式報表同步`);
       reportSyncActive=true;
       reportSyncDeadline=Date.now()+8000;
       reportSyncBaselinePnl=todayPnlRef.current;
@@ -1191,7 +1199,6 @@ export default function HomeScreen(){
     ws.onopen=()=>{if(!isCurrentSocket())return;appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
     ws.onmessage=e=>{if(!isCurrentSocket())return;try{
       const p=JSON.parse(e.data),name=eventName(p);
-        captureBetRequest(p);
         if(isBetReportPayload(p)){
           betReportInFlight=false;
           const reportOrders=readBetReportOrders(p);
@@ -1239,6 +1246,7 @@ export default function HomeScreen(){
             const round=Number(span?.round)||0;
             const points=Number(span?.points);
             const key=`${tableId}|${shoe}|${round}`;
+            rememberSettlementGameSn(p);
             if(Number.isFinite(points)&&!memberWinSeen.has(key)){
               memberWinSeen.add(key);
               // points is whole-round account P/L: use ONLY for immediate total display, never Martingale.
@@ -1256,7 +1264,7 @@ export default function HomeScreen(){
         }
         if(name.endsWith("/show_win")||name.includes("/show_win")){
           const winTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"");
-          refreshBetReportAfterSettlement(winTableId);
+          refreshBetReportAfterSettlement(winTableId,p);
         }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200);subscribeTimer=setTimeout(()=>{subscribeTimer=null;if(isCurrentSocket())subscribe()},400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
       updateLiveTables(c=>{
@@ -1277,7 +1285,7 @@ export default function HomeScreen(){
       if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>applyDealerRealtime(applyLiveShowWin(c,p),p));scheduleTablesRefresh(1200);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){
           if(name.endsWith("/end")){
             const endTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"");
-            refreshBetReportAfterSettlement(endTableId);
+            refreshBetReportAfterSettlement(endTableId,p);
           }
           updateLiveTables(c=>applyDealerRealtime(applyLiveWait(c,p,baccaratTableIds),p));return}}catch{}};
     ws.onerror=()=>{if(!isCurrentSocket())return;setConnected(false);appendEvent("WebSocket 發生錯誤")};
