@@ -630,6 +630,10 @@ export default function HomeScreen(){
   // First report response may arrive only after the current bet has already settled.
   // Keep the connection start time so that first-response baselining never swallows a new order.
   const processedBetSnRef=useRef<Set<string>>(new Set());
+  // v23: 以正式報表的 gameSn 作為「哪一局」的主鍵；betSn 只做同局去重。
+  // 若主 WS 有收到下注 /bet 封包，也會暫存該 game_sn，結算時優先精準對同一局。
+  const lastBetReportGameSnRef=useRef<string>("");
+  const trackedBetGameSnRef=useRef<string>("");
   const orbPosition=useRef(new Animated.ValueXY()).current;
   const panelPosition=useRef(new Animated.ValueXY()).current;
   const panelSizeRef=useRef({width:panelBaseWidth,height:245});
@@ -911,50 +915,83 @@ export default function HomeScreen(){
     };
     return walk(payload,0);
   };
+  const gameSnOf=(o:any)=>String(o?.gameSn??o?.game_sn??"").trim();
+  const captureBetRequest=(payload:any)=>{
+    // 只在「同一條既有主 WS」真的收到 /bet 封包時記錄，不建立第二條連線、不碰 iframe。
+    const name=eventName(payload);
+    if(!name.includes("/room/")||!name.endsWith("/bet"))return;
+    const method=String(payload?.method??"").toUpperCase();
+    if(method && method!=="POST")return;
+    const gameSn=String(payload?.body?.game_sn??payload?.body?.gameSn??"").trim();
+    const slips=payload?.body?.order?.slips;
+    if(!gameSn||!Array.isArray(slips)||!slips.length)return;
+    trackedBetGameSnRef.current=gameSn;
+    appendEvent(`馬丁追單｜已記錄下注局 ${gameSn}`);
+  };
   const applyBetReport=(payload:any)=>{
-    // v22: 馬丁只追「最新一筆已正式結算的莊/閒本注」。
-    // 今日輸贏、member/me/win、WS、牌路一律不在這裡修改。
+    // v23：正式結算唯一判斷來源仍是 /bet/history。
+    // 優先用已捕捉的下注 game_sn 精準找 gameSn；若主 WS 沒有回送下注封包，
+    // 就用「基準之後新出現的 gameSn」判定新結算，避免把 play_id / winner / play_code 混用。
+    // 今日輸贏邏輯完全不在這裡修改。
     const allOrders=readBetReportOrders(payload);
     if(!allOrders.length)return;
 
     const settledMainOrders=[...allOrders]
-      .filter(o=>!!orderIdOf(o) && orderSettled(o) && mainBetSlipsOf(o).length>0)
+      .filter(o=>!!orderIdOf(o) && !!gameSnOf(o) && orderSettled(o) && mainBetSlipsOf(o).length>0)
       .sort((a,b)=>orderTimeOf(b)-orderTimeOf(a));
-    const latestOrder=settledMainOrders[0];
-    if(!latestOrder)return;
+    if(!settledMainOrders.length)return;
 
-    const betSn=orderIdOf(latestOrder);
-    const mainSlip=mainBetSlipsOf(latestOrder)[0];
-    if(!betSn||!mainSlip)return;
-    const contentName=String(mainSlip?.content_name??mainSlip?.contentName??"").trim();
-    if(contentName!=="莊" && contentName!=="閒")return;
-
-    // 連線後第一次成功取得正式報表，只建立「目前最新一筆」基準。
-    // 從第二次開始，只要最新 betSn 改變，就是新的已結算本注。
+    // 第一次報表只建立連線前基準，不把歷史單拿來升降階。
     if(!betReportBaselineReadyRef.current){
+      const baseline=settledMainOrders[0];
       betReportBaselineReadyRef.current=true;
-      lastBetReportOrderRef.current=betSn;
-      processedBetSnRef.current.add(betSn);
-      appendEvent(`馬丁開始追蹤｜基準本注 ${betSn}｜${contentName}`);
+      lastBetReportOrderRef.current=orderIdOf(baseline);
+      lastBetReportGameSnRef.current=gameSnOf(baseline);
+      processedBetSnRef.current.add(orderIdOf(baseline));
+      appendEvent(`馬丁開始追蹤｜基準局 ${gameSnOf(baseline)}｜${orderIdOf(baseline)}`);
       return;
     }
 
-    if(lastBetReportOrderRef.current===betSn)return;
+    const wantedGameSn=trackedBetGameSnRef.current;
+    let target:any=null;
+    if(wantedGameSn){
+      target=settledMainOrders.find(o=>gameSnOf(o)===wantedGameSn)??null;
+      if(!target)return; // 已知自己下哪局，就等該局正式 status=3，不拿別局代替。
+    }else{
+      target=settledMainOrders.find(o=>{
+        const id=orderIdOf(o), gs=gameSnOf(o);
+        return !!id && !!gs && !processedBetSnRef.current.has(id) && gs!==lastBetReportGameSnRef.current;
+      })??null;
+      if(!target)return;
+    }
+
+    const betSn=orderIdOf(target);
+    const gameSn=gameSnOf(target);
+    if(!betSn||!gameSn||processedBetSnRef.current.has(betSn))return;
+
+    const mainSlips=mainBetSlipsOf(target);
+    // 正常莊/閒本注只應有一筆；若同一 order 有其他旁注，mainBetSlipsOf 已排除。
+    const mainSlip=mainSlips[0];
+    if(!mainSlip)return;
+    const contentName=String(mainSlip?.content_name??mainSlip?.contentName??"").trim();
+    if(contentName!=="莊" && contentName!=="閒")return;
 
     const side:BetSide=contentName==="閒"?"閒":"莊";
     const amount=Number(String(mainSlip?.bet??"").replace(/,/g,""));
     const refund=Number(String(mainSlip?.refund??mainSlip?.win??"").replace(/,/g,""));
     if(!Number.isFinite(amount)||amount<=0||!Number.isFinite(refund)){
-      appendEvent(`馬丁略過新本注 ${betSn}｜金額解析失敗`);
+      appendEvent(`馬丁略過 ${gameSn}｜本注金額解析失敗`);
       return;
     }
 
-    // 先鎖定這個最新 betSn，避免同一筆報表重複刷新造成連升。
-    lastBetReportOrderRef.current=betSn;
+    // status=3 + content_name 莊/閒 + refund-bet 才能推進馬丁。
     processedBetSnRef.current.add(betSn);
+    lastBetReportOrderRef.current=betSn;
+    lastBetReportGameSnRef.current=gameSn;
+    if(wantedGameSn===gameSn)trackedBetGameSnRef.current="";
 
     const pnl=refund-amount;
-    appendEvent(`馬丁新本注｜${betSn}｜${side}｜下注 ${Math.round(amount)}｜返還 ${Math.round(refund)}｜本注 ${pnl>0?"+":""}${Math.round(pnl)}`);
+    appendEvent(`馬丁正式結算｜${gameSn}｜${betSn}｜${side}｜下注 ${Math.round(amount)}｜返還 ${Math.round(refund)}｜本注 ${pnl>0?"+":""}${Math.round(pnl)}`);
 
     if(pnl===0){
       appendEvent(`馬丁｜和局/退注｜階級維持`);
@@ -1004,6 +1041,8 @@ export default function HomeScreen(){
     // New manual main-WS session: reset report baseline timing, but keep already processed order IDs.
     betReportBaselineReadyRef.current=false;
     lastBetReportOrderRef.current="";
+    lastBetReportGameSnRef.current="";
+    trackedBetGameSnRef.current="";
     const generation=++socketGenerationRef.current;
     const ws=new WebSocket(wsUrl);
     socketRef.current=ws;
@@ -1158,6 +1197,7 @@ export default function HomeScreen(){
     ws.onopen=()=>{if(!isCurrentSocket())return;appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
     ws.onmessage=e=>{if(!isCurrentSocket())return;try{
       const p=JSON.parse(e.data),name=eventName(p);
+        captureBetRequest(p);
         if(isBetReportPayload(p)){
           betReportInFlight=false;
           const reportOrders=readBetReportOrders(p);
