@@ -824,75 +824,79 @@ export default function HomeScreen(){
     return Number.isFinite(n)?n:0;
   };
   const orderSettled=(o:any)=>{
-    const status=String(o?.status??o?.state??o?.settle_status??"").toLowerCase();
-    return orderPnlOf(o)!==null || /settle|finish|complete|done|結算|已派彩/.test(status);
+    const raw=o?.status??o?.state??o?.settle_status;
+    if(Number(raw)===3)return true;
+    const status=String(raw??"").toLowerCase();
+    return /settled|finished|completed|done|結算完成|已派彩/.test(status);
   };
   const applyBetReport=(payload:any)=>{
-    const orders=readBetReportOrders(payload).filter(orderSettled);
-    if(!orders.length){appendEvent("投注報表：目前沒有已結算注單");return;}
-    appendEvent(`投注報表已更新｜${orders.length} 筆`);
+    const allOrders=readBetReportOrders(payload);
+    if(!allOrders.length){appendEvent("投注報表：目前沒有注單");return;}
 
-    // First response only establishes the historical baseline.
+    // Only status=3 (or an explicit completed state) may enter settlement logic.
+    const settled=allOrders.filter(orderSettled);
+
+    // Establish historical baseline once per app session.
+    // Importantly, unfinished rows are NOT added to processed.
     if(!betReportPrimedRef.current){
       betReportPrimedRef.current=true;
-      const ids=orders.map(orderIdOf).filter(Boolean);
-      ids.forEach(id=>processedBetSnRef.current.add(id));
-      lastBetReportOrderRef.current=ids.join("|");
-      appendEvent(`投注報表已連線｜基準 ${orders.length} 筆`);
+      for(const o of settled){
+        const id=orderIdOf(o);
+        if(id)processedBetSnRef.current.add(id);
+      }
+      appendEvent(`投注報表即時同步啟動｜已結算基準 ${settled.length} 筆`);
       return;
     }
 
-    const seen=processedBetSnRef.current;
-    const fresh=orders.filter(o=>{
+    const fresh=settled
+      .filter(o=>{
+        const id=orderIdOf(o);
+        return id&&!processedBetSnRef.current.has(id);
+      })
+      .sort((a,b)=>Number(a?.created_at??0)-Number(b?.created_at??0));
+
+    for(const o of fresh){
       const id=orderIdOf(o);
-      return id&&!seen.has(id);
-    }).sort((a,b)=>Number(a?.created_at??0)-Number(b?.created_at??0));
+      const pnl=orderPnlOf(o);
+      const amount=Math.round(orderBetOf(o));
 
-    if(!fresh.length)return;
-
-    for(const newest of fresh){
-      const orderId=orderIdOf(newest);
-      const pnl=orderPnlOf(newest);
-      const amount=Math.round(orderBetOf(newest));
-      seen.add(orderId);
-      processedBetSnRef.current.add(orderId);
-      appendEvent(`偵測新注單｜${orderId}`);
-
-      if(pnl===null){
-        appendEvent(`投注報表 ${orderId}：無法判斷本注結算`);
+      // Do not consume the betSn until settlement has actually been understood.
+      if(!id||pnl===null){
+        if(id)appendEvent(`注單 ${id} 已結算，但本注輸贏尚無法解析，保留等待下次`);
         continue;
       }
+
+      const main=mainBetSlipsOf(o);
+      const side=String(main?.[0]?.content_name??"")==="閒"?"閒":"莊";
+
       if(pnl===0){
-        appendEvent(`投注報表 ${orderId}：本注和/退注，馬丁維持第 ${strategyLevel+1} 階`);
+        appendEvent(`即時結算｜${id}｜本注 ${amount}｜0｜和/退注，馬丁不變`);
+        processedBetSnRef.current.add(id);
         continue;
       }
 
-      const outcome=pnl>0?"win":"loss";
+      const win=pnl>0;
       setBankroll(v=>Math.round(v+pnl));
       setRecords(r=>[{
-        side:(String(newest?.slips?.[0]?.content_name??"莊")==="閒"?"閒":"莊") as BetSide,
-        result:(outcome==="win"
-          ? (String(newest?.slips?.[0]?.content_name??"莊")==="閒"?"閒":"莊")
-          : (String(newest?.slips?.[0]?.content_name??"莊")==="閒"?"莊":"閒")) as Result,
+        side:side as BetSide,
+        result:(win?side:(side==="閒"?"莊":"閒")) as Result,
         amount,
         pnl:Math.round(pnl),
         at:Date.now()
       },...r].slice(0,30));
 
-      // ROAD X Martingale: only the actual main bet settlement changes the stage.
-      if(outcome==="win")setStrategyLevel(0);
-      appendEvent(`馬丁自動結算 ${orderId}｜本注 ${amount}｜${pnl>0?"+":""}${Math.round(pnl)}｜${outcome==="win"?"WIN → 第1階":"LOSE → 下一階"}`);
-      if(outcome==="win")appendEvent(`下一注：${baseBet.toLocaleString()}`);
-      else setStrategyLevel(level=>{
-        const nextLevel=level+1;
-        const next=baseBet*(Math.pow(2,nextLevel+1)-1);
-        appendEvent(`下一注：${Math.round(next).toLocaleString()}`);
+      // Update the EXISTING Martingale state first.
+      setStrategyLevel(level=>{
+        const nextLevel=win?0:level+1;
+        const nextStake=baseBet*(Math.pow(2,nextLevel+1)-1);
+        appendEvent(`即時結算｜${id}｜本注 ${amount}｜${pnl>0?"+":""}${Math.round(pnl)}｜${win?"WIN":"LOSE"}`);
+        appendEvent(`馬丁｜第 ${level+1} 階 → 第 ${nextLevel+1} 階｜下一注 ${Math.round(nextStake).toLocaleString()}`);
         return nextLevel;
       });
-    }
 
-    // Keep a readable snapshot too; processedBetSnRef is the authoritative dedupe set.
-    lastBetReportOrderRef.current=orders.map(orderIdOf).filter(Boolean).join("|");
+      // Mark processed only AFTER the Martingale update has been queued.
+      processedBetSnRef.current.add(id);
+    }
   };
 
   const startConnection=(autoReason?:string)=>{
@@ -933,20 +937,53 @@ export default function HomeScreen(){
     // table metadata lightly while connected; live game packets still arrive at full speed.
     let dealerRefreshTimer:ReturnType<typeof setInterval>|null=null;
     let betReportTimer:ReturnType<typeof setInterval>|null=null;
+    let betReportInFlight=false;
+    let betReportQueued=false;
+    let betReportSentAt=0;
+
     const startDealerRefresh=()=>{
       if(dealerRefreshTimer)clearInterval(dealerRefreshTimer);
       dealerRefreshTimer=setInterval(()=>requestTables(true),3000);
     };
+
+    const sendBetReportSerialized=()=>{
+      if(!authenticated||ws.readyState!==WebSocket.OPEN)return;
+      // Never allow two bet/history requests to overlap.
+      if(betReportInFlight){
+        betReportQueued=true;
+        return;
+      }
+      betReportInFlight=true;
+      betReportQueued=false;
+      betReportSentAt=Date.now();
+      requestBetReport();
+    };
+
+    const finishBetReportRequest=()=>{
+      betReportInFlight=false;
+      if(betReportQueued){
+        betReportQueued=false;
+        setTimeout(sendBetReportSerialized,80);
+      }
+    };
+
     const startBetReportRefresh=()=>{
       if(betReportTimer)clearInterval(betReportTimer);
-      requestBetReport();
-      betReportTimer=setInterval(requestBetReport,2000);
+      sendBetReportSerialized();
+      // Keep report synchronization alive for the entire authenticated connection.
+      betReportTimer=setInterval(()=>{
+        // Recover if a response was lost; otherwise keep exactly one request in flight.
+        if(betReportInFlight&&Date.now()-betReportSentAt>3500)betReportInFlight=false;
+        sendBetReportSerialized();
+      },1000);
     };
+
     const refreshBetReportAfterSettlement=()=>{
-      // Report settlement can arrive slightly after the table result.
-      setTimeout(requestBetReport,300);
-      setTimeout(requestBetReport,1000);
-      setTimeout(requestBetReport,2000);
+      // Table settlement is an accelerator only. It joins the same serialized queue.
+      betReportQueued=true;
+      setTimeout(sendBetReportSerialized,120);
+      setTimeout(sendBetReportSerialized,650);
+      setTimeout(sendBetReportSerialized,1400);
     };
     const subscribe=()=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/mulitple_join",data:{table_id:baccaratTableIds.join(",")}}}));subscribed=true;appendEvent("已訂閱 15 桌即時事件")}};
     ws.onopen=()=>{appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
@@ -962,7 +999,7 @@ export default function HomeScreen(){
         }
       }catch{}
       const p=JSON.parse(e.data),name=eventName(p);
-        if(name.includes("/bet/history")){applyBetReport(p);return}
+        if(name.includes("/bet/history")){applyBetReport(p);finishBetReportRequest();return}
         if(name.endsWith("/show_win")||name.endsWith("/end")||name.includes("/show_win")||name.includes("/end"))refreshBetReportAfterSettlement();if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();setTimeout(requestSvg,200);setTimeout(subscribe,400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
       updateLiveTables(c=>{
@@ -999,7 +1036,7 @@ export default function HomeScreen(){
         return applyTablesSameShoe(c,filtered);
       });
       if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>applyDealerRealtime(applyLiveShowWin(c,p),p));setTimeout(requestSvg,350);setTimeout(()=>requestTables(true),450);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){updateLiveTables(c=>applyDealerRealtime(applyLiveWait(c,p,baccaratTableIds),p));setTimeout(()=>requestTables(true),180);return}}catch{}};
-    ws.onerror=()=>{setConnected(false);appendEvent("WebSocket 發生錯誤")};ws.onclose=()=>{if(dealerRefreshTimer)clearInterval(dealerRefreshTimer);dealerRefreshTimer=null;if(betReportTimer)clearInterval(betReportTimer);betReportTimer=null;setConnected(false);appendEvent("WebSocket 已中斷")};
+    ws.onerror=()=>{setConnected(false);appendEvent("WebSocket 發生錯誤")};ws.onclose=()=>{if(dealerRefreshTimer)clearInterval(dealerRefreshTimer);dealerRefreshTimer=null;if(betReportTimer)clearInterval(betReportTimer);betReportTimer=null;betReportInFlight=false;betReportQueued=false;setConnected(false);appendEvent("WebSocket 已中斷")};
   };
   const stopConnection=()=>{if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}reconnectingRef.current=false;awaitingFreshSnapshotRef.current=false;socket?.close();setSocket(null);setConnected(false);appendEvent("已手動中斷")};
   const syncAssist=()=>{if(socket?.readyState===WebSocket.OPEN){socket.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));appendEvent("懸浮輔助已要求同步")}else notify("尚未連線")};
