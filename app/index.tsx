@@ -779,6 +779,95 @@ export default function HomeScreen(){
   useEffect(()=>{
     if(Platform.OS!=="web" || typeof document==="undefined") return;
     document.title="MT Assistant";
+    const scrollbarStyleId="mt-hidden-scrollbar";
+    if(!document.getElementById(scrollbarStyleId)){
+      const style=document.createElement("style");
+      style.id=scrollbarStyleId;
+      style.textContent=`
+        html,body,#root{
+          scrollbar-width:none !important;
+          -ms-overflow-style:none !important;
+        }
+        html::-webkit-scrollbar,
+        body::-webkit-scrollbar,
+        #root::-webkit-scrollbar{
+          width:0 !important;
+          height:0 !important;
+          display:none !important;
+        }
+      `;
+      document.head.appendChild(style);
+      const skinStyleId="mt-ui-skin-v1";
+      if(!document.getElementById(skinStyleId)){
+        const skin=document.createElement("style");
+        skin.id=skinStyleId;
+        skin.textContent=`
+          :root{
+            --mt-bg:#070d15;
+            --mt-panel:#0b1623;
+            --mt-line:rgba(94,142,181,.32);
+            --mt-text:#edf6ff;
+          }
+          html,body,#root{
+            background:
+              radial-gradient(circle at 50% -15%,rgba(31,91,137,.13),transparent 34%),
+              linear-gradient(180deg,#08111c 0%,#070d15 58%,#060b12 100%) !important;
+          }
+          button,[role="button"]{
+            transition:filter .16s ease,box-shadow .16s ease,transform .16s ease;
+          }
+          button:hover,[role="button"]:hover{
+            filter:brightness(1.08);
+          }
+          img,video{
+            image-rendering:auto;
+          }
+          *{
+            -webkit-tap-highlight-color:transparent;
+          }
+        `;
+        document.head.appendChild(skin);
+      const skinV6Id="mt-ui-skin-v6";
+      if(!document.getElementById(skinV6Id)){
+        const v6=document.createElement("style");
+        v6.id=skinV6Id;
+        v6.textContent=`
+          /* MT COMMAND CENTER v6 — visual treatment only */
+          body{
+            background:
+              radial-gradient(900px 360px at 50% -120px,rgba(40,116,170,.16),transparent 70%),
+              radial-gradient(700px 300px at 8% 25%,rgba(25,79,116,.07),transparent 72%),
+              linear-gradient(180deg,#07101a 0%,#060c13 100%) !important;
+          }
+          button,[role="button"]{
+            border-color:rgba(117,173,213,.34) !important;
+            box-shadow:
+              inset 0 1px 0 rgba(255,255,255,.06),
+              0 1px 3px rgba(0,0,0,.22);
+          }
+          button:hover,[role="button"]:hover{
+            filter:brightness(1.11) saturate(1.03);
+            box-shadow:
+              inset 0 1px 0 rgba(255,255,255,.09),
+              0 0 0 1px rgba(111,180,229,.10),
+              0 3px 10px rgba(0,0,0,.24);
+          }
+          button:active,[role="button"]:active{
+            filter:brightness(.97);
+          }
+          video{
+            filter:saturate(.98) contrast(1.02);
+          }
+          ::selection{
+            background:rgba(45,139,203,.30);
+          }
+        `;
+        document.head.appendChild(v6);
+      }
+
+      }
+
+    }
     let link=document.querySelector('link[rel="apple-touch-icon"]') as HTMLLinkElement | null;
     if(!link){
       link=document.createElement("link");
@@ -1523,7 +1612,7 @@ export default function HomeScreen(){
 }
 
 const s=StyleSheet.create({
-  screen:{flex:1,backgroundColor:"#080E17"},screenDesktopZoom:{zoom:1.18,width:"84.7458%",height:"84.7458%",marginLeft:"auto",marginRight:"auto"},row:{flexDirection:"row",alignItems:"center",gap:6},brandRow:{flexDirection:"row",alignItems:"center",gap:8},
+  screen:{flex:1,backgroundColor:"#060D15"},screenDesktopZoom:{zoom:1.18,width:"84.7458%",height:"84.7458%",marginLeft:"auto",marginRight:"auto"},row:{flexDirection:"row",alignItems:"center",gap:6},brandRow:{flexDirection:"row",alignItems:"center",gap:8},
   topbar:{minHeight:58,paddingHorizontal:14,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#1C3448"},brandIcon:{width:34,height:34,borderRadius:8,borderWidth:1,borderColor:"#8C7425",alignItems:"center",justifyContent:"center"},kicker:{color:"#7890A3",fontSize:8,letterSpacing:1.1},title:{color:"#F2F6F9",fontSize:16,fontWeight:"800"},
   lineBtn:{height:34,paddingHorizontal:9,borderRadius:7,backgroundColor:"#0C9B43",flexDirection:"row",alignItems:"center",gap:5},lineLogo:{width:23,height:23,borderRadius:11.5,backgroundColor:"#fff",alignItems:"center",justifyContent:"center"},lineLogoText:{fontSize:5.5,fontWeight:"900",color:"#0C9B43"},lineText:{color:"#fff",fontSize:10,fontWeight:"900"},headerBtn:{height:34,paddingHorizontal:9,borderRadius:7,backgroundColor:"#18344C",flexDirection:"row",alignItems:"center",gap:5,borderWidth:1,borderColor:"#2A4A63"},headerBtnText:{color:"#fff",fontSize:10,fontWeight:"800"},
   content:{padding:10,paddingBottom:90},overview:{borderWidth:1,borderColor:"#244158",borderRadius:8,padding:12,flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:10,backgroundColor:"#0E1B28",overflow:"hidden"},overviewMobile:{flexDirection:"column",alignItems:"stretch",gap:10},overviewTextMobile:{width:"100%"},overKicker:{color:"#6E99B9",fontSize:7,letterSpacing:1.4},overTitle:{color:"#fff",fontSize:18,fontWeight:"900",marginTop:2},overSub:{color:"#7E92A2",fontSize:9,marginTop:3},overStats:{flexDirection:"row",gap:8},overStatsMobile:{width:"100%",gap:6},overStat:{minWidth:112,borderWidth:1,borderColor:"#28475D",borderRadius:6,padding:9},overStatMobile:{flex:1,minWidth:0,padding:8},overValue:{color:"#fff",fontSize:13,fontWeight:"900",marginTop:4},listHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:7},listTitle:{color:"#F2F6F9",fontSize:15,fontWeight:"900"},listHint:{color:"#73899A",fontSize:8},
