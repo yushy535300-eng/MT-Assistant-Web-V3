@@ -799,6 +799,9 @@ export default function HomeScreen(){
   const reconnectCooldownUntilRef=useRef(0);
   const awaitingFreshSnapshotRef=useRef(false);
   const reconnectTimerRef=useRef<ReturnType<typeof setTimeout>|null>(null);
+  const reconnectAttemptRef=useRef(0);
+  const manualDisconnectRef=useRef(false);
+  const lastSocketMessageAtRef=useRef(0);
   const roomDropdownScrollRef=useRef<ScrollView|null>(null);
   const roomDropdownOffsetRef=useRef(0);
   const [tables,setTables]=useState<TableData[]>(initialTables);
@@ -1407,7 +1410,7 @@ export default function HomeScreen(){
     }
   };
 
-  const startConnection=(autoReason?:string)=>{
+  const startConnection=(autoReason?:string,isReconnect=false)=>{
     const authToken=extractMtUrlToken(token||mtUrl);
     if(!authToken){notify("請貼登入後含 token 的 MT 網址");reconnectingRef.current=false;return}
     if(autoReason){
@@ -1425,15 +1428,17 @@ export default function HomeScreen(){
       return;
     }
     awaitingFreshSnapshotRef.current=true;
-    // v27: 在 WebSocket 建立前就開始計時。第一包報表即使晚到，
-    // 只要下注 created_at >= 這個時間，就必須當成新單結算馬丁。
-    betTrackingStartedAtRef.current=Date.now();
-    // New manual main-WS session: reset report baseline timing, but keep already processed order IDs.
-    betReportBaselineReadyRef.current=false;
-    processedGameSnRef.current.clear();
-    pendingSettlementGameSnRef.current.clear();
-    lastBetReportOrderRef.current="";
-    lastBetReportGameSnRef.current="";
+    manualDisconnectRef.current=false;
+    if(!isReconnect){
+      // 只有使用者主動開始新連線時才重設報表追蹤基準。自動重連沿用原狀態，避免重複結算。
+      betTrackingStartedAtRef.current=Date.now();
+      betReportBaselineReadyRef.current=false;
+      processedGameSnRef.current.clear();
+      pendingSettlementGameSnRef.current.clear();
+      lastBetReportOrderRef.current="";
+      lastBetReportGameSnRef.current="";
+      reconnectAttemptRef.current=0;
+    }
     const generation=++socketGenerationRef.current;
     const ws=new WebSocket(wsUrl);
     socketRef.current=ws;
@@ -1451,6 +1456,7 @@ export default function HomeScreen(){
     let reportSettlementFollowupTimer:ReturnType<typeof setTimeout>|null=null;
     let svgRefreshTimer:ReturnType<typeof setTimeout>|null=null;
     let subscribeTimer:ReturnType<typeof setTimeout>|null=null;
+    let connectionWatchdogTimer:ReturnType<typeof setInterval>|null=null;
     let betReportInFlight=false;
     let betReportRequestAt=0;
     // Short-lived settlement sync cycle. We cannot observe the cross-origin MT report UI
@@ -1475,6 +1481,7 @@ export default function HomeScreen(){
       reportSyncActive=false;
       if(svgRefreshTimer)clearTimeout(svgRefreshTimer); svgRefreshTimer=null;
       if(subscribeTimer)clearTimeout(subscribeTimer); subscribeTimer=null;
+      if(connectionWatchdogTimer)clearInterval(connectionWatchdogTimer); connectionWatchdogTimer=null;
     };
     // Collapse bursts from 15 tables into one snapshot request.
     const scheduleTablesRefresh=(delay=700)=>{
@@ -1594,7 +1601,7 @@ export default function HomeScreen(){
       dealerRefreshTimer=setInterval(()=>{if(isCurrentSocket())requestTables(true)},10000);
     };
     const subscribe=()=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/mulitple_join",data:{table_id:baccaratTableIds.join(",")}}}));subscribed=true;appendEvent("已訂閱 15 桌即時事件")}};
-    ws.onopen=()=>{if(!isCurrentSocket())return;appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
+    ws.onopen=()=>{if(!isCurrentSocket())return;lastSocketMessageAtRef.current=Date.now();appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
     ws.onmessage=e=>{if(!isCurrentSocket())return;try{
       const p=JSON.parse(e.data),name=eventName(p);
         if(isBetReportPayload(p)){
@@ -1663,7 +1670,21 @@ export default function HomeScreen(){
         if(name.endsWith("/show_win")||name.includes("/show_win")){
           const winTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"");
           refreshBetReportAfterSettlement(winTableId,p);
-        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200);subscribeTimer=setTimeout(()=>{subscribeTimer=null;if(isCurrentSocket())subscribe()},400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
+        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;
+        reconnectAttemptRef.current=0;
+        lastSocketMessageAtRef.current=Date.now();
+        if(!connectionWatchdogTimer){
+          connectionWatchdogTimer=setInterval(()=>{
+            if(!isCurrentSocket()||ws.readyState!==WebSocket.OPEN)return;
+            const silentFor=Date.now()-lastSocketMessageAtRef.current;
+            // 先用同一條已驗證 WS 做輕量同步；只有長時間完全無封包才讓 onclose 走安全重連。
+            if(silentFor>30000)requestSvg();
+            if(silentFor>75000){
+              appendEvent("連線長時間無回應，準備安全重連");
+              try{ws.close()}catch{}
+            }
+          },15000);
+        };setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200);subscribeTimer=setTimeout(()=>{subscribeTimer=null;if(isCurrentSocket())subscribe()},400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
       updateLiveTables(c=>{
         // The first complete snapshot after every connection/reconnection is the
@@ -1695,9 +1716,20 @@ export default function HomeScreen(){
       setSocket(null);
       setConnected(false);
       appendEvent("WebSocket 已中斷");
+      if(!manualDisconnectRef.current){
+        const attempt=Math.min(reconnectAttemptRef.current++,5);
+        const delay=Math.min(1500*Math.pow(2,attempt),20000);
+        if(reconnectTimerRef.current)clearTimeout(reconnectTimerRef.current);
+        appendEvent(`將於 ${Math.round(delay/1000)} 秒後自動重連`);
+        reconnectTimerRef.current=setTimeout(()=>{
+          reconnectTimerRef.current=null;
+          if(!manualDisconnectRef.current&&!socketRef.current)startConnection(undefined,true);
+        },delay);
+      }
     };
   };
   const stopConnection=()=>{
+    manualDisconnectRef.current=true;
     if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}
     reconnectingRef.current=false;
     awaitingFreshSnapshotRef.current=false;
@@ -1854,7 +1886,7 @@ const s=StyleSheet.create({
   cardsGrid:{width:"100%",alignSelf:"center"},cardsGridDesktop:{flexDirection:"row",flexWrap:"wrap",gap:10},cardsGridDesktopCentered:{maxWidth:1280},cardWrap:{width:"100%"},cardWrapDesktop:{width:"calc(50% - 5px)" as any,maxWidth:635},tableCard:{backgroundColor:"#08111A",borderWidth:1,borderColor:"#365B73",overflow:"hidden",marginBottom:10,shadowColor:"#000",shadowOpacity:0.28,shadowRadius:4},tableCardDesktop:{},tableHead:{height:28,paddingHorizontal:5,backgroundColor:"#091621",flexDirection:"row",justifyContent:"space-between",alignItems:"center",borderBottomWidth:1,borderBottomColor:"#27485E"},game:{color:"#EAF6FF",fontSize:9,fontWeight:"700"},tableId:{color:"#F8FCFF",borderWidth:1,borderColor:"#6E91A8",paddingHorizontal:6,paddingVertical:1,fontSize:9,fontWeight:"900",backgroundColor:"#0E202E"},headText:{color:"#B9CEDC",fontSize:8,fontWeight:"800"},statText:{fontSize:8,fontWeight:"900"},countWrap:{height:20,minWidth:28,borderWidth:1,borderColor:"#8D2030",borderRadius:4,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:2,paddingHorizontal:3},countdown:{color:"#FF5362",fontSize:8,fontWeight:"900"},miniBtn:{height:20,paddingHorizontal:6,borderRadius:4,alignItems:"center",justifyContent:"center",borderColor:"#3A6078",shadowColor:"#000",shadowOpacity:0.22,shadowRadius:2},miniBtnText:{color:"#fff",fontSize:7,fontWeight:"900"},
   tableBody:{flexDirection:"row",height:176,backgroundColor:"#fff",overflow:"hidden"},tableBodyDesktop:{height:190},tableBodyMobile:{height:164},dealer:{width:112,backgroundColor:"#F2F0EC",padding:4,justifyContent:"flex-end"},dealerDesktop:{width:"21.88%"},dealerMobile:{width:"21.88%",minWidth:76},photo:{position:"absolute",top:3,left:3,right:3,height:112,backgroundColor:"#DCE2E6",alignItems:"center",justifyContent:"center",overflow:"hidden"},photoDesktop:{height:"75%"},photoMobile:{height:"73%"},photoImage:{width:"100%",height:"100%",resizeMode:"cover"},liveMediaFill:{width:"100%",height:"100%",alignItems:"center",justifyContent:"center",overflow:"hidden"},crown:{fontSize:30,color:"#C5A24C"},dealerName:{color:"#FFFFFF",backgroundColor:"#6F2F82",alignSelf:"flex-start",paddingHorizontal:5,paddingVertical:2,fontSize:11,fontWeight:"900",lineHeight:14},meta:{color:"#617889",fontSize:8.5,fontWeight:"700",lineHeight:11,marginTop:1},metaVideoRow:{height:12,flexDirection:"row",alignItems:"center",marginTop:1,overflow:"hidden"},metaVideoText:{flexShrink:1,marginTop:0,lineHeight:11},videoLabel:{color:"#7890A1",fontSize:7.5,fontWeight:"800",marginLeft:3,marginRight:2,lineHeight:10},videoSwitch:{width:18,height:9,borderRadius:5,backgroundColor:"#667B89",padding:1,justifyContent:"center"},videoSwitchOn:{backgroundColor:"#19B96C"},videoSwitchKnob:{width:7,height:7,borderRadius:3.5,backgroundColor:"#fff",alignSelf:"flex-start"},videoSwitchKnobOn:{alignSelf:"flex-end"},
   roadArea:{flex:1,flexDirection:"row",backgroundColor:"#fff",minWidth:0,overflow:"hidden"},roadAreaDesktop:{},beadPane:{width:"32%",height:"100%",flexShrink:0,borderRightWidth:1,borderColor:"#C9D2D9",overflow:"hidden",backgroundColor:"#FFFFFF"},beadPaneDesktop:{width:"32%"},beadGrid:{width:"100%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",backgroundColor:"#FFFFFF"},beadCell:{width:"16.6666667%",height:"16.6666667%",flexGrow:0,flexShrink:0,borderRightWidth:1,borderBottomWidth:1,borderColor:"#D9DEE3",alignItems:"center",justifyContent:"center",backgroundColor:"#FFFFFF"},beadCellDesktop:{},beadDot:{width:"72%",aspectRatio:1,borderRadius:999,borderWidth:1,alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:.10,shadowRadius:1,elevation:1},beadDotDesktop:{width:"70%"},beadDotText:{color:"#FFFFFF",fontSize:8,fontWeight:"900",lineHeight:10,textAlign:"center"},beadDotTextDesktop:{fontSize:9,lineHeight:11},roadStack:{flex:1,minWidth:0,height:"100%"},bigGrid:{width:"100%",height:"62%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch"},bigGridDesktop:{},bigCell:{width:"6.6666667%",height:"16.6666667%",borderRightWidth:1,borderBottomWidth:1,borderColor:"#DDE4E9",alignItems:"center",justifyContent:"center",overflow:"hidden"},bigCellDesktop:{},bigMark:{width:"72%",maxWidth:"78%",aspectRatio:1,borderRadius:999,borderWidth:1.35,backgroundColor:"transparent",alignItems:"center",justifyContent:"center"},bigMarkDesktop:{width:"70%",borderWidth:1.2},tieNumber:{color:"#20B66B",fontSize:7,fontWeight:"900",lineHeight:8},tieNumberDesktop:{fontSize:7,lineHeight:8},lowerArea:{width:"100%",height:"38%",flexDirection:"row",borderTopWidth:1,borderTopColor:"#CCD6DE"},lowerAreaDesktop:{},lowerPane:{width:"33.333333%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",borderRightWidth:1,borderRightColor:"#DDE4E9"},lowerCell:{width:"10%",height:"16.6666667%",alignItems:"center",justifyContent:"center",borderRightWidth:.5,borderBottomWidth:.5,borderColor:"#E4E8EB",overflow:"hidden"},lowerCellDesktop:{},lowerHollow:{width:"55%",aspectRatio:1,borderRadius:999,borderWidth:1.4,backgroundColor:"transparent"},lowerSolid:{width:"52%",aspectRatio:1,borderRadius:999},lowerSlash:{width:"58%",height:2,borderRadius:2,transform:[{rotate:"-45deg"}]},
-  orb:{position:"absolute",right:16,bottom:24,zIndex:90,width:50,height:50,borderRadius:25,backgroundColor:"#07131E",borderWidth:2,borderColor:"#6CC8FF",alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:0.5,shadowRadius:10,elevation:12,touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},orbMt:{bottom:34},orbStatus:{position:"absolute",right:4,top:4,width:8,height:8,borderRadius:4,borderWidth:1,borderColor:"#fff"},
+  orb:{position:"absolute",right:16,bottom:24,zIndex:10020,width:50,height:50,borderRadius:25,backgroundColor:"#07131E",borderWidth:2,borderColor:"#6CC8FF",alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:0.5,shadowRadius:10,elevation:12,touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},orbMt:{bottom:34,zIndex:10020,elevation:40},orbStatus:{position:"absolute",right:4,top:4,width:8,height:8,borderRadius:4,borderWidth:1,borderColor:"#fff"},
   floatPanel:{position:"absolute",right:74,bottom:22,zIndex:100,backgroundColor:"rgba(6,16,25,.975)",borderWidth:1,borderColor:"#416C88",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:14,elevation:15},floatPanelMt:{zIndex:9999},floatHeader:{height:38,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#081A28",borderBottomWidth:1,borderBottomColor:"#234A63",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},floatHeadLeft:{flexDirection:"row",alignItems:"center",gap:8},floatBrandLine:{flexDirection:"row",alignItems:"center",gap:7},floatTitle:{color:"#F5FAFD",fontWeight:"900",fontSize:12,letterSpacing:.7},floatStatus:{color:"#56D48C",fontSize:8,fontWeight:"900"},iconBtn:{width:27,height:27,borderRadius:5,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},iconTextBtn:{height:27,paddingHorizontal:7,borderRadius:5,backgroundColor:"#214A70",flexDirection:"row",gap:3,alignItems:"center"},iconText:{color:"#fff",fontSize:8,fontWeight:"800"},selectorWrap:{marginHorizontal:6,marginTop:6,position:"relative",zIndex:130},selector:{height:38,paddingHorizontal:9,borderWidth:1,borderColor:"#31516B",borderRadius:5,backgroundColor:"#09151F",flexDirection:"row",alignItems:"center",justifyContent:"space-between"},selectorLeft:{flexDirection:"row",alignItems:"center",gap:4},selectorConfidence:{flexDirection:"row",alignItems:"center",gap:4,marginLeft:4},selectorValue:{color:"#F0F5F8",fontSize:11,fontWeight:"900"},selectorMeta:{color:"#B6C5D0",fontSize:9},roomDropdown:{position:"absolute",left:0,right:0,top:42,maxHeight:205,backgroundColor:"#0A1722",borderWidth:1,borderColor:"#345A76",borderRadius:6,zIndex:160,elevation:30,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:10},roomDropdownScroll:{height:205,maxHeight:205,overflow:"scroll"},roomDropdownContent:{paddingBottom:2},roomDropdownItem:{minHeight:42,paddingHorizontal:10,paddingVertical:5,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#183044"},roomDropdownItemActive:{backgroundColor:"#1B5B88"},roomDropdownLeft:{flex:1,minWidth:0,paddingRight:8},roomDropdownText:{color:"#EDF5FA",fontSize:10,fontWeight:"900"},roomDropdownDealer:{color:"#AFC1CD",fontSize:8,marginTop:2},roomDropdownMeta:{color:"#8EA7B9",fontSize:8,fontWeight:"800"},roomDropdownRight:{alignItems:"flex-end",justifyContent:"center",gap:3},roomConfidence:{flexDirection:"row",alignItems:"center",gap:5},roomConfidenceText:{fontSize:8,fontWeight:"900",textShadowRadius:7},assistPage:{padding:6,minHeight:150},decisionRow:{flexDirection:"row",gap:5},decisionBox:{flex:1,minHeight:68,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,padding:7},smallLabel:{color:"#FFFFFF",fontSize:12,fontWeight:"900"},latestLine:{flexDirection:"row",alignItems:"center",gap:7,marginTop:7},glowDot:{width:17,height:17,borderRadius:8.5,shadowOpacity:1,shadowRadius:10,elevation:8},latestText:{fontSize:16,fontWeight:"900"},detectText:{color:"#FFFFFF",fontSize:14,fontWeight:"900",marginTop:7},recommendText:{fontSize:17,fontWeight:"900",marginTop:7},microText:{color:"#FFFFFF",fontSize:12,fontWeight:"900",marginTop:4},todayPnlBox:{marginTop:5,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,paddingHorizontal:8,paddingVertical:6,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},todayPnlValue:{fontSize:16,fontWeight:"900"},aiBox:{marginTop:5,backgroundColor:"#0B1925",borderRadius:5,padding:7},aiTitle:{color:"#B7D3E6",fontSize:11,fontWeight:"900"},aiText:{color:"#C6D2DB",fontSize:11,lineHeight:17,marginTop:5},aiTextMobile:{fontSize:9.5,lineHeight:13,marginTop:3},moneyGrid:{flexDirection:"row",gap:5},fieldBox:{flex:1,backgroundColor:"#102335",borderRadius:5,padding:7,minHeight:58},moneyInput:{color:"#fff",fontSize:13,fontWeight:"900",padding:0,marginTop:5},nextAmount:{color:"#54D79A",fontSize:15,fontWeight:"900",marginTop:6},strategyScroll:{marginTop:6,maxHeight:30},strategyRow:{gap:4},strategyChip:{height:25,paddingHorizontal:8,borderRadius:4,backgroundColor:"#172B3B",justifyContent:"center"},strategyChipActive:{backgroundColor:"#2B78B5"},strategyChipText:{color:"#AABCC8",fontSize:7.5,fontWeight:"800"},progressBox:{marginTop:6,backgroundColor:"#0B1925",borderRadius:5,padding:7},progressText:{color:"#DDE9F0",fontSize:9,fontWeight:"800",marginTop:4},recommendHeader:{flexDirection:"row",alignItems:"center",justifyContent:"space-between"},martinResetMini:{paddingHorizontal:7,height:20,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetMiniText:{color:"#fff",fontSize:8,fontWeight:"900"},martinResetBtn:{marginTop:7,height:27,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetText:{color:"#fff",fontSize:9,fontWeight:"900"},betButtons:{flexDirection:"row",gap:5},betBtn:{flex:1,height:38,borderRadius:5,alignItems:"center",justifyContent:"center"},betBtnText:{color:"#fff",fontSize:12,fontWeight:"900"},statsGrid:{marginTop:6,backgroundColor:"#102335",borderRadius:5,padding:7,flexDirection:"row",justifyContent:"space-between"},statsValue:{color:"#fff",fontSize:11,fontWeight:"900",marginTop:3},recordBar:{marginTop:5,flexDirection:"row",justifyContent:"space-between",alignItems:"center"},resetText:{color:"#51BDF1",fontSize:8,fontWeight:"900"},historyRow:{gap:4,marginTop:5},historyChip:{backgroundColor:"#142A3B",borderRadius:4,paddingHorizontal:6,paddingVertical:4},pageDots:{height:19,flexDirection:"row",gap:7,alignItems:"center",justifyContent:"center"},pageDot:{width:6,height:6,borderRadius:3,backgroundColor:"#526574"},pageDotActive:{backgroundColor:"#fff"},
   recommendTitleConfidence:{flexDirection:"row",alignItems:"center",gap:5},
   recommendMetaRow:{flexDirection:"row",alignItems:"center",justifyContent:"space-between",gap:3,marginTop:3},recommendStrategyMeta:{marginTop:0,flexShrink:1},confidenceInline:{flexDirection:"row",alignItems:"center",gap:4,flexShrink:0},confidenceText:{fontSize:8,fontWeight:"900",textShadowRadius:7},
