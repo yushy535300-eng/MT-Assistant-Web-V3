@@ -40,7 +40,7 @@ type TableData = {
   id: string; apiId?: string; game: string; name: string; players: string;
   countdown?: number; countdownUpdatedAt?: number; roomId?: string; tableBadge?: string;
   shoe: string; round: number; banker: number; player: number; tie: number;
-  results: Result[]; trend: string; live?: boolean; dealerPhoto?: string;
+  results: Result[]; trend: string; live?: boolean; dealerPhoto?: string; streamUrl?: string;
   lastUpdated?: number; lastResultKey?: string;
 };
 
@@ -50,6 +50,47 @@ type BetRecord = { side: BetSide; result: Result; amount: number; pnl: number; a
 type PendingBet = { tableId: string; side: BetSide; amount: number; resultKey?: string } | null;
 
 const baccaratTableIds = ["BAG01","BAG02","BAG03","BAG03A","BAG05","BAG06","BAG07","BAG08","BAG09","BAG10","BAG11","BAG12","BAG13","BAG13A","BAG15"];
+const dealerStreamUrls: Record<string,string> = {
+  BAG01: "https://pull.bighit888.com/livestream/bag01-1.flv",
+  BAG02: "https://pull.bighit888.com/livestream/bag02-1.flv",
+  BAG03: "https://pull.bighit888.com/livestream/bag03-1.flv",
+  BAG03A: "https://pull.bighit888.com/livestream/bag03a-1.flv",
+  BAG05: "https://pull.bighit888.com/livestream/bag05-1.flv",
+  BAG06: "https://pull.bighit888.com/livestream/bag06-1.flv",
+  BAG07: "https://pull.bighit888.com/livestream/bag07-1.flv",
+  BAG08: "https://pull.bighit888.com/livestream/bag08-1.flv",
+  BAG09: "https://pull.bighit888.com/livestream/bag09-1.flv",
+  BAG10: "https://pull.bighit888.com/livestream/bag10-1.flv",
+  BAG11: "https://pull.bighit888.com/livestream/bag11-1.flv",
+  BAG12: "https://pull.bighit888.com/livestream/bag12-1.flv",
+  BAG13: "https://pull.bighit888.com/livestream/bag13-1.flv",
+  BAG13A: "https://pull.bighit888.com/livestream/bag13a-1.flv",
+  BAG15: "https://pull.bighit888.com/livestream/bag15-1.flv",
+};
+
+let mpegTsLoaderPromise: Promise<any> | null = null;
+function ensureMpegTs(){
+  if(Platform.OS!=="web" || typeof window==="undefined" || typeof document==="undefined") return Promise.resolve(null);
+  const w=window as any;
+  if(w.mpegts) return Promise.resolve(w.mpegts);
+  if(mpegTsLoaderPromise) return mpegTsLoaderPromise;
+  mpegTsLoaderPromise=new Promise((resolve,reject)=>{
+    const existing=document.querySelector('script[data-mt-mpegts="1"]') as HTMLScriptElement | null;
+    if(existing){
+      existing.addEventListener("load",()=>resolve((window as any).mpegts),{once:true});
+      existing.addEventListener("error",()=>reject(new Error("mpegts load failed")),{once:true});
+      return;
+    }
+    const script=document.createElement("script");
+    script.src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js";
+    script.async=true;
+    script.dataset.mtMpegts="1";
+    script.onload=()=>resolve((window as any).mpegts);
+    script.onerror=()=>reject(new Error("mpegts load failed"));
+    document.head.appendChild(script);
+  });
+  return mpegTsLoaderPromise;
+}
 const initialTables: TableData[] = baccaratTableIds.map((apiId) => ({
   id: apiId.replace(/^BAG0?/, ""), apiId, game: "百家樂", name: "—", players: "—",
   roomId: "—", tableBadge: "—", shoe: "—", round: 0, banker: 0, player: 0, tie: 0,
@@ -328,7 +369,75 @@ function CountdownBadge({count,updatedAt}:{count?:number;updatedAt?:number}){
   return <View style={s.countWrap}><MaterialIcons name="schedule" size={11} color="#DDE8F0"/><Text style={s.countdown}>{count==null?"—":Math.max(0,count-elapsed)}</Text></View>;
 }
 
-function TableCard({table,desktop,onAction}:{table:TableData;desktop:boolean;onAction:(kind:string,table:TableData)=>void}){
+function DealerLiveVideo({table,enabled,connected}:{table:TableData;enabled:boolean;connected:boolean}){
+  const tableId=table.apiId??`BAG${table.id}`;
+  const url=table.streamUrl??dealerStreamUrls[tableId];
+  const videoRef=useRef<any>(null);
+  const playerRef=useRef<any>(null);
+  const retryRef=useRef<ReturnType<typeof setTimeout>|null>(null);
+  const [playing,setPlaying]=useState(false);
+
+  useEffect(()=>{
+    if(retryRef.current){clearTimeout(retryRef.current);retryRef.current=null}
+    setPlaying(false);
+    if(Platform.OS!=="web" || !enabled || !connected || !url) return;
+    let disposed=false;
+    const destroy=()=>{
+      const p=playerRef.current;playerRef.current=null;
+      if(p){try{p.pause?.()}catch{};try{p.unload?.()}catch{};try{p.detachMediaElement?.()}catch{};try{p.destroy?.()}catch{}}
+    };
+    const start=async()=>{
+      try{
+        const mpegts=await ensureMpegTs();
+        if(disposed||!mpegts||!videoRef.current)return;
+        if(!mpegts.getFeatureList?.()?.mseLivePlayback)return;
+        destroy();
+        const video=videoRef.current;
+        video.muted=true;video.autoplay=true;video.playsInline=true;
+        const player=mpegts.createPlayer({type:"flv",isLive:true,url},{
+          enableWorker:true,enableStashBuffer:true,stashInitialSize:384,lazyLoad:false,
+          liveBufferLatencyChasing:true,autoCleanupSourceBuffer:true,autoCleanupMaxBackwardDuration:30,autoCleanupMinBackwardDuration:8
+        });
+        playerRef.current=player;
+        player.attachMediaElement(video);
+        if(mpegts.Events?.ERROR)player.on(mpegts.Events.ERROR,()=>{
+          if(disposed)return;
+          setPlaying(false);destroy();
+          retryRef.current=setTimeout(start,1800);
+        });
+        video.onplaying=()=>{if(!disposed)setPlaying(true)};
+        video.onstalled=()=>{if(!disposed)setPlaying(false)};
+        video.onerror=()=>{if(!disposed){setPlaying(false);destroy();retryRef.current=setTimeout(start,1800)}};
+        player.load();
+        Promise.resolve(player.play()).catch(()=>undefined);
+      }catch{
+        if(!disposed)retryRef.current=setTimeout(start,2200);
+      }
+    };
+    start();
+    return()=>{disposed=true;if(retryRef.current)clearTimeout(retryRef.current);retryRef.current=null;destroy()};
+  },[tableId,url,enabled,connected]);
+
+  return <View style={s.liveMediaFill}>
+    {table.dealerPhoto?<Image source={{uri:table.dealerPhoto}} style={s.photoImage}/>:<Text style={s.crown}>♛</Text>}
+    {Platform.OS==="web"&&enabled&&connected&&url?createElement("video" as any,{
+      ref:(node:any)=>{videoRef.current=node},muted:true,autoPlay:true,playsInline:true,controls:false,
+      style:{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",background:"#000",opacity:playing?1:0,pointerEvents:"none"}
+    }):null}
+  </View>;
+}
+
+function TableCard({table,desktop,onAction,connected}:{table:TableData;desktop:boolean;onAction:(kind:string,table:TableData)=>void;connected:boolean}){
+  const tableId=table.apiId??`BAG${table.id}`;
+  const [videoEnabled,setVideoEnabled]=useState(()=>{
+    if(Platform.OS!=="web"||typeof window==="undefined")return false;
+    try{return window.localStorage.getItem(`mt.video.${tableId}`)==="1"}catch{return false}
+  });
+  const toggleVideo=()=>setVideoEnabled(v=>{
+    const next=!v;
+    if(Platform.OS==="web"&&typeof window!=="undefined"){try{window.localStorage.setItem(`mt.video.${tableId}`,next?"1":"0")}catch{}}
+    return next;
+  });
   return <View style={[s.tableCard,desktop&&s.tableCardDesktop]}>
     <View style={s.tableHead}>
       <View style={s.row}><Text style={s.game}>百家樂</Text><Text style={s.tableId}>{table.id}</Text><MaterialIcons name="person" size={12} color="#fff"/><Text style={s.headText}>{table.players}</Text><CountdownBadge count={table.countdown} updatedAt={table.countdownUpdatedAt}/></View>
@@ -340,8 +449,9 @@ function TableCard({table,desktop,onAction}:{table:TableData;desktop:boolean;onA
     </View>
     <View style={[s.tableBody,desktop?s.tableBodyDesktop:s.tableBodyMobile]}>
       <View style={[s.dealer,desktop?s.dealerDesktop:s.dealerMobile]}>
-        <View style={[s.photo,desktop?s.photoDesktop:s.photoMobile]}>{table.dealerPhoto?<Image source={{uri:table.dealerPhoto}} style={s.photoImage}/>:<Text style={s.crown}>♛</Text>}</View>
-        <Text style={s.dealerName}>{table.name||"—"}</Text><Text style={s.meta}>房間 {table.roomId||table.id}</Text><Text style={s.meta}>Shoe {table.shoe} · 第 {table.round} 把</Text>
+        <View style={[s.photo,desktop?s.photoDesktop:s.photoMobile]}><DealerLiveVideo table={table} enabled={videoEnabled} connected={connected}/></View>
+        <Text style={s.dealerName}>{table.name||"—"}</Text><Text style={s.meta}>房間 {table.roomId||table.id}</Text>
+        <View style={s.metaVideoRow}><Text numberOfLines={1} style={[s.meta,s.metaVideoText]}>Shoe {table.shoe} · 第 {table.round} 把</Text><Text style={s.videoLabel}>視訊</Text><Pressable accessibilityRole="switch" accessibilityState={{checked:videoEnabled}} onPress={toggleVideo} hitSlop={5} style={[s.videoSwitch,videoEnabled&&s.videoSwitchOn]}><View style={[s.videoSwitchKnob,videoEnabled&&s.videoSwitchKnobOn]}/></Pressable></View>
       </View>
       <RoadGrid table={table} desktop={desktop}/>
     </View>
@@ -494,6 +604,17 @@ function eventTables(payload:any):any[]|null{const c=[payload?.msg?.tables?.tabl
 function extractMtUrlToken(value:string){try{return new URL(value.trim()).searchParams.get("token")?.trim()??""}catch{return value.trim().replace(/^token=/i,"")}}
 function resultKeyFromPayload(payload:any){const b=payload?.body??payload?.msg??payload?.data??{};return `${String(b?.shoe??"")}|${String(b?.round??"")}`}
 
+function extractTableStreamUrl(source:any):string {
+  const found:string[]=[];
+  const walk=(value:any)=>{
+    if(typeof value==="string"){if(/^https?:\/\/.+\.flv(?:[?#].*)?$/i.test(value.trim()))found.push(value.trim());return}
+    if(Array.isArray(value)){value.forEach(walk);return}
+    if(value&&typeof value==="object")Object.values(value).forEach(walk);
+  };
+  walk(source?.video ?? source?.videos ?? source?.stream ?? source?.streams ?? source?.live_video ?? source?.liveVideo);
+  return found.find(x=>x.includes("pull.bighit888.com")) ?? found[0] ?? "";
+}
+
 /**
  * Keep exactly one shoe per table.
  * MT tables/tablesvg snapshots are the authoritative road for the current shoe.
@@ -506,22 +627,25 @@ function applyTablesSameShoe(current: TableData[], sources: any[]): TableData[] 
     const prev = current.find((x) => (x.apiId ?? `BAG${x.id}`) === (table.apiId ?? `BAG${table.id}`));
     if (!prev) return table;
 
-    const prevShoe = String(prev.shoe ?? "");
-    const nextShoe = String(table.shoe ?? "");
-
-    // Only an actual shoe-id change is a shoe change.
-    if (prevShoe && prevShoe !== "—" && nextShoe && nextShoe !== "—" && prevShoe !== nextShoe) {
-      return { ...table, results: [...table.results] };
-    }
-
-    // Same shoe: never let a stale/short snapshot roll the visible road backward.
-    // show_win appends immediately; a later full snapshot may extend/correct it,
-    // but a shorter same-shoe snapshot must not erase already visible history.
     const source = sources.find((item) => {
       const sourceId = getApiTableId(item);
       const tableId = table.apiId ?? `BAG${table.id}`;
       return sourceId === tableId || String(item?.table_name ?? "") === table.id;
     });
+    const streamUrl = extractTableStreamUrl(source);
+    const tableWithStream = streamUrl ? { ...table, streamUrl } : table;
+
+    const prevShoe = String(prev.shoe ?? "");
+    const nextShoe = String(tableWithStream.shoe ?? "");
+
+    // Only an actual shoe-id change is a shoe change.
+    if (prevShoe && prevShoe !== "—" && nextShoe && nextShoe !== "—" && prevShoe !== nextShoe) {
+      return { ...tableWithStream, results: [...tableWithStream.results] };
+    }
+
+    // Same shoe: never let a stale/short snapshot roll the visible road backward.
+    // show_win appends immediately; a later full snapshot may extend/correct it,
+    // but a shorter same-shoe snapshot must not erase already visible history.
     const trend = source?.trend ?? {};
     const rawSnapshot = trend?.bead_plate2 ?? trend?.bead_plate ?? source?.bead_plate2;
     const hasSnapshot = Array.isArray(rawSnapshot) ? rawSnapshot.length > 0 : typeof rawSnapshot === "string" && rawSnapshot.replace(/[^0-9]/g, "").length >= 2;
@@ -529,12 +653,12 @@ function applyTablesSameShoe(current: TableData[], sources: any[]): TableData[] 
     if (hasSnapshot) {
       // Full/equal snapshot is safe. A shorter same-shoe snapshot is stale: keep
       // the current road while still accepting fresh metadata from the packet.
-      if (table.results.length >= prev.results.length) return table;
-      return { ...table, results: [...prev.results] };
+      if (tableWithStream.results.length >= prev.results.length) return tableWithStream;
+      return { ...tableWithStream, results: [...prev.results] };
     }
 
     // If this packet has no road snapshot at all, do not erase the live road.
-    return { ...table, results: [...prev.results] };
+    return { ...tableWithStream, results: [...prev.results] };
   });
 }
 
@@ -654,7 +778,7 @@ export default function HomeScreen(){
 
   useEffect(()=>{
     if(Platform.OS!=="web" || typeof document==="undefined") return;
-    document.title="MT輔助程式";
+    document.title="MT Assistant";
     let link=document.querySelector('link[rel="apple-touch-icon"]') as HTMLLinkElement | null;
     if(!link){
       link=document.createElement("link");
@@ -1386,7 +1510,7 @@ export default function HomeScreen(){
   return <ScreenContainer edges={["top","left","right","bottom"]} containerClassName="bg-[#080E17]" className="bg-[#080E17]">
     <View style={s.screen}>
       <View style={s.topbar}><View style={s.brandRow}><View style={s.brandIcon}><MaterialIcons name="casino" size={20} color="#F5C64A"/></View><View><Text style={s.kicker}>MT ASSISTANT · LIVE</Text><Text style={s.title}>即時多桌牌路</Text></View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setConnectionOpen(true)}><MaterialIcons name="settings" size={16} color="#fff"/><Text style={s.headerBtnText}>連線</Text></Pressable></View></View>
-      <ScrollView contentContainerStyle={s.content}><View style={[s.overview,!desktop&&s.overviewMobile]}><View style={!desktop?s.overviewTextMobile:undefined}><Text style={s.overKicker}>LIVE CONTROL ROOM</Text><Text style={s.overTitle}>主頁牌路總覽</Text><Text style={s.overSub}>即時查看桌況、牌路與操作入口。</Text></View><View style={[s.overStats,!desktop&&s.overStatsMobile]}><View style={[s.overStat,!desktop&&s.overStatMobile]}><Text style={s.smallLabel}>連線狀態</Text><Text style={[s.overValue,{color:connected?"#4BD693":"#FF6973"}]}>{connected?"已連線":"未連線"}</Text></View><View style={[s.overStat,!desktop&&s.overStatMobile]}><Text style={s.smallLabel}>可用桌型</Text><Text style={s.overValue}>15 桌</Text></View></View></View><View style={s.listHead}><Text style={s.listTitle}>所有房型</Text><Text style={s.listHint}>歷史牌局 · 即時更新 · 荷官同步</Text></View><View style={[s.cardsGrid,desktop&&s.cardsGridDesktop,desktop&&s.cardsGridDesktopCentered]}>{tables.map(t=><View key={t.apiId} style={desktop?s.cardWrapDesktop:s.cardWrap}><MemoTableCard table={t} desktop={desktop} onAction={stableTableAction}/></View>)}</View></ScrollView>
+      <ScrollView contentContainerStyle={s.content}><View style={[s.overview,!desktop&&s.overviewMobile]}><View style={!desktop?s.overviewTextMobile:undefined}><Text style={s.overKicker}>LIVE CONTROL ROOM</Text><Text style={s.overTitle}>主頁牌路總覽</Text><Text style={s.overSub}>即時查看桌況、牌路與操作入口。</Text></View><View style={[s.overStats,!desktop&&s.overStatsMobile]}><View style={[s.overStat,!desktop&&s.overStatMobile]}><Text style={s.smallLabel}>連線狀態</Text><Text style={[s.overValue,{color:connected?"#4BD693":"#FF6973"}]}>{connected?"已連線":"未連線"}</Text></View><View style={[s.overStat,!desktop&&s.overStatMobile]}><Text style={s.smallLabel}>可用桌型</Text><Text style={s.overValue}>15 桌</Text></View></View></View><View style={s.listHead}><Text style={s.listTitle}>所有房型</Text><Text style={s.listHint}>歷史牌局 · 即時更新 · 荷官同步</Text></View><View style={[s.cardsGrid,desktop&&s.cardsGridDesktop,desktop&&s.cardsGridDesktopCentered]}>{tables.map(t=><View key={t.apiId} style={desktop?s.cardWrapDesktop:s.cardWrap}><MemoTableCard table={t} desktop={desktop} onAction={stableTableAction} connected={connected}/></View>)}</View></ScrollView>
       {FloatingAssistant({})}<FloatingOrb position={orbPosition} responder={orbResponder} size={orbSize} iconSize={orbIconSize} connected={connected}/>
       {toast?<View style={s.toast}><Text style={s.toastText}>{toast}</Text></View>:null}
 
@@ -1404,7 +1528,7 @@ const s=StyleSheet.create({
   lineBtn:{height:34,paddingHorizontal:9,borderRadius:7,backgroundColor:"#0C9B43",flexDirection:"row",alignItems:"center",gap:5},lineLogo:{width:23,height:23,borderRadius:11.5,backgroundColor:"#fff",alignItems:"center",justifyContent:"center"},lineLogoText:{fontSize:5.5,fontWeight:"900",color:"#0C9B43"},lineText:{color:"#fff",fontSize:10,fontWeight:"900"},headerBtn:{height:34,paddingHorizontal:9,borderRadius:7,backgroundColor:"#18344C",flexDirection:"row",alignItems:"center",gap:5,borderWidth:1,borderColor:"#2A4A63"},headerBtnText:{color:"#fff",fontSize:10,fontWeight:"800"},
   content:{padding:10,paddingBottom:90},overview:{borderWidth:1,borderColor:"#244158",borderRadius:8,padding:12,flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:10,backgroundColor:"#0E1B28",overflow:"hidden"},overviewMobile:{flexDirection:"column",alignItems:"stretch",gap:10},overviewTextMobile:{width:"100%"},overKicker:{color:"#6E99B9",fontSize:7,letterSpacing:1.4},overTitle:{color:"#fff",fontSize:18,fontWeight:"900",marginTop:2},overSub:{color:"#7E92A2",fontSize:9,marginTop:3},overStats:{flexDirection:"row",gap:8},overStatsMobile:{width:"100%",gap:6},overStat:{minWidth:112,borderWidth:1,borderColor:"#28475D",borderRadius:6,padding:9},overStatMobile:{flex:1,minWidth:0,padding:8},overValue:{color:"#fff",fontSize:13,fontWeight:"900",marginTop:4},listHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:7},listTitle:{color:"#F2F6F9",fontSize:15,fontWeight:"900"},listHint:{color:"#73899A",fontSize:8},
   cardsGrid:{width:"100%",alignSelf:"center"},cardsGridDesktop:{flexDirection:"row",flexWrap:"wrap",gap:10},cardsGridDesktopCentered:{maxWidth:1280},cardWrap:{width:"100%"},cardWrapDesktop:{width:"calc(50% - 5px)" as any,maxWidth:635},tableCard:{backgroundColor:"#06090E",borderWidth:1,borderColor:"#1B3449",overflow:"hidden",marginBottom:10},tableCardDesktop:{},tableHead:{height:28,paddingHorizontal:5,backgroundColor:"#05070A",flexDirection:"row",justifyContent:"space-between",alignItems:"center"},game:{color:"#fff",fontSize:9,fontWeight:"700"},tableId:{color:"#fff",borderWidth:1,borderColor:"#AEBCC6",paddingHorizontal:6,paddingVertical:1,fontSize:9,fontWeight:"900"},headText:{color:"#fff",fontSize:8,fontWeight:"800"},statText:{fontSize:8,fontWeight:"900"},countWrap:{height:20,minWidth:28,borderWidth:1,borderColor:"#8D2030",borderRadius:4,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:2,paddingHorizontal:3},countdown:{color:"#FF5362",fontSize:8,fontWeight:"900"},miniBtn:{height:20,paddingHorizontal:6,borderRadius:4,alignItems:"center",justifyContent:"center"},miniBtnText:{color:"#fff",fontSize:7,fontWeight:"900"},
-  tableBody:{flexDirection:"row",height:176,backgroundColor:"#fff",overflow:"hidden"},tableBodyDesktop:{height:190},tableBodyMobile:{height:164},dealer:{width:112,backgroundColor:"#F2F0EC",padding:4,justifyContent:"flex-end"},dealerDesktop:{width:"21.88%"},dealerMobile:{width:"21.88%",minWidth:76},photo:{position:"absolute",top:3,left:3,right:3,height:112,backgroundColor:"#DCE2E6",alignItems:"center",justifyContent:"center",overflow:"hidden"},photoDesktop:{height:"82%"},photoMobile:{height:"80%"},photoImage:{width:"100%",height:"100%",resizeMode:"cover"},crown:{fontSize:30,color:"#C5A24C"},dealerName:{color:"#fff",backgroundColor:"#873B96",alignSelf:"flex-start",paddingHorizontal:5,paddingVertical:2,fontSize:11,fontWeight:"900",lineHeight:14},meta:{color:"#526371",fontSize:8.5,fontWeight:"700",lineHeight:11,marginTop:1},
+  tableBody:{flexDirection:"row",height:176,backgroundColor:"#fff",overflow:"hidden"},tableBodyDesktop:{height:190},tableBodyMobile:{height:164},dealer:{width:112,backgroundColor:"#F2F0EC",padding:4,justifyContent:"flex-end"},dealerDesktop:{width:"21.88%"},dealerMobile:{width:"21.88%",minWidth:76},photo:{position:"absolute",top:3,left:3,right:3,height:112,backgroundColor:"#DCE2E6",alignItems:"center",justifyContent:"center",overflow:"hidden"},photoDesktop:{height:"82%"},photoMobile:{height:"80%"},photoImage:{width:"100%",height:"100%",resizeMode:"cover"},liveMediaFill:{width:"100%",height:"100%",alignItems:"center",justifyContent:"center",overflow:"hidden"},crown:{fontSize:30,color:"#C5A24C"},dealerName:{color:"#fff",backgroundColor:"#873B96",alignSelf:"flex-start",paddingHorizontal:5,paddingVertical:2,fontSize:11,fontWeight:"900",lineHeight:14},meta:{color:"#526371",fontSize:8.5,fontWeight:"700",lineHeight:11,marginTop:1},metaVideoRow:{height:12,flexDirection:"row",alignItems:"center",marginTop:1,overflow:"hidden"},metaVideoText:{flexShrink:1,marginTop:0,lineHeight:11},videoLabel:{color:"#526371",fontSize:7.5,fontWeight:"800",marginLeft:3,marginRight:2,lineHeight:10},videoSwitch:{width:18,height:9,borderRadius:5,backgroundColor:"#89969D",padding:1,justifyContent:"center"},videoSwitchOn:{backgroundColor:"#20B66B"},videoSwitchKnob:{width:7,height:7,borderRadius:3.5,backgroundColor:"#fff",alignSelf:"flex-start"},videoSwitchKnobOn:{alignSelf:"flex-end"},
   roadArea:{flex:1,flexDirection:"row",backgroundColor:"#fff",minWidth:0,overflow:"hidden"},roadAreaDesktop:{},beadPane:{width:"32%",height:"100%",flexShrink:0,borderRightWidth:1,borderColor:"#C9D2D9",overflow:"hidden",backgroundColor:"#FFFFFF"},beadPaneDesktop:{width:"32%"},beadGrid:{width:"100%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",backgroundColor:"#FFFFFF"},beadCell:{width:"16.6666667%",height:"16.6666667%",flexGrow:0,flexShrink:0,borderRightWidth:1,borderBottomWidth:1,borderColor:"#D9DEE3",alignItems:"center",justifyContent:"center",backgroundColor:"#FFFFFF"},beadCellDesktop:{},beadDot:{width:"72%",aspectRatio:1,borderRadius:999,borderWidth:1,alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:.10,shadowRadius:1,elevation:1},beadDotDesktop:{width:"70%"},beadDotText:{color:"#FFFFFF",fontSize:8,fontWeight:"900",lineHeight:10,textAlign:"center"},beadDotTextDesktop:{fontSize:9,lineHeight:11},roadStack:{flex:1,minWidth:0,height:"100%"},bigGrid:{width:"100%",height:"62%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch"},bigGridDesktop:{},bigCell:{width:"6.6666667%",height:"16.6666667%",borderRightWidth:1,borderBottomWidth:1,borderColor:"#DDE4E9",alignItems:"center",justifyContent:"center",overflow:"hidden"},bigCellDesktop:{},bigMark:{width:"72%",maxWidth:"78%",aspectRatio:1,borderRadius:999,borderWidth:1.35,backgroundColor:"transparent",alignItems:"center",justifyContent:"center"},bigMarkDesktop:{width:"70%",borderWidth:1.2},tieNumber:{color:"#20B66B",fontSize:7,fontWeight:"900",lineHeight:8},tieNumberDesktop:{fontSize:7,lineHeight:8},lowerArea:{width:"100%",height:"38%",flexDirection:"row",borderTopWidth:1,borderTopColor:"#CCD6DE"},lowerAreaDesktop:{},lowerPane:{width:"33.333333%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",borderRightWidth:1,borderRightColor:"#DDE4E9"},lowerCell:{width:"10%",height:"16.6666667%",alignItems:"center",justifyContent:"center",borderRightWidth:.5,borderBottomWidth:.5,borderColor:"#E4E8EB",overflow:"hidden"},lowerCellDesktop:{},lowerHollow:{width:"55%",aspectRatio:1,borderRadius:999,borderWidth:1.4,backgroundColor:"transparent"},lowerSolid:{width:"52%",aspectRatio:1,borderRadius:999},lowerSlash:{width:"58%",height:2,borderRadius:2,transform:[{rotate:"-45deg"}]},
   orb:{position:"absolute",right:16,bottom:24,zIndex:90,width:50,height:50,borderRadius:25,backgroundColor:"#153B59",borderWidth:2,borderColor:"#66A9F1",alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:.45,shadowRadius:9,elevation:12,touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},orbMt:{bottom:34},orbStatus:{position:"absolute",right:4,top:4,width:8,height:8,borderRadius:4,borderWidth:1,borderColor:"#fff"},
   floatPanel:{position:"absolute",right:74,bottom:22,zIndex:100,backgroundColor:"rgba(13,26,39,.96)",borderWidth:1,borderColor:"#385975",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:14,elevation:15},floatPanelMt:{zIndex:9999},floatHeader:{height:38,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#14283B",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},floatHeadLeft:{flexDirection:"row",alignItems:"center",gap:8},floatTitle:{color:"#F0F5F9",fontWeight:"900",fontSize:12},floatStatus:{color:"#56D48C",fontSize:8},iconBtn:{width:27,height:27,borderRadius:5,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},iconTextBtn:{height:27,paddingHorizontal:7,borderRadius:5,backgroundColor:"#214A70",flexDirection:"row",gap:3,alignItems:"center"},iconText:{color:"#fff",fontSize:8,fontWeight:"800"},selectorWrap:{marginHorizontal:6,marginTop:6,position:"relative",zIndex:130},selector:{height:38,paddingHorizontal:9,borderWidth:1,borderColor:"#31516B",borderRadius:5,backgroundColor:"#09151F",flexDirection:"row",alignItems:"center",justifyContent:"space-between"},selectorLeft:{flexDirection:"row",alignItems:"center",gap:4},selectorValue:{color:"#F0F5F8",fontSize:11,fontWeight:"900"},selectorMeta:{color:"#B6C5D0",fontSize:9},roomDropdown:{position:"absolute",left:0,right:0,top:42,maxHeight:205,backgroundColor:"#0A1722",borderWidth:1,borderColor:"#345A76",borderRadius:6,zIndex:160,elevation:30,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:10},roomDropdownScroll:{height:205,maxHeight:205,overflow:"scroll"},roomDropdownContent:{paddingBottom:2},roomDropdownItem:{minHeight:42,paddingHorizontal:10,paddingVertical:5,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#183044"},roomDropdownItemActive:{backgroundColor:"#1B5B88"},roomDropdownLeft:{flex:1,minWidth:0,paddingRight:8},roomDropdownText:{color:"#EDF5FA",fontSize:10,fontWeight:"900"},roomDropdownDealer:{color:"#AFC1CD",fontSize:8,marginTop:2},roomDropdownMeta:{color:"#8EA7B9",fontSize:8,fontWeight:"800"},assistPage:{padding:6,minHeight:150},decisionRow:{flexDirection:"row",gap:5},decisionBox:{flex:1,minHeight:68,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,padding:7},smallLabel:{color:"#FFFFFF",fontSize:12,fontWeight:"900"},latestLine:{flexDirection:"row",alignItems:"center",gap:7,marginTop:7},glowDot:{width:17,height:17,borderRadius:8.5,shadowOpacity:1,shadowRadius:10,elevation:8},latestText:{fontSize:16,fontWeight:"900"},detectText:{color:"#FFFFFF",fontSize:14,fontWeight:"900",marginTop:7},recommendText:{fontSize:17,fontWeight:"900",marginTop:7},microText:{color:"#FFFFFF",fontSize:12,fontWeight:"900",marginTop:4},todayPnlBox:{marginTop:5,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,paddingHorizontal:8,paddingVertical:6,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},todayPnlValue:{fontSize:16,fontWeight:"900"},aiBox:{marginTop:5,backgroundColor:"#0B1925",borderRadius:5,padding:7},aiTitle:{color:"#B7D3E6",fontSize:11,fontWeight:"900"},aiText:{color:"#C6D2DB",fontSize:11,lineHeight:17,marginTop:5},moneyGrid:{flexDirection:"row",gap:5},fieldBox:{flex:1,backgroundColor:"#102335",borderRadius:5,padding:7,minHeight:58},moneyInput:{color:"#fff",fontSize:13,fontWeight:"900",padding:0,marginTop:5},nextAmount:{color:"#54D79A",fontSize:15,fontWeight:"900",marginTop:6},strategyScroll:{marginTop:6,maxHeight:30},strategyRow:{gap:4},strategyChip:{height:25,paddingHorizontal:8,borderRadius:4,backgroundColor:"#172B3B",justifyContent:"center"},strategyChipActive:{backgroundColor:"#2B78B5"},strategyChipText:{color:"#AABCC8",fontSize:7.5,fontWeight:"800"},progressBox:{marginTop:6,backgroundColor:"#0B1925",borderRadius:5,padding:7},progressText:{color:"#DDE9F0",fontSize:9,fontWeight:"800",marginTop:4},recommendHeader:{flexDirection:"row",alignItems:"center",justifyContent:"space-between"},martinResetMini:{paddingHorizontal:7,height:20,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetMiniText:{color:"#fff",fontSize:8,fontWeight:"900"},martinResetBtn:{marginTop:7,height:27,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetText:{color:"#fff",fontSize:9,fontWeight:"900"},betButtons:{flexDirection:"row",gap:5},betBtn:{flex:1,height:38,borderRadius:5,alignItems:"center",justifyContent:"center"},betBtnText:{color:"#fff",fontSize:12,fontWeight:"900"},statsGrid:{marginTop:6,backgroundColor:"#102335",borderRadius:5,padding:7,flexDirection:"row",justifyContent:"space-between"},statsValue:{color:"#fff",fontSize:11,fontWeight:"900",marginTop:3},recordBar:{marginTop:5,flexDirection:"row",justifyContent:"space-between",alignItems:"center"},resetText:{color:"#51BDF1",fontSize:8,fontWeight:"900"},historyRow:{gap:4,marginTop:5},historyChip:{backgroundColor:"#142A3B",borderRadius:4,paddingHorizontal:6,paddingVertical:4},pageDots:{height:19,flexDirection:"row",gap:7,alignItems:"center",justifyContent:"center"},pageDot:{width:6,height:6,borderRadius:3,backgroundColor:"#526574"},pageDotActive:{backgroundColor:"#fff"},
