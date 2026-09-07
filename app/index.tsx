@@ -654,7 +654,7 @@ export default function HomeScreen(){
 
   useEffect(()=>{
     if(Platform.OS!=="web" || typeof document==="undefined") return;
-    document.title="MT Assistant";
+    document.title="MT輔助程式";
     let link=document.querySelector('link[rel="apple-touch-icon"]') as HTMLLinkElement | null;
     if(!link){
       link=document.createElement("link");
