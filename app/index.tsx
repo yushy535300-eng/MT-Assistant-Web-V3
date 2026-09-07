@@ -700,7 +700,7 @@ export default function HomeScreen(){
   const orbSize=desktop?Math.max(68,Math.min(90,width*0.045)):tablet?60:Math.max(48,Math.min(56,width*0.13));
   const orbIconSize=Math.round(orbSize*0.44);
   const panelDesktopWidth=560;
-  const panelMobileTargetWidth=Math.min(width*0.88,500);
+  const panelMobileTargetWidth=Math.min(width*0.82,460);
   const panelMobileScale=Math.min(1,panelMobileTargetWidth/panelDesktopWidth);
   const panelBaseWidth=desktop?panelDesktopWidth:panelDesktopWidth;
   const [accessGranted,setAccessGranted]=useState(false);
@@ -1251,6 +1251,9 @@ export default function HomeScreen(){
     if(!allOrders.length)return;
 
     const settledMainOrders=[...allOrders]
+      // betSn/order id is enough to track a settled main bet. Some current MT
+      // /bet/history packets do not expose gameSn at order level; requiring it
+      // caused valid Banker/Player settlements to be discarded before Martingale ran.
       .filter(o=>!!orderIdOf(o) && orderSettled(o) && mainBetSlipsOf(o).length>0)
       .sort((a,b)=>orderTimeOf(a)-orderTimeOf(b)); // 舊 → 新，避免短時間多筆結算漏階
     if(!settledMainOrders.length)return;
@@ -1284,15 +1287,18 @@ export default function HomeScreen(){
     const freshOrders=settledMainOrders.filter(o=>{
       const id=orderIdOf(o);
       const gs=gameSnOf(o);
-      if(!id || !gs || processedGameSnRef.current.has(gs) || processedBetSnRef.current.has(id)) return false;
-      return pendingSettlementGameSnRef.current.has(gs) || betReportBaselineReadyRef.current;
+      if(!id || processedBetSnRef.current.has(id)) return false;
+      if(gs && processedGameSnRef.current.has(gs)) return false;
+      // Prefer show_win/end gameSn matching when available. If MT omits gameSn
+      // from the history order, betSn remains the authoritative de-duplication key.
+      return (gs && pendingSettlementGameSnRef.current.has(gs)) || betReportBaselineReadyRef.current;
     });
     if(!freshOrders.length)return;
 
     for(const target of freshOrders){
       const betSn=orderIdOf(target);
       const gameSn=gameSnOf(target);
-      if(!betSn||!gameSn||processedBetSnRef.current.has(betSn)||processedGameSnRef.current.has(gameSn))continue;
+      if(!betSn||processedBetSnRef.current.has(betSn)||(gameSn&&processedGameSnRef.current.has(gameSn)))continue;
 
       const mainSlip=mainBetSlipsOf(target)[0];
       if(!mainSlip)continue;
@@ -1309,13 +1315,13 @@ export default function HomeScreen(){
 
       // 先去重；status=3 已由 orderSettled 過濾。
       processedBetSnRef.current.add(betSn);
-      processedGameSnRef.current.add(gameSn);
-      pendingSettlementGameSnRef.current.delete(gameSn);
+      if(gameSn)processedGameSnRef.current.add(gameSn);
+      if(gameSn)pendingSettlementGameSnRef.current.delete(gameSn);
       lastBetReportOrderRef.current=betSn;
       lastBetReportGameSnRef.current=gameSn;
 
       const pnl=refund-amount;
-      appendEvent(`馬丁 gameSn 結算｜${gameSn}｜${side}｜下注 ${Math.round(amount)}｜返還 ${Math.round(refund)}｜本注 ${pnl>0?"+":""}${Math.round(pnl)}`);
+      appendEvent(`馬丁結算｜${gameSn?`gameSn ${gameSn}`:`betSn ${betSn}`}｜${side}｜下注 ${Math.round(amount)}｜返還 ${Math.round(refund)}｜本注 ${pnl>0?"+":""}${Math.round(pnl)}`);
 
       // 和局/退注：refund === bet，階級完全不變。
       if(Math.abs(pnl)<0.000001){
