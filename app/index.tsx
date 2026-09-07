@@ -702,8 +702,10 @@ export default function HomeScreen(){
   const panelDesktopWidth=560;
   // Mobile keeps a full, roomy desktop-like canvas and scales the WHOLE canvas down.
   // This prevents the three cards/text from being flex-squeezed just to fit the phone.
-  const panelMobileCanvasWidth=660;
-  const panelMobileTargetWidth=Math.min(width*0.80,390);
+  // Mobile uses the SAME 560px desktop canvas. Only the outer canvas is scaled.
+  // This keeps desktop typography/card proportions instead of shrinking a wider 660px canvas.
+  const panelMobileCanvasWidth=panelDesktopWidth;
+  const panelMobileTargetWidth=Math.min(width*0.90,520);
   const panelBaseWidth=desktop?panelDesktopWidth:panelMobileCanvasWidth;
   const panelMobileScale=Math.min(1,panelMobileTargetWidth/panelMobileCanvasWidth);
   const [accessGranted,setAccessGranted]=useState(false);
@@ -989,12 +991,16 @@ export default function HomeScreen(){
     const scale=desktop?1:panelMobileScale;
     const visualWidth=Math.max(1,panelSizeRef.current.width*scale);
     const visualHeight=Math.max(1,panelSizeRef.current.height*scale);
-    const baseLeft=Math.max(8,width-(desktop?74:58)-visualWidth);
-    const baseTop=Math.max(8,height-22-visualHeight);
+    // floatPanelMobile is anchored at left:18/top:170; desktop uses right/bottom.
+    // Clamp against the *visual* scaled rectangle, not the unscaled 560px canvas.
+    const baseLeft=desktop?Math.max(8,width-74-visualWidth):18;
+    const baseTop=desktop?Math.max(8,height-22-visualHeight):170;
     const keepX=Math.min(96,visualWidth);
-    const keepY=Math.min(48,visualHeight);
+    const headerGrab=Math.min(34*scale,visualHeight);
+    const keepY=Math.max(18,headerGrab);
     const minX=8-visualWidth+keepX-baseLeft;
     const maxX=width-8-keepX-baseLeft;
+    // Never allow the header/grab strip to disappear above the viewport.
     const minY=8-baseTop;
     const maxY=height-8-keepY-baseTop;
     panelPosition.stopAnimation((v:any)=>panelPosition.setValue({
@@ -1043,12 +1049,12 @@ export default function HomeScreen(){
     onPanResponderRelease:()=>{
       if(!panelDraggingRef.current)return;
       panelPosition.flattenOffset();
-      // Mobile: keep the exact release position. CSS zoom/scale changes the visual box,
-      // so clamping with the unscaled layout box causes the panel to spring back.
-      if(desktop) clampPanelPosition();
+      // Clamp using the scaled visual box on both desktop and mobile.
+      // This guarantees the header remains reachable after dragging upward/off-screen.
+      clampPanelPosition();
       panelDraggingRef.current=false;
     },
-    onPanResponderTerminate:()=>{if(panelDraggingRef.current){panelPosition.flattenOffset();if(desktop)clampPanelPosition();panelDraggingRef.current=false}},
+    onPanResponderTerminate:()=>{if(panelDraggingRef.current){panelPosition.flattenOffset();clampPanelPosition();panelDraggingRef.current=false}},
     onPanResponderTerminationRequest:()=>false,
     onShouldBlockNativeResponder:()=>true,
   }),[panelPosition,width,height,desktop,panelBaseWidth]);
