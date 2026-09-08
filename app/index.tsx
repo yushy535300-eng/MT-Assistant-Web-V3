@@ -912,6 +912,7 @@ export default function HomeScreen(){
   const radarPosition=useRef(new Animated.ValueXY()).current;
   // Independent V38 calculator floating window. Existing assistant state/drag logic is untouched.
   const [v38Open,setV38Open]=useState(false);
+  const [v38DetailOpen,setV38DetailOpen]=useState(false);
   const [v38ByTable,setV38ByTable]=useState<Record<string,V38PokerState>>({});
   const v38ByTableRef=useRef<Record<string,V38PokerState>>({});
   const v38Position=useRef(new Animated.ValueXY()).current;
@@ -1928,12 +1929,28 @@ export default function HomeScreen(){
     const sideColor=(x:V38Side)=>x==="莊"?"#EF4E57":x==="閒"?"#2879E5":"#A7B5BF";
     const status=!connected?"未連線":!data?"等待牌面":data.settled?"已結算":data.complete?"牌面完成":"發牌中";
     const cards=(xs?:string[])=>xs?.length?xs.join("  "):"—";
+    const allCards=data?[...data.player,...data.banker]:[];
+    const values=allCards.map(baccaratCardValue);
+    const total=values.reduce((a,b)=>a+b,0);
+    const pp=data?.playerPoint??0, bp=data?.bankerPoint??0;
+    const aRem=total%3, bRem=total%2, mul=bp*pp, mulRem=mul%2, add=bp+pp, addRem=add%2;
+    const ready=!!data?.complete;
+    const output=(x:V38Side)=>ready?x:"觀望";
+    const close=()=>{setV38DetailOpen(false);setV38Open(false)};
     return <Animated.View style={[s.v38Panel,!desktop&&s.v38PanelMobile,insideMt&&s.v38PanelMt,{transform:v38Position.getTranslateTransform()}]}>
       <View style={s.v38Header} {...v38Drag.panHandlers}>
-        <View style={s.v38HeaderLeft}><MaterialIcons name="calculate" size={18} color="#8ED8FF"/><View><Text style={s.v38Title}>V38 四式算牌</Text><Text style={s.v38Sub}>{assistTableId} · {status}</Text></View></View>
-        <Pressable onPress={()=>setV38Open(false)} style={s.iconBtn}><MaterialIcons name="close" size={18} color="#fff"/></Pressable>
+        <View style={s.v38HeaderLeft}>
+          <MaterialIcons name={v38DetailOpen?"functions":"calculate"} size={18} color="#8ED8FF"/>
+          <View><Text style={s.v38Title}>{v38DetailOpen?"四式即時運算詳情":"V38 四式算牌"}</Text><Text style={s.v38Sub}>{assistTableId} · {status}</Text></View>
+        </View>
+        <View style={s.row}>
+          {v38DetailOpen?
+            <Pressable onPress={()=>setV38DetailOpen(false)} style={s.v38InfoBtn}><MaterialIcons name="arrow-back" size={13} color="#D9F1FF"/><Text style={s.v38InfoBtnText}>返回</Text></Pressable>:
+            <Pressable onPress={()=>setV38DetailOpen(true)} style={s.v38InfoBtn}><MaterialIcons name="info-outline" size={13} color="#D9F1FF"/><Text style={s.v38InfoBtnText}>更多資訊</Text></Pressable>}
+          <Pressable onPress={close} style={s.iconBtn}><MaterialIcons name="close" size={18} color="#fff"/></Pressable>
+        </View>
       </View>
-      <View style={s.v38Body}>
+      {!v38DetailOpen?<View style={s.v38Body}>
         <View style={s.v38MetaRow}><Text style={s.v38Meta}>Shoe {data?.shoe??assistTable?.shoe??"—"}</Text><Text style={s.v38Meta}>Round {data?.round??assistTable?.round??0}</Text></View>
         <View style={s.v38Cards}>
           <View style={s.v38Hand}><Text style={[s.v38HandSide,{color:"#2879E5"}]}>閒</Text><Text style={s.v38CardText}>{cards(data?.player)}</Text><Text style={s.v38Point}>{data?`${data.playerPoint} 點`:"—"}</Text></View>
@@ -1941,13 +1958,53 @@ export default function HomeScreen(){
         </View>
         <View style={s.v38FormulaGrid}>{(["A","B","MUL","ADD"] as const).map(k=>{
           const value=data?.complete?data.formulas[k]:"觀望";
-          return <View key={k} style={s.v38Formula}><Text style={s.v38FormulaName}>{k}</Text><Text style={[s.v38FormulaSide,{color:sideColor(value)}]}>{value}</Text></View>
+          return <View key={k} style={s.v38Formula}><Text style={s.v38FormulaName}>{k==="A"?"A公式":k==="B"?"B公式":k}</Text><Text style={[s.v38FormulaSide,{color:sideColor(value)}]}>{value}</Text></View>
         })}</View>
         <View style={s.v38Recommend}>
           <View><Text style={s.v38RecommendLabel}>下一局四式投票</Text><Text style={s.v38RecommendHint}>{data?.complete?(data.settled?"本局已確認，推薦已更新":"牌面完成，等待結算確認"):"等待完整 show_poker 資料"}</Text></View>
           <Text style={[s.v38RecommendSide,{color:sideColor(data?.complete?data.recommendation:"觀望")}]}>{data?.complete?data.recommendation:"觀望"}</Text>
         </View>
-      </View>
+      </View>:
+      <ScrollView style={s.v38DetailScroll} contentContainerStyle={s.v38DetailContent} showsVerticalScrollIndicator>
+        <View style={s.v38VectorBox}>
+          <View style={s.v38DetailHeadRow}><Text style={s.v38SectionCode}>INPUT VECTOR / LIVE</Text><Text style={[s.v38LiveDot,{color:ready?"#4BD693":"#FFB84D"}]}>{ready?"● VERIFIED":"● STREAM"}</Text></View>
+          <Text style={s.v38VectorLine}>P = [{cards(data?.player)}]   →   Pₜ = {data?String(pp).padStart(2,"0"):"—"}</Text>
+          <Text style={s.v38VectorLine}>B = [{cards(data?.banker)}]   →   Bₜ = {data?String(bp).padStart(2,"0"):"—"}</Text>
+          <Text style={s.v38VectorLine}>V = [{values.length?values.join(", "):"—"}]   ΣV = {data?total:"—"}</Text>
+        </View>
+
+        <View style={s.v38ModelBox}>
+          <View style={s.v38ModelTop}><Text style={s.v38ModelName}>MODEL A</Text><Text style={s.v38ModelTag}>MODULAR-3</Text><Text style={[s.v38ModelOut,{color:sideColor(output(data?.formulas.A??"觀望"))}]}>{output(data?.formulas.A??"觀望")}</Text></View>
+          <Text style={s.v38Equation}>Fₐ(X) = [ Σᵢ V(Cᵢ) ] mod 3</Text>
+          <Text style={s.v38Calc}>ΣV = {values.length?values.join(" + "):"—"} = {data?total:"—"}</Text>
+          <Text style={s.v38Calc}>Rₐ = {data?`${total} − 3⌊${total}/3⌋ = ${aRem}`:"等待資料"}</Text>
+          <Text style={s.v38Rule}>δₐ(R):  R=0 → BANKER  ·  R∈{'{1,2}'} → PLAYER</Text>
+        </View>
+
+        <View style={s.v38ModelBox}>
+          <View style={s.v38ModelTop}><Text style={s.v38ModelName}>MODEL B</Text><Text style={s.v38ModelTag}>BINARY PARITY</Text><Text style={[s.v38ModelOut,{color:sideColor(output(data?.formulas.B??"觀望"))}]}>{output(data?.formulas.B??"觀望")}</Text></View>
+          <Text style={s.v38Equation}>Fᵦ(X) = [ Σᵢ V(Cᵢ) ] mod 2</Text>
+          <Text style={s.v38Calc}>Rᵦ = {data?`${total} − 2⌊${total}/2⌋ = ${bRem}`:"等待資料"}</Text>
+          <Text style={s.v38Calc}>PARITY = {data?(bRem===0?"EVEN / 2ℤ":"ODD / 2ℤ+1"):"—"}</Text>
+          <Text style={s.v38Rule}>EVEN → BANKER  ·  ODD → PLAYER</Text>
+        </View>
+
+        <View style={s.v38ModelBox}>
+          <View style={s.v38ModelTop}><Text style={s.v38ModelName}>MODEL MUL</Text><Text style={s.v38ModelTag}>PRODUCT PARITY</Text><Text style={[s.v38ModelOut,{color:sideColor(output(data?.formulas.MUL??"觀望"))}]}>{output(data?.formulas.MUL??"觀望")}</Text></View>
+          <Text style={s.v38Equation}>Fₘ(B,P) = (Bₜ × Pₜ) mod 2</Text>
+          <Text style={s.v38Calc}>{data?`${bp} × ${pp} = ${mul}`:"等待資料"}</Text>
+          <Text style={s.v38Calc}>Rₘ = {data?`${mul} − 2⌊${mul}/2⌋ = ${mulRem}`:"—"}</Text>
+          <Text style={s.v38Rule}>{data?(mulRem===0?"2ℤ / EVEN → BANKER":"2ℤ+1 / ODD → PLAYER"):"EVEN → BANKER  ·  ODD → PLAYER"}</Text>
+        </View>
+
+        <View style={s.v38ModelBox}>
+          <View style={s.v38ModelTop}><Text style={s.v38ModelName}>MODEL ADD</Text><Text style={s.v38ModelTag}>COMBINED PARITY</Text><Text style={[s.v38ModelOut,{color:sideColor(output(data?.formulas.ADD??"觀望"))}]}>{output(data?.formulas.ADD??"觀望")}</Text></View>
+          <Text style={s.v38Equation}>F₊(B,P) = (Bₜ + Pₜ) mod 2</Text>
+          <Text style={s.v38Calc}>{data?`${bp} + ${pp} = ${add}`:"等待資料"}</Text>
+          <Text style={s.v38Calc}>R₊ = {data?`${add} − 2⌊${add}/2⌋ = ${addRem}`:"—"}</Text>
+          <Text style={s.v38Rule}>{data?(addRem===0?"2ℤ / EVEN → BANKER":"2ℤ+1 / ODD → PLAYER"):"EVEN → BANKER  ·  ODD → PLAYER"}</Text>
+        </View>
+      </ScrollView>}
     </Animated.View>;
   };
 
@@ -1988,6 +2045,7 @@ const s=StyleSheet.create({
   roadArea:{flex:1,flexDirection:"row",backgroundColor:"#fff",minWidth:0,overflow:"hidden"},roadAreaDesktop:{},beadPane:{width:"32%",height:"100%",flexShrink:0,borderRightWidth:1,borderColor:"#C9D2D9",overflow:"hidden",backgroundColor:"#FFFFFF"},beadPaneDesktop:{width:"32%"},beadGrid:{width:"100%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",backgroundColor:"#FFFFFF"},beadCell:{width:"16.6666667%",height:"16.6666667%",flexGrow:0,flexShrink:0,borderRightWidth:1,borderBottomWidth:1,borderColor:"#D9DEE3",alignItems:"center",justifyContent:"center",backgroundColor:"#FFFFFF"},beadCellDesktop:{},beadDot:{width:"72%",aspectRatio:1,borderRadius:999,borderWidth:1,alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:.10,shadowRadius:1,elevation:1},beadDotDesktop:{width:"70%"},beadDotText:{color:"#FFFFFF",fontSize:8,fontWeight:"900",lineHeight:10,textAlign:"center"},beadDotTextDesktop:{fontSize:9,lineHeight:11},roadStack:{flex:1,minWidth:0,height:"100%"},bigGrid:{width:"100%",height:"62%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch"},bigGridDesktop:{},bigCell:{width:"6.6666667%",height:"16.6666667%",borderRightWidth:1,borderBottomWidth:1,borderColor:"#DDE4E9",alignItems:"center",justifyContent:"center",overflow:"hidden"},bigCellDesktop:{},bigMark:{width:"72%",maxWidth:"78%",aspectRatio:1,borderRadius:999,borderWidth:1.35,backgroundColor:"transparent",alignItems:"center",justifyContent:"center"},bigMarkDesktop:{width:"70%",borderWidth:1.2},tieNumber:{color:"#20B66B",fontSize:7,fontWeight:"900",lineHeight:8},tieNumberDesktop:{fontSize:7,lineHeight:8},lowerArea:{width:"100%",height:"38%",flexDirection:"row",borderTopWidth:1,borderTopColor:"#CCD6DE"},lowerAreaDesktop:{},lowerPane:{width:"33.333333%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",borderRightWidth:1,borderRightColor:"#DDE4E9"},lowerCell:{width:"10%",height:"16.6666667%",alignItems:"center",justifyContent:"center",borderRightWidth:.5,borderBottomWidth:.5,borderColor:"#E4E8EB",overflow:"hidden"},lowerCellDesktop:{},lowerHollow:{width:"55%",aspectRatio:1,borderRadius:999,borderWidth:1.4,backgroundColor:"transparent"},lowerSolid:{width:"52%",aspectRatio:1,borderRadius:999},lowerSlash:{width:"58%",height:2,borderRadius:2,transform:[{rotate:"-45deg"}]},
   orb:{position:"absolute",right:16,bottom:24,zIndex:10020,width:50,height:50,borderRadius:25,backgroundColor:"#07131E",borderWidth:2,borderColor:"#6CC8FF",alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:0.5,shadowRadius:10,elevation:12,touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},orbMt:{bottom:34,zIndex:10020,elevation:40},orbStatus:{position:"absolute",right:4,top:4,width:8,height:8,borderRadius:4,borderWidth:1,borderColor:"#fff"},
   v38LaunchActive:{backgroundColor:"#0F7AAE"},
+  v38InfoBtn:{height:28,paddingHorizontal:8,borderRadius:5,borderWidth:1,borderColor:"#315F78",backgroundColor:"#0C2A3D",flexDirection:"row",alignItems:"center",gap:4},v38InfoBtnText:{color:"#D9F1FF",fontSize:8,fontWeight:"900"},v38DetailScroll:{height:194},v38DetailContent:{padding:7,paddingBottom:12,gap:6},v38VectorBox:{backgroundColor:"#0A1C29",borderWidth:1,borderColor:"#31576D",borderRadius:6,padding:7},v38DetailHeadRow:{flexDirection:"row",alignItems:"center",justifyContent:"space-between",marginBottom:5},v38SectionCode:{color:"#8ED8FF",fontSize:8,fontWeight:"900",letterSpacing:.7},v38LiveDot:{fontSize:7.5,fontWeight:"900"},v38VectorLine:{color:"#D7E5ED",fontSize:8.5,fontWeight:"700",fontFamily:Platform.OS==="web"?"monospace":undefined,lineHeight:14},v38ModelBox:{backgroundColor:"#091722",borderWidth:1,borderColor:"#274A60",borderRadius:6,padding:7},v38ModelTop:{flexDirection:"row",alignItems:"center",gap:6,marginBottom:5},v38ModelName:{color:"#F4FAFF",fontSize:9,fontWeight:"900",letterSpacing:.5},v38ModelTag:{color:"#7599AD",fontSize:6.8,fontWeight:"900",flex:1},v38ModelOut:{fontSize:11,fontWeight:"900"},v38Equation:{color:"#BCE8FF",fontSize:9,fontWeight:"800",fontFamily:Platform.OS==="web"?"monospace":undefined,marginBottom:4},v38Calc:{color:"#D5E0E7",fontSize:8,fontWeight:"700",fontFamily:Platform.OS==="web"?"monospace":undefined,lineHeight:13},v38Rule:{color:"#7897AA",fontSize:7,fontWeight:"700",marginTop:4},
   v38Panel:{position:"absolute",right:88,top:120,width:360,zIndex:10010,backgroundColor:"rgba(5,15,24,.985)",borderWidth:1,borderColor:"#3B789C",borderRadius:10,overflow:"hidden",shadowColor:"#000",shadowOpacity:.5,shadowRadius:14,elevation:30},v38PanelMobile:{left:12,right:"auto" as any,top:115,width:340,maxWidth:"92%" as any},v38PanelMt:{zIndex:10015,elevation:45},v38Header:{height:42,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#082033",borderBottomWidth:1,borderBottomColor:"#285B79",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},v38HeaderLeft:{flexDirection:"row",alignItems:"center",gap:8},v38Title:{color:"#F4FAFF",fontSize:12,fontWeight:"900",letterSpacing:.5},v38Sub:{color:"#80A7BD",fontSize:8,fontWeight:"800",marginTop:1},v38Body:{padding:8},v38MetaRow:{flexDirection:"row",justifyContent:"space-between",marginBottom:6},v38Meta:{color:"#9DB2C0",fontSize:9,fontWeight:"800"},v38Cards:{flexDirection:"row",gap:6},v38Hand:{flex:1,minHeight:54,backgroundColor:"#0E2232",borderWidth:1,borderColor:"#294C63",borderRadius:6,padding:7},v38HandSide:{fontSize:10,fontWeight:"900"},v38CardText:{color:"#F5FAFD",fontSize:14,fontWeight:"900",marginTop:5},v38Point:{color:"#C7D7E1",fontSize:9,fontWeight:"800",marginTop:3},v38FormulaGrid:{flexDirection:"row",gap:5,marginTop:6},v38Formula:{flex:1,backgroundColor:"#0B1B29",borderWidth:1,borderColor:"#24465D",borderRadius:5,paddingVertical:6,alignItems:"center"},v38FormulaName:{color:"#9EB6C6",fontSize:8,fontWeight:"900"},v38FormulaSide:{fontSize:13,fontWeight:"900",marginTop:2},v38Recommend:{marginTop:6,minHeight:50,backgroundColor:"#10283A",borderWidth:1,borderColor:"#326884",borderRadius:6,paddingHorizontal:8,paddingVertical:6,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},v38RecommendLabel:{color:"#E8F4FA",fontSize:10,fontWeight:"900"},v38RecommendHint:{color:"#83A2B5",fontSize:7.5,fontWeight:"700",marginTop:3},v38RecommendSide:{fontSize:21,fontWeight:"900"},
   floatPanel:{position:"absolute",right:74,bottom:22,zIndex:100,backgroundColor:"rgba(6,16,25,.975)",borderWidth:1,borderColor:"#416C88",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:14,elevation:15},floatPanelMt:{zIndex:9999},floatHeader:{height:38,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#081A28",borderBottomWidth:1,borderBottomColor:"#234A63",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},floatHeadLeft:{flexDirection:"row",alignItems:"center",gap:8},floatBrandLine:{flexDirection:"row",alignItems:"center",gap:7},floatTitle:{color:"#F5FAFD",fontWeight:"900",fontSize:12,letterSpacing:.7},floatStatus:{color:"#56D48C",fontSize:8,fontWeight:"900"},iconBtn:{width:27,height:27,borderRadius:5,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},iconTextBtn:{height:27,paddingHorizontal:7,borderRadius:5,backgroundColor:"#214A70",flexDirection:"row",gap:3,alignItems:"center"},iconText:{color:"#fff",fontSize:8,fontWeight:"800"},selectorWrap:{marginHorizontal:6,marginTop:6,position:"relative",zIndex:130},selector:{height:38,paddingHorizontal:9,borderWidth:1,borderColor:"#31516B",borderRadius:5,backgroundColor:"#09151F",flexDirection:"row",alignItems:"center",justifyContent:"space-between"},selectorLeft:{flexDirection:"row",alignItems:"center",gap:4},selectorConfidence:{flexDirection:"row",alignItems:"center",gap:4,marginLeft:4},selectorValue:{color:"#F0F5F8",fontSize:11,fontWeight:"900"},selectorMeta:{color:"#B6C5D0",fontSize:9},roomDropdown:{position:"absolute",left:0,right:0,top:42,maxHeight:205,backgroundColor:"#0A1722",borderWidth:1,borderColor:"#345A76",borderRadius:6,zIndex:160,elevation:30,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:10},roomDropdownScroll:{height:205,maxHeight:205,overflow:"scroll"},roomDropdownContent:{paddingBottom:2},roomDropdownItem:{minHeight:42,paddingHorizontal:10,paddingVertical:5,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#183044"},roomDropdownItemActive:{backgroundColor:"#1B5B88"},roomDropdownLeft:{flex:1,minWidth:0,paddingRight:8},roomDropdownText:{color:"#EDF5FA",fontSize:10,fontWeight:"900"},roomDropdownDealer:{color:"#AFC1CD",fontSize:8,marginTop:2},roomDropdownMeta:{color:"#8EA7B9",fontSize:8,fontWeight:"800"},roomDropdownRight:{alignItems:"flex-end",justifyContent:"center",gap:3},roomConfidence:{flexDirection:"row",alignItems:"center",gap:5},roomConfidenceText:{fontSize:8,fontWeight:"900",textShadowRadius:7},assistPage:{padding:6,minHeight:150},decisionRow:{flexDirection:"row",gap:5},decisionBox:{flex:1,minHeight:68,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,padding:7},smallLabel:{color:"#FFFFFF",fontSize:12,fontWeight:"900"},latestLine:{flexDirection:"row",alignItems:"center",gap:7,marginTop:7},glowDot:{width:17,height:17,borderRadius:8.5,shadowOpacity:1,shadowRadius:10,elevation:8},latestText:{fontSize:16,fontWeight:"900"},detectText:{color:"#FFFFFF",fontSize:14,fontWeight:"900",marginTop:7},recommendText:{fontSize:17,fontWeight:"900",marginTop:7},microText:{color:"#FFFFFF",fontSize:12,fontWeight:"900",marginTop:4},todayPnlBox:{marginTop:5,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,paddingHorizontal:8,paddingVertical:6,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},todayPnlValue:{fontSize:16,fontWeight:"900"},aiBox:{marginTop:5,backgroundColor:"#0B1925",borderRadius:5,padding:7},aiTitle:{color:"#B7D3E6",fontSize:11,fontWeight:"900"},aiText:{color:"#C6D2DB",fontSize:11,lineHeight:17,marginTop:5},aiTextMobile:{fontSize:9.5,lineHeight:13,marginTop:3},moneyGrid:{flexDirection:"row",gap:5},fieldBox:{flex:1,backgroundColor:"#102335",borderRadius:5,padding:7,minHeight:58},moneyInput:{color:"#fff",fontSize:13,fontWeight:"900",padding:0,marginTop:5},nextAmount:{color:"#54D79A",fontSize:15,fontWeight:"900",marginTop:6},strategyScroll:{marginTop:6,maxHeight:30},strategyRow:{gap:4},strategyChip:{height:25,paddingHorizontal:8,borderRadius:4,backgroundColor:"#172B3B",justifyContent:"center"},strategyChipActive:{backgroundColor:"#2B78B5"},strategyChipText:{color:"#AABCC8",fontSize:7.5,fontWeight:"800"},progressBox:{marginTop:6,backgroundColor:"#0B1925",borderRadius:5,padding:7},progressText:{color:"#DDE9F0",fontSize:9,fontWeight:"800",marginTop:4},recommendHeader:{flexDirection:"row",alignItems:"center",justifyContent:"space-between"},martinResetMini:{paddingHorizontal:7,height:20,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetMiniText:{color:"#fff",fontSize:8,fontWeight:"900"},martinResetBtn:{marginTop:7,height:27,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetText:{color:"#fff",fontSize:9,fontWeight:"900"},betButtons:{flexDirection:"row",gap:5},betBtn:{flex:1,height:38,borderRadius:5,alignItems:"center",justifyContent:"center"},betBtnText:{color:"#fff",fontSize:12,fontWeight:"900"},statsGrid:{marginTop:6,backgroundColor:"#102335",borderRadius:5,padding:7,flexDirection:"row",justifyContent:"space-between"},statsValue:{color:"#fff",fontSize:11,fontWeight:"900",marginTop:3},recordBar:{marginTop:5,flexDirection:"row",justifyContent:"space-between",alignItems:"center"},resetText:{color:"#51BDF1",fontSize:8,fontWeight:"900"},historyRow:{gap:4,marginTop:5},historyChip:{backgroundColor:"#142A3B",borderRadius:4,paddingHorizontal:6,paddingVertical:4},pageDots:{height:19,flexDirection:"row",gap:7,alignItems:"center",justifyContent:"center"},pageDot:{width:6,height:6,borderRadius:3,backgroundColor:"#526574"},pageDotActive:{backgroundColor:"#fff"},
   recommendTitleConfidence:{flexDirection:"row",alignItems:"center",gap:5},
