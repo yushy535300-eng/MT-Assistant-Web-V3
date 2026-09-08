@@ -799,9 +799,6 @@ export default function HomeScreen(){
   const reconnectCooldownUntilRef=useRef(0);
   const awaitingFreshSnapshotRef=useRef(false);
   const reconnectTimerRef=useRef<ReturnType<typeof setTimeout>|null>(null);
-  const reconnectAttemptRef=useRef(0);
-  const manualDisconnectRef=useRef(false);
-  const lastSocketMessageAtRef=useRef(0);
   const roomDropdownScrollRef=useRef<ScrollView|null>(null);
   const roomDropdownOffsetRef=useRef(0);
   const [tables,setTables]=useState<TableData[]>(initialTables);
@@ -1410,7 +1407,7 @@ export default function HomeScreen(){
     }
   };
 
-  const startConnection=(autoReason?:string,isReconnect=false)=>{
+  const startConnection=(autoReason?:string)=>{
     const authToken=extractMtUrlToken(token||mtUrl);
     if(!authToken){notify("請貼登入後含 token 的 MT 網址");reconnectingRef.current=false;return}
     if(autoReason){
@@ -1428,17 +1425,15 @@ export default function HomeScreen(){
       return;
     }
     awaitingFreshSnapshotRef.current=true;
-    manualDisconnectRef.current=false;
-    if(!isReconnect){
-      // 只有使用者主動開始新連線時才重設報表追蹤基準。自動重連沿用原狀態，避免重複結算。
-      betTrackingStartedAtRef.current=Date.now();
-      betReportBaselineReadyRef.current=false;
-      processedGameSnRef.current.clear();
-      pendingSettlementGameSnRef.current.clear();
-      lastBetReportOrderRef.current="";
-      lastBetReportGameSnRef.current="";
-      reconnectAttemptRef.current=0;
-    }
+    // v27: 在 WebSocket 建立前就開始計時。第一包報表即使晚到，
+    // 只要下注 created_at >= 這個時間，就必須當成新單結算馬丁。
+    betTrackingStartedAtRef.current=Date.now();
+    // New manual main-WS session: reset report baseline timing, but keep already processed order IDs.
+    betReportBaselineReadyRef.current=false;
+    processedGameSnRef.current.clear();
+    pendingSettlementGameSnRef.current.clear();
+    lastBetReportOrderRef.current="";
+    lastBetReportGameSnRef.current="";
     const generation=++socketGenerationRef.current;
     const ws=new WebSocket(wsUrl);
     socketRef.current=ws;
@@ -1456,7 +1451,6 @@ export default function HomeScreen(){
     let reportSettlementFollowupTimer:ReturnType<typeof setTimeout>|null=null;
     let svgRefreshTimer:ReturnType<typeof setTimeout>|null=null;
     let subscribeTimer:ReturnType<typeof setTimeout>|null=null;
-    let connectionWatchdogTimer:ReturnType<typeof setInterval>|null=null;
     let betReportInFlight=false;
     let betReportRequestAt=0;
     // Short-lived settlement sync cycle. We cannot observe the cross-origin MT report UI
@@ -1481,7 +1475,6 @@ export default function HomeScreen(){
       reportSyncActive=false;
       if(svgRefreshTimer)clearTimeout(svgRefreshTimer); svgRefreshTimer=null;
       if(subscribeTimer)clearTimeout(subscribeTimer); subscribeTimer=null;
-      if(connectionWatchdogTimer)clearInterval(connectionWatchdogTimer); connectionWatchdogTimer=null;
     };
     // Collapse bursts from 15 tables into one snapshot request.
     const scheduleTablesRefresh=(delay=700)=>{
@@ -1601,7 +1594,7 @@ export default function HomeScreen(){
       dealerRefreshTimer=setInterval(()=>{if(isCurrentSocket())requestTables(true)},10000);
     };
     const subscribe=()=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/mulitple_join",data:{table_id:baccaratTableIds.join(",")}}}));subscribed=true;appendEvent("已訂閱 15 桌即時事件")}};
-    ws.onopen=()=>{if(!isCurrentSocket())return;lastSocketMessageAtRef.current=Date.now();appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
+    ws.onopen=()=>{if(!isCurrentSocket())return;appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
     ws.onmessage=e=>{if(!isCurrentSocket())return;try{
       const p=JSON.parse(e.data),name=eventName(p);
         if(isBetReportPayload(p)){
@@ -1670,21 +1663,7 @@ export default function HomeScreen(){
         if(name.endsWith("/show_win")||name.includes("/show_win")){
           const winTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"");
           refreshBetReportAfterSettlement(winTableId,p);
-        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;
-        reconnectAttemptRef.current=0;
-        lastSocketMessageAtRef.current=Date.now();
-        if(!connectionWatchdogTimer){
-          connectionWatchdogTimer=setInterval(()=>{
-            if(!isCurrentSocket()||ws.readyState!==WebSocket.OPEN)return;
-            const silentFor=Date.now()-lastSocketMessageAtRef.current;
-            // 先用同一條已驗證 WS 做輕量同步；只有長時間完全無封包才讓 onclose 走安全重連。
-            if(silentFor>30000)requestSvg();
-            if(silentFor>75000){
-              appendEvent("連線長時間無回應，準備安全重連");
-              try{ws.close()}catch{}
-            }
-          },15000);
-        };setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200);subscribeTimer=setTimeout(()=>{subscribeTimer=null;if(isCurrentSocket())subscribe()},400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
+        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200);subscribeTimer=setTimeout(()=>{subscribeTimer=null;if(isCurrentSocket())subscribe()},400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
       updateLiveTables(c=>{
         // The first complete snapshot after every connection/reconnection is the
@@ -1716,20 +1695,9 @@ export default function HomeScreen(){
       setSocket(null);
       setConnected(false);
       appendEvent("WebSocket 已中斷");
-      if(!manualDisconnectRef.current){
-        const attempt=Math.min(reconnectAttemptRef.current++,5);
-        const delay=Math.min(1500*Math.pow(2,attempt),20000);
-        if(reconnectTimerRef.current)clearTimeout(reconnectTimerRef.current);
-        appendEvent(`將於 ${Math.round(delay/1000)} 秒後自動重連`);
-        reconnectTimerRef.current=setTimeout(()=>{
-          reconnectTimerRef.current=null;
-          if(!manualDisconnectRef.current&&!socketRef.current)startConnection(undefined,true);
-        },delay);
-      }
     };
   };
   const stopConnection=()=>{
-    manualDisconnectRef.current=true;
     if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}
     reconnectingRef.current=false;
     awaitingFreshSnapshotRef.current=false;
