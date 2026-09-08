@@ -739,6 +739,64 @@ function resetRoadForNewShoePayload(current:TableData[], payload:any):TableData[
   });
 }
 
+
+
+type V38Side = "莊" | "閒" | "觀望";
+type V38PokerState = {
+  tableId:string; shoe:string; round:number; result:number[];
+  player:string[]; banker:string[]; playerPoint:number; bankerPoint:number;
+  complete:boolean; settled:boolean; updatedAt:number;
+  formulas:{A:V38Side;B:V38Side;MUL:V38Side;ADD:V38Side};
+  recommendation:V38Side;
+};
+
+function mtCardRank(cardId:number):string|null{
+  if(!Number.isFinite(cardId)||cardId<=0)return null;
+  const rank=((Math.trunc(cardId)-1)%13)+1;
+  if(rank===1)return "A";
+  if(rank===11)return "J";
+  if(rank===12)return "Q";
+  if(rank===13)return "K";
+  return String(rank);
+}
+function baccaratCardValue(card:string){
+  if(card==="A")return 1;
+  const n=Number(card);
+  return Number.isFinite(n)&&n>=2&&n<=9?n:0;
+}
+function baccaratPoint(cards:string[]){return cards.reduce((sum,c)=>sum+baccaratCardValue(c),0)%10}
+function v38RawFormulas(banker:string[],player:string[]){
+  const sum=[...banker,...player].reduce((n,c)=>n+baccaratCardValue(c),0);
+  const pb=baccaratPoint(banker),pp=baccaratPoint(player);
+  const formulas={
+    A:(sum%3===0?"莊":"閒") as V38Side,
+    B:(sum%2===0?"莊":"閒") as V38Side,
+    MUL:((pb*pp)%2===0?"莊":"閒") as V38Side,
+    ADD:((pb+pp)%2===0?"莊":"閒") as V38Side,
+  };
+  const votes=Object.values(formulas);
+  const b=votes.filter(x=>x==="莊").length,p=votes.filter(x=>x==="閒").length;
+  return {formulas,recommendation:(b===p?"觀望":b>p?"莊":"閒") as V38Side};
+}
+function parseV38ShowPoker(payload:any):V38PokerState|null{
+  const body=payload?.body??payload?.msg??payload?.data??payload??{};
+  const raw=body?.result;
+  const tableId=String(body?.table_id??body?.tableId??"").toUpperCase();
+  if(!tableId||!Array.isArray(raw)||raw.length<10)return null;
+  const result=raw.map((x:any)=>Number(x));
+  const player=[result[0],result[2],result[4]].map(mtCardRank).filter((x):x is string=>!!x);
+  const banker=[result[1],result[3],result[5]].map(mtCardRank).filter((x):x is string=>!!x);
+  const calculatedPlayer=baccaratPoint(player),calculatedBanker=baccaratPoint(banker);
+  const serverPlayer=Number(result[8]),serverBanker=Number(result[9]);
+  const fourCards=player.length>=2&&banker.length>=2;
+  // MT sends show_poker progressively. A packet is considered display-ready only after
+  // the first four cards exist and the locally calculated points agree with MT's points.
+  const pointsAgree=fourCards&&serverPlayer===calculatedPlayer&&serverBanker===calculatedBanker;
+  const {formulas,recommendation}=v38RawFormulas(banker,player);
+  return {tableId,shoe:String(body?.shoe??"—"),round:Number(body?.round)||0,result,player,banker,
+    playerPoint:calculatedPlayer,bankerPoint:calculatedBanker,complete:pointsAgree,settled:false,updatedAt:Date.now(),formulas,recommendation};
+}
+
 export default function HomeScreen(){
   const {width,height}=useWindowDimensions();
   const desktop=width>=1000;
@@ -852,6 +910,12 @@ export default function HomeScreen(){
   const orbPosition=useRef(new Animated.ValueXY()).current;
   const panelPosition=useRef(new Animated.ValueXY()).current;
   const radarPosition=useRef(new Animated.ValueXY()).current;
+  // Independent V38 calculator floating window. Existing assistant state/drag logic is untouched.
+  const [v38Open,setV38Open]=useState(false);
+  const [v38ByTable,setV38ByTable]=useState<Record<string,V38PokerState>>({});
+  const v38ByTableRef=useRef<Record<string,V38PokerState>>({});
+  const v38Position=useRef(new Animated.ValueXY()).current;
+  const v38DraggingRef=useRef(false);
   const panelSizeRef=useRef({width:panelBaseWidth,height:245});
   const orbDraggingRef=useRef(false);
   const panelDraggingRef=useRef(false);
@@ -1104,6 +1168,27 @@ export default function HomeScreen(){
     onPanResponderTerminationRequest:()=>false,
     onShouldBlockNativeResponder:()=>true,
   }),[panelPosition,width,height,desktop,panelBaseWidth]);
+  const clampV38Position=()=>{
+    const boxW=desktop?360:Math.min(340,width-24),boxH=285;
+    const baseLeft=desktop?Math.max(12,width-boxW-88):12;
+    const baseTop=desktop?120:115;
+    const minX=8-baseLeft,maxX=Math.max(minX,width-8-boxW-baseLeft);
+    const minY=8-baseTop,maxY=Math.max(minY,height-36-baseTop);
+    v38Position.stopAnimation((v:any)=>v38Position.setValue({
+      x:Math.max(minX,Math.min(maxX,Number(v?.x)||0)),
+      y:Math.max(minY,Math.min(maxY,Number(v?.y)||0)),
+    }));
+  };
+  const v38Drag=useMemo(()=>PanResponder.create({
+    onStartShouldSetPanResponder:()=>false,
+    onMoveShouldSetPanResponder:(_,g)=>Math.abs(g.dx)>=2||Math.abs(g.dy)>=2,
+    onPanResponderGrant:()=>{v38DraggingRef.current=true;v38Position.stopAnimation(()=>v38Position.extractOffset())},
+    onPanResponderMove:(_,g)=>v38Position.setValue({x:g.dx,y:g.dy}),
+    onPanResponderRelease:()=>{v38Position.flattenOffset();clampV38Position();v38DraggingRef.current=false},
+    onPanResponderTerminate:()=>{v38Position.flattenOffset();clampV38Position();v38DraggingRef.current=false},
+    onPanResponderTerminationRequest:()=>false,
+  }),[v38Position,width,height,desktop]);
+
   const clampRadarPosition=()=>{
     const launcherWidth=desktop?210:188;
     const launcherHeight=32;
@@ -1597,6 +1682,16 @@ export default function HomeScreen(){
     ws.onopen=()=>{if(!isCurrentSocket())return;appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
     ws.onmessage=e=>{if(!isCurrentSocket())return;try{
       const p=JSON.parse(e.data),name=eventName(p);
+      // V38 calculator listens passively to MT show_poker; it does not mutate the original assistant.
+      if(name.includes("/show_poker")){
+        const parsed=parseV38ShowPoker(p);
+        if(parsed){
+          const prev=v38ByTableRef.current[parsed.tableId];
+          const next={...parsed,settled:prev?.shoe===parsed.shoe&&prev?.round===parsed.round?!!prev.settled:false};
+          v38ByTableRef.current={...v38ByTableRef.current,[parsed.tableId]:next};
+          setV38ByTable(v38ByTableRef.current);
+        }
+      }
         if(isBetReportPayload(p)){
           betReportInFlight=false;
           const reportOrders=readBetReportOrders(p);
@@ -1661,7 +1756,13 @@ export default function HomeScreen(){
           return;
         }
         if(name.endsWith("/show_win")||name.includes("/show_win")){
-          const winTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"");
+          const winTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"").toUpperCase();
+          if(winTableId&&v38ByTableRef.current[winTableId]){
+            const old=v38ByTableRef.current[winTableId];
+            const settled={...old,settled:old.complete};
+            v38ByTableRef.current={...v38ByTableRef.current,[winTableId]:settled};
+            setV38ByTable(v38ByTableRef.current);
+          }
           refreshBetReportAfterSettlement(winTableId,p);
         }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200);subscribeTimer=setTimeout(()=>{subscribeTimer=null;if(isCurrentSocket())subscribe()},400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
@@ -1768,7 +1869,7 @@ export default function HomeScreen(){
     const page3=<View {...pageSwipe.panHandlers} style={s.assistPage}><View style={s.betButtons}><Pressable style={[s.betBtn,{backgroundColor:"#B8323B"}]} onPress={()=>placeManualBet("莊")}><Text style={s.betBtnText}>本局莊</Text></Pressable><Pressable style={[s.betBtn,{backgroundColor:"#1764C0"}]} onPress={()=>placeManualBet("閒")}><Text style={s.betBtnText}>本局閒</Text></Pressable><Pressable style={[s.betBtn,{backgroundColor:"#238A4B"}]} onPress={()=>placeManualBet("和")}><Text style={s.betBtnText}>和局</Text></Pressable></View><View style={s.statsGrid}><View><Text style={s.smallLabel}>目前本金</Text><Text style={s.statsValue}>{bankroll.toLocaleString()}</Text></View><View><Text style={s.smallLabel}>總損益</Text><Text style={[s.statsValue,{color:bankroll-initialBankroll>=0?"#4ED58B":"#FF6973"}]}>{(bankroll-initialBankroll>=0?"+":"")+(bankroll-initialBankroll).toLocaleString()}</Text></View><View><Text style={s.smallLabel}>勝 / 負</Text><Text style={s.statsValue}>{wins} / {losses}</Text></View><View><Text style={s.smallLabel}>勝率</Text><Text style={s.statsValue}>{decisions?((wins/decisions)*100).toFixed(1):"0.0"}%</Text></View></View><View style={s.recordBar}><Text style={s.microText}>{pendingBet?`等待開獎：${pendingBet.side} ${pendingBet.amount.toLocaleString()}`:`連${records[0]?.pnl>0?"勝":records[0]?.pnl<0?"敗":"續"} ${streak}　最大回撤 -${maxDrawdown.toLocaleString()}`}</Text><Pressable onPress={resetStats}><Text style={s.resetText}>重置統計</Text></Pressable></View><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.historyRow}>{records.slice(0,8).map((r,i)=><View key={i} style={s.historyChip}><Text style={{color:r.pnl>=0?"#53D990":"#FF7079",fontSize:9,fontWeight:"800"}}>{r.side} {r.pnl>=0?"+":""}{r.pnl.toLocaleString()}</Text></View>)}</ScrollView></View>;
     if(!floatingOpen)return null;
     return <Animated.View onLayout={(e:any)=>{const l=e.nativeEvent?.layout;if(l?.width&&l?.height){panelSizeRef.current={width:l.width,height:l.height}}}} style={[s.floatPanel,!desktop?s.floatPanelMobile:null,{width:panelBaseWidth},insideMt?s.floatPanelMt:null,Platform.OS==="web"?({overscrollBehavior:"contain",transformOrigin:"top left"} as any):null,{transform:!desktop?[...panelPosition.getTranslateTransform(),{scale:panelMobileScale}]:panelPosition.getTranslateTransform()}]}>
-      <View style={[s.floatHeader,Platform.OS==="web"?({touchAction:"none",userSelect:"none",WebkitUserSelect:"none"} as any):null]} {...panelDrag.panHandlers}><View style={s.floatHeadLeft}><MatrixMark size={25}/><View><View style={s.floatBrandLine}><Text style={s.floatTitle}>MATRIX ASSIST</Text><Text style={s.floatStatus}>{connected?"● LIVE":"● OFFLINE"}</Text></View><ThreadsSignature/></View></View><View style={s.row}><Pressable onPress={syncAssist} style={s.iconTextBtn}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.iconText}>同步</Text></Pressable><Pressable onPress={()=>setFloatingOpen(false)} style={s.iconBtn}><MaterialIcons name="close" size={18} color="#fff"/></Pressable></View></View>
+      <View style={[s.floatHeader,Platform.OS==="web"?({touchAction:"none",userSelect:"none",WebkitUserSelect:"none"} as any):null]} {...panelDrag.panHandlers}><View style={s.floatHeadLeft}><MatrixMark size={25}/><View><View style={s.floatBrandLine}><Text style={s.floatTitle}>MATRIX ASSIST</Text><Text style={s.floatStatus}>{connected?"● LIVE":"● OFFLINE"}</Text></View><ThreadsSignature/></View></View><View style={s.row}><Pressable onPress={syncAssist} style={s.iconTextBtn}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.iconText}>同步</Text></Pressable><Pressable onPress={()=>setV38Open(v=>!v)} style={[s.iconTextBtn,v38Open&&s.v38LaunchActive]}><MaterialIcons name="calculate" size={15} color="#fff"/><Text style={s.iconText}>算牌</Text></Pressable><Pressable onPress={()=>setFloatingOpen(false)} style={s.iconBtn}><MaterialIcons name="close" size={18} color="#fff"/></Pressable></View></View>
       <View style={s.selectorWrap}>
         <Pressable style={s.selector} onPress={()=>{
           if(roomDropdownOpen){ roomDropdownOpenRef.current=false; setRoomDropdownOpen(false); }
@@ -1820,6 +1921,36 @@ export default function HomeScreen(){
     </Animated.View>;
   };
 
+
+  const V38Calculator=({insideMt=false}:{insideMt?:boolean})=>{
+    if(!v38Open)return null;
+    const data=v38ByTable[assistTableId];
+    const sideColor=(x:V38Side)=>x==="莊"?"#EF4E57":x==="閒"?"#2879E5":"#A7B5BF";
+    const status=!connected?"未連線":!data?"等待牌面":data.settled?"已結算":data.complete?"牌面完成":"發牌中";
+    const cards=(xs?:string[])=>xs?.length?xs.join("  "):"—";
+    return <Animated.View style={[s.v38Panel,!desktop&&s.v38PanelMobile,insideMt&&s.v38PanelMt,{transform:v38Position.getTranslateTransform()}]}>
+      <View style={s.v38Header} {...v38Drag.panHandlers}>
+        <View style={s.v38HeaderLeft}><MaterialIcons name="calculate" size={18} color="#8ED8FF"/><View><Text style={s.v38Title}>V38 四式算牌</Text><Text style={s.v38Sub}>{assistTableId} · {status}</Text></View></View>
+        <Pressable onPress={()=>setV38Open(false)} style={s.iconBtn}><MaterialIcons name="close" size={18} color="#fff"/></Pressable>
+      </View>
+      <View style={s.v38Body}>
+        <View style={s.v38MetaRow}><Text style={s.v38Meta}>Shoe {data?.shoe??assistTable?.shoe??"—"}</Text><Text style={s.v38Meta}>Round {data?.round??assistTable?.round??0}</Text></View>
+        <View style={s.v38Cards}>
+          <View style={s.v38Hand}><Text style={[s.v38HandSide,{color:"#2879E5"}]}>閒</Text><Text style={s.v38CardText}>{cards(data?.player)}</Text><Text style={s.v38Point}>{data?`${data.playerPoint} 點`:"—"}</Text></View>
+          <View style={s.v38Hand}><Text style={[s.v38HandSide,{color:"#EF4E57"}]}>莊</Text><Text style={s.v38CardText}>{cards(data?.banker)}</Text><Text style={s.v38Point}>{data?`${data.bankerPoint} 點`:"—"}</Text></View>
+        </View>
+        <View style={s.v38FormulaGrid}>{(["A","B","MUL","ADD"] as const).map(k=>{
+          const value=data?.complete?data.formulas[k]:"觀望";
+          return <View key={k} style={s.v38Formula}><Text style={s.v38FormulaName}>{k}</Text><Text style={[s.v38FormulaSide,{color:sideColor(value)}]}>{value}</Text></View>
+        })}</View>
+        <View style={s.v38Recommend}>
+          <View><Text style={s.v38RecommendLabel}>下一局四式投票</Text><Text style={s.v38RecommendHint}>{data?.complete?(data.settled?"本局已確認，推薦已更新":"牌面完成，等待結算確認"):"等待完整 show_poker 資料"}</Text></View>
+          <Text style={[s.v38RecommendSide,{color:sideColor(data?.complete?data.recommendation:"觀望")}]}>{data?.complete?data.recommendation:"觀望"}</Text>
+        </View>
+      </View>
+    </Animated.View>;
+  };
+
   if(!accessGranted)return <AccessScreen notice={accessNotice} onAuthenticated={(sessionId)=>{
     setAccessSessionId(sessionId);
     setAccessNotice("");
@@ -1841,6 +1972,7 @@ export default function HomeScreen(){
       {mtOpen?<View style={s.mtOverlay}><View style={s.mtScreen}><View style={s.mtTop}><View style={s.brandRow}><View style={s.brandIcon}><MatrixMark size={29}/></View><View><Text style={s.kicker}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>MT MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>MT MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setMtOpen(false)}><MaterialIcons name="arrow-back" size={16} color="#fff"/><Text style={s.headerBtnText}>回牌路</Text></Pressable></View></View><View style={s.iframeWrap}>{Platform.OS==="web"?createElement("iframe" as any,{src:mtUrl.trim()||token.trim(),style:{width:"100%",height:"100%",border:"0",background:"#000"},allow:"clipboard-read; clipboard-write; fullscreen"}):<View style={s.nativeMtFallback}><Text style={s.helpText}>目前原生模式請使用外部瀏覽器開啟 MT 平台。</Text></View>}</View></View></View>:null}
       {MultiTableRadar({insideMt:mtOpen})}
       {FloatingAssistant({insideMt:mtOpen})}
+      {V38Calculator({insideMt:mtOpen})}
       <FloatingOrb position={orbPosition} responder={orbResponder} size={orbSize} iconSize={orbIconSize} connected={connected} insideMt={mtOpen}/>
     </View>
   </ScreenContainer>;
@@ -1855,6 +1987,8 @@ const s=StyleSheet.create({
   tableBody:{flexDirection:"row",height:176,backgroundColor:"#fff",overflow:"hidden"},tableBodyDesktop:{height:190},tableBodyMobile:{height:164},dealer:{width:112,backgroundColor:"#F2F0EC",padding:4,justifyContent:"flex-end"},dealerDesktop:{width:"21.88%"},dealerMobile:{width:"21.88%",minWidth:76},photo:{position:"absolute",top:3,left:3,right:3,height:112,backgroundColor:"#DCE2E6",alignItems:"center",justifyContent:"center",overflow:"hidden"},photoDesktop:{height:"75%"},photoMobile:{height:"73%"},photoImage:{width:"100%",height:"100%",resizeMode:"cover"},liveMediaFill:{width:"100%",height:"100%",alignItems:"center",justifyContent:"center",overflow:"hidden"},crown:{fontSize:30,color:"#C5A24C"},dealerName:{color:"#FFFFFF",backgroundColor:"#6F2F82",alignSelf:"flex-start",paddingHorizontal:5,paddingVertical:2,fontSize:11,fontWeight:"900",lineHeight:14},meta:{color:"#617889",fontSize:8.5,fontWeight:"700",lineHeight:11,marginTop:1},metaVideoRow:{height:12,flexDirection:"row",alignItems:"center",marginTop:1,overflow:"hidden"},metaVideoText:{flexShrink:1,marginTop:0,lineHeight:11},videoLabel:{color:"#7890A1",fontSize:7.5,fontWeight:"800",marginLeft:3,marginRight:2,lineHeight:10},videoSwitch:{width:18,height:9,borderRadius:5,backgroundColor:"#667B89",padding:1,justifyContent:"center"},videoSwitchOn:{backgroundColor:"#19B96C"},videoSwitchKnob:{width:7,height:7,borderRadius:3.5,backgroundColor:"#fff",alignSelf:"flex-start"},videoSwitchKnobOn:{alignSelf:"flex-end"},
   roadArea:{flex:1,flexDirection:"row",backgroundColor:"#fff",minWidth:0,overflow:"hidden"},roadAreaDesktop:{},beadPane:{width:"32%",height:"100%",flexShrink:0,borderRightWidth:1,borderColor:"#C9D2D9",overflow:"hidden",backgroundColor:"#FFFFFF"},beadPaneDesktop:{width:"32%"},beadGrid:{width:"100%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",backgroundColor:"#FFFFFF"},beadCell:{width:"16.6666667%",height:"16.6666667%",flexGrow:0,flexShrink:0,borderRightWidth:1,borderBottomWidth:1,borderColor:"#D9DEE3",alignItems:"center",justifyContent:"center",backgroundColor:"#FFFFFF"},beadCellDesktop:{},beadDot:{width:"72%",aspectRatio:1,borderRadius:999,borderWidth:1,alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:.10,shadowRadius:1,elevation:1},beadDotDesktop:{width:"70%"},beadDotText:{color:"#FFFFFF",fontSize:8,fontWeight:"900",lineHeight:10,textAlign:"center"},beadDotTextDesktop:{fontSize:9,lineHeight:11},roadStack:{flex:1,minWidth:0,height:"100%"},bigGrid:{width:"100%",height:"62%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch"},bigGridDesktop:{},bigCell:{width:"6.6666667%",height:"16.6666667%",borderRightWidth:1,borderBottomWidth:1,borderColor:"#DDE4E9",alignItems:"center",justifyContent:"center",overflow:"hidden"},bigCellDesktop:{},bigMark:{width:"72%",maxWidth:"78%",aspectRatio:1,borderRadius:999,borderWidth:1.35,backgroundColor:"transparent",alignItems:"center",justifyContent:"center"},bigMarkDesktop:{width:"70%",borderWidth:1.2},tieNumber:{color:"#20B66B",fontSize:7,fontWeight:"900",lineHeight:8},tieNumberDesktop:{fontSize:7,lineHeight:8},lowerArea:{width:"100%",height:"38%",flexDirection:"row",borderTopWidth:1,borderTopColor:"#CCD6DE"},lowerAreaDesktop:{},lowerPane:{width:"33.333333%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",borderRightWidth:1,borderRightColor:"#DDE4E9"},lowerCell:{width:"10%",height:"16.6666667%",alignItems:"center",justifyContent:"center",borderRightWidth:.5,borderBottomWidth:.5,borderColor:"#E4E8EB",overflow:"hidden"},lowerCellDesktop:{},lowerHollow:{width:"55%",aspectRatio:1,borderRadius:999,borderWidth:1.4,backgroundColor:"transparent"},lowerSolid:{width:"52%",aspectRatio:1,borderRadius:999},lowerSlash:{width:"58%",height:2,borderRadius:2,transform:[{rotate:"-45deg"}]},
   orb:{position:"absolute",right:16,bottom:24,zIndex:10020,width:50,height:50,borderRadius:25,backgroundColor:"#07131E",borderWidth:2,borderColor:"#6CC8FF",alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:0.5,shadowRadius:10,elevation:12,touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},orbMt:{bottom:34,zIndex:10020,elevation:40},orbStatus:{position:"absolute",right:4,top:4,width:8,height:8,borderRadius:4,borderWidth:1,borderColor:"#fff"},
+  v38LaunchActive:{backgroundColor:"#0F7AAE"},
+  v38Panel:{position:"absolute",right:88,top:120,width:360,zIndex:10010,backgroundColor:"rgba(5,15,24,.985)",borderWidth:1,borderColor:"#3B789C",borderRadius:10,overflow:"hidden",shadowColor:"#000",shadowOpacity:.5,shadowRadius:14,elevation:30},v38PanelMobile:{left:12,right:"auto" as any,top:115,width:340,maxWidth:"92%" as any},v38PanelMt:{zIndex:10015,elevation:45},v38Header:{height:42,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#082033",borderBottomWidth:1,borderBottomColor:"#285B79",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},v38HeaderLeft:{flexDirection:"row",alignItems:"center",gap:8},v38Title:{color:"#F4FAFF",fontSize:12,fontWeight:"900",letterSpacing:.5},v38Sub:{color:"#80A7BD",fontSize:8,fontWeight:"800",marginTop:1},v38Body:{padding:8},v38MetaRow:{flexDirection:"row",justifyContent:"space-between",marginBottom:6},v38Meta:{color:"#9DB2C0",fontSize:9,fontWeight:"800"},v38Cards:{flexDirection:"row",gap:6},v38Hand:{flex:1,minHeight:54,backgroundColor:"#0E2232",borderWidth:1,borderColor:"#294C63",borderRadius:6,padding:7},v38HandSide:{fontSize:10,fontWeight:"900"},v38CardText:{color:"#F5FAFD",fontSize:14,fontWeight:"900",marginTop:5},v38Point:{color:"#C7D7E1",fontSize:9,fontWeight:"800",marginTop:3},v38FormulaGrid:{flexDirection:"row",gap:5,marginTop:6},v38Formula:{flex:1,backgroundColor:"#0B1B29",borderWidth:1,borderColor:"#24465D",borderRadius:5,paddingVertical:6,alignItems:"center"},v38FormulaName:{color:"#9EB6C6",fontSize:8,fontWeight:"900"},v38FormulaSide:{fontSize:13,fontWeight:"900",marginTop:2},v38Recommend:{marginTop:6,minHeight:50,backgroundColor:"#10283A",borderWidth:1,borderColor:"#326884",borderRadius:6,paddingHorizontal:8,paddingVertical:6,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},v38RecommendLabel:{color:"#E8F4FA",fontSize:10,fontWeight:"900"},v38RecommendHint:{color:"#83A2B5",fontSize:7.5,fontWeight:"700",marginTop:3},v38RecommendSide:{fontSize:21,fontWeight:"900"},
   floatPanel:{position:"absolute",right:74,bottom:22,zIndex:100,backgroundColor:"rgba(6,16,25,.975)",borderWidth:1,borderColor:"#416C88",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:14,elevation:15},floatPanelMt:{zIndex:9999},floatHeader:{height:38,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#081A28",borderBottomWidth:1,borderBottomColor:"#234A63",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},floatHeadLeft:{flexDirection:"row",alignItems:"center",gap:8},floatBrandLine:{flexDirection:"row",alignItems:"center",gap:7},floatTitle:{color:"#F5FAFD",fontWeight:"900",fontSize:12,letterSpacing:.7},floatStatus:{color:"#56D48C",fontSize:8,fontWeight:"900"},iconBtn:{width:27,height:27,borderRadius:5,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},iconTextBtn:{height:27,paddingHorizontal:7,borderRadius:5,backgroundColor:"#214A70",flexDirection:"row",gap:3,alignItems:"center"},iconText:{color:"#fff",fontSize:8,fontWeight:"800"},selectorWrap:{marginHorizontal:6,marginTop:6,position:"relative",zIndex:130},selector:{height:38,paddingHorizontal:9,borderWidth:1,borderColor:"#31516B",borderRadius:5,backgroundColor:"#09151F",flexDirection:"row",alignItems:"center",justifyContent:"space-between"},selectorLeft:{flexDirection:"row",alignItems:"center",gap:4},selectorConfidence:{flexDirection:"row",alignItems:"center",gap:4,marginLeft:4},selectorValue:{color:"#F0F5F8",fontSize:11,fontWeight:"900"},selectorMeta:{color:"#B6C5D0",fontSize:9},roomDropdown:{position:"absolute",left:0,right:0,top:42,maxHeight:205,backgroundColor:"#0A1722",borderWidth:1,borderColor:"#345A76",borderRadius:6,zIndex:160,elevation:30,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:10},roomDropdownScroll:{height:205,maxHeight:205,overflow:"scroll"},roomDropdownContent:{paddingBottom:2},roomDropdownItem:{minHeight:42,paddingHorizontal:10,paddingVertical:5,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#183044"},roomDropdownItemActive:{backgroundColor:"#1B5B88"},roomDropdownLeft:{flex:1,minWidth:0,paddingRight:8},roomDropdownText:{color:"#EDF5FA",fontSize:10,fontWeight:"900"},roomDropdownDealer:{color:"#AFC1CD",fontSize:8,marginTop:2},roomDropdownMeta:{color:"#8EA7B9",fontSize:8,fontWeight:"800"},roomDropdownRight:{alignItems:"flex-end",justifyContent:"center",gap:3},roomConfidence:{flexDirection:"row",alignItems:"center",gap:5},roomConfidenceText:{fontSize:8,fontWeight:"900",textShadowRadius:7},assistPage:{padding:6,minHeight:150},decisionRow:{flexDirection:"row",gap:5},decisionBox:{flex:1,minHeight:68,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,padding:7},smallLabel:{color:"#FFFFFF",fontSize:12,fontWeight:"900"},latestLine:{flexDirection:"row",alignItems:"center",gap:7,marginTop:7},glowDot:{width:17,height:17,borderRadius:8.5,shadowOpacity:1,shadowRadius:10,elevation:8},latestText:{fontSize:16,fontWeight:"900"},detectText:{color:"#FFFFFF",fontSize:14,fontWeight:"900",marginTop:7},recommendText:{fontSize:17,fontWeight:"900",marginTop:7},microText:{color:"#FFFFFF",fontSize:12,fontWeight:"900",marginTop:4},todayPnlBox:{marginTop:5,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,paddingHorizontal:8,paddingVertical:6,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},todayPnlValue:{fontSize:16,fontWeight:"900"},aiBox:{marginTop:5,backgroundColor:"#0B1925",borderRadius:5,padding:7},aiTitle:{color:"#B7D3E6",fontSize:11,fontWeight:"900"},aiText:{color:"#C6D2DB",fontSize:11,lineHeight:17,marginTop:5},aiTextMobile:{fontSize:9.5,lineHeight:13,marginTop:3},moneyGrid:{flexDirection:"row",gap:5},fieldBox:{flex:1,backgroundColor:"#102335",borderRadius:5,padding:7,minHeight:58},moneyInput:{color:"#fff",fontSize:13,fontWeight:"900",padding:0,marginTop:5},nextAmount:{color:"#54D79A",fontSize:15,fontWeight:"900",marginTop:6},strategyScroll:{marginTop:6,maxHeight:30},strategyRow:{gap:4},strategyChip:{height:25,paddingHorizontal:8,borderRadius:4,backgroundColor:"#172B3B",justifyContent:"center"},strategyChipActive:{backgroundColor:"#2B78B5"},strategyChipText:{color:"#AABCC8",fontSize:7.5,fontWeight:"800"},progressBox:{marginTop:6,backgroundColor:"#0B1925",borderRadius:5,padding:7},progressText:{color:"#DDE9F0",fontSize:9,fontWeight:"800",marginTop:4},recommendHeader:{flexDirection:"row",alignItems:"center",justifyContent:"space-between"},martinResetMini:{paddingHorizontal:7,height:20,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetMiniText:{color:"#fff",fontSize:8,fontWeight:"900"},martinResetBtn:{marginTop:7,height:27,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetText:{color:"#fff",fontSize:9,fontWeight:"900"},betButtons:{flexDirection:"row",gap:5},betBtn:{flex:1,height:38,borderRadius:5,alignItems:"center",justifyContent:"center"},betBtnText:{color:"#fff",fontSize:12,fontWeight:"900"},statsGrid:{marginTop:6,backgroundColor:"#102335",borderRadius:5,padding:7,flexDirection:"row",justifyContent:"space-between"},statsValue:{color:"#fff",fontSize:11,fontWeight:"900",marginTop:3},recordBar:{marginTop:5,flexDirection:"row",justifyContent:"space-between",alignItems:"center"},resetText:{color:"#51BDF1",fontSize:8,fontWeight:"900"},historyRow:{gap:4,marginTop:5},historyChip:{backgroundColor:"#142A3B",borderRadius:4,paddingHorizontal:6,paddingVertical:4},pageDots:{height:19,flexDirection:"row",gap:7,alignItems:"center",justifyContent:"center"},pageDot:{width:6,height:6,borderRadius:3,backgroundColor:"#526574"},pageDotActive:{backgroundColor:"#fff"},
   recommendTitleConfidence:{flexDirection:"row",alignItems:"center",gap:5},
   recommendMetaRow:{flexDirection:"row",alignItems:"center",justifyContent:"space-between",gap:3,marginTop:3},recommendStrategyMeta:{marginTop:0,flexShrink:1},confidenceInline:{flexDirection:"row",alignItems:"center",gap:4,flexShrink:0},confidenceText:{fontSize:8,fontWeight:"900",textShadowRadius:7},
