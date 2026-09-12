@@ -1934,10 +1934,12 @@ export default function HomeScreen(){
     setConnected(false);
     appendEvent("已手動中斷");
   };
-  const logoutSession=()=>{
+  const logoutSession=async()=>{
     // Explicit logout owns the connection lifecycle: close MT first, then erase the
     // session-bound MT launch data so it cannot be reused after logout.
-    if(accessSessionId){try{logoutAccess.mutate({sessionId:accessSessionId})}catch{}}
+    // On web we finally reload the current MT Assistant URL so the app always boots
+    // back into its own AccessScreen (TZ account/password login), never the TZ site.
+    if(accessSessionId){try{await logoutAccess.mutateAsync({sessionId:accessSessionId})}catch{}}
     if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}
     reconnectingRef.current=false;
     awaitingFreshSnapshotRef.current=false;
@@ -1963,6 +1965,13 @@ export default function HomeScreen(){
     setAccessSessionId("");
     setAccessNotice("");
     setAccessGranted(false);
+    if(Platform.OS==="web" && typeof window!=="undefined"){
+      // Hard-reset all page-local React state after logout. This guarantees the next
+      // visible screen is MT Assistant's own TZ login screen and prevents Back from
+      // restoring an authenticated in-memory page.
+      try{window.history.replaceState(null,"",window.location.pathname+window.location.search)}catch{}
+      window.location.reload();
+    }
   };
   const syncAssist=()=>{const ws=socketRef.current;if(ws?.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));appendEvent("懸浮輔助已要求同步")}else notify("尚未連線")};
   const openMtPlatform=(table?:TableData)=>{if(table)setAssistTableId(table.apiId??`BAG${table.id}`);if(!(mtUrl.trim()||token.trim())){notify("請先在連線設定填入 MT 平台網址");setConnectionOpen(true);return}setMtOpen(true)};
