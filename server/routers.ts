@@ -3,36 +3,58 @@ import { publicProcedure, router } from "./_core/trpc";
 import { randomUUID } from "node:crypto";
 
 
-// Single-login registry.
-// A successful login replaces the previous session for the same account.
-// NOTE: this is process memory, ideal for the current single Render instance.
+// TZ account authorization + single-login registry.
+// MT Assistant uses TZ account verification for website access.
+// The TZ password/token are used only for the login verification request and are not stored.
 const activeSessions = new Map<string, string>();
+const TZ_BASE = "https://www.tz6868.cc";
 
-function getAccounts() {
-  const accounts: Array<{ username: string; password: string }> = [];
-  for (let i = 1; i <= 100; i++) {
-    const username = process.env[`APP_USERNAME_${i}`];
-    const password = process.env[`APP_PASSWORD_${i}`];
-    if (username && password) accounts.push({ username: username.trim().toLowerCase(), password });
+async function verifyTzAccount(username: string, password: string, deviceId?: string) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch(`${TZ_BASE}/api/v1/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": "Mozilla/5.0 MT-Assistant/1.0",
+        "Origin": TZ_BASE,
+        "Referer": `${TZ_BASE}/`,
+      },
+      body: JSON.stringify({
+        username,
+        password,
+        device_id: deviceId || randomUUID(),
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) return false;
+    const data: any = await response.json().catch(() => null);
+    return Boolean(data?.data?.token);
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
   }
-  // Backward-compatible single account if present.
-  if (process.env.APP_USERNAME && process.env.APP_PASSWORD) {
-    accounts.push({ username: process.env.APP_USERNAME.trim().toLowerCase(), password: process.env.APP_PASSWORD });
-  }
-  return accounts;
 }
 
 export const appRouter = router({
   trackerAccess: router({
     login: publicProcedure
-      .input(z.object({ username: z.string().min(1).max(128), password: z.string().min(1).max(256) }))
-      .mutation(({ input }) => {
-        const username = input.username.trim().toLowerCase();
-        const success = getAccounts().some(a => a.username === username && a.password === input.password);
+      .input(z.object({
+        username: z.string().min(1).max(128),
+        password: z.string().min(1).max(256),
+        deviceId: z.string().min(1).max(128).optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const username = input.username.trim();
+        const success = await verifyTzAccount(username, input.password, input.deviceId);
         if (!success) return { success: false, sessionId: "" } as const;
 
         const sessionId = randomUUID();
-        activeSessions.set(username, sessionId);
+        activeSessions.set(username.toLowerCase(), sessionId);
         return { success: true, sessionId } as const;
       }),
     checkSession: publicProcedure
