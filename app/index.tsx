@@ -530,6 +530,55 @@ const FloatingOrb = memo(function FloatingOrb({
   );
 });
 
+async function loginToTzFromBrowser(username:string,password:string,deviceId:string){
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),15000);
+  try{
+    const response=await fetch("https://www.tz6868.cc/api/v1/login",{
+      method:"POST",
+      mode:"cors",
+      headers:{
+        "Content-Type":"application/json",
+        "Accept":"application/json, text/plain, */*",
+      },
+      body:JSON.stringify({username,password,device_id:deviceId}),
+      signal:controller.signal,
+    });
+    const text=await response.text();
+    let data:any=null;
+    try{data=text?JSON.parse(text):null}catch{}
+    const token=data?.data?.token??data?.token??data?.data?.access_token??data?.access_token;
+    if(!response.ok||!token){
+      const msg=String(data?.message??data?.msg??data?.error??"").trim();
+      if(response.status===401||response.status===422||/帳號|密碼|password|account|login/i.test(msg)){
+        throw new Error(msg||"TZ 帳號或密碼不正確");
+      }
+      throw new Error(msg||`TZ 驗證失敗 (${response.status||"NETWORK"})`);
+    }
+    return String(token);
+  }catch(error:any){
+    if(error?.name==="AbortError")throw new Error("TZ 驗證逾時，請稍後再試");
+    if(error instanceof TypeError)throw new Error("瀏覽器無法連到 TZ 驗證服務，請確認網路後再試");
+    throw error;
+  }finally{
+    clearTimeout(timeout);
+  }
+}
+
+function getTzLoginDeviceId(){
+  if(typeof window === "undefined") return "web";
+  const key="mt_tz_device_id";
+  let id=window.localStorage.getItem(key);
+  if(!id){
+    id="xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{
+      const r=Math.floor(Math.random()*16);
+      return (c==="x"?r:(r&0x3|0x8)).toString(16);
+    });
+    window.localStorage.setItem(key,id);
+  }
+  return id;
+}
+
 function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:string)=>void;notice?:string}){
   const {width}=useWindowDimensions();
   const desktop=width>=1000;
@@ -561,43 +610,17 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
     const t2=setTimeout(start,600);
     return()=>{clearTimeout(t1);clearTimeout(t2)};
   },[]);
-  const login=trpc.trackerAccess.login.useMutation({onSuccess:r=>r.success?(setError(""),onAuthenticated(r.sessionId)):setError("帳號或密碼不正確"),onError:()=>setError("登入驗證暫時無法完成")});
-  const nativeTzLogin=async()=>{
-    const g:any=globalThis as any;
-    const CH=g?.Capacitor?.Plugins?.CapacitorHttp;
-    if(!CH?.request) return false;
-    let deviceId="";
-    try{
-      deviceId=localStorage.getItem("mt_tz_device_id")||"";
-      if(!deviceId){
-        deviceId="xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,(c:string)=>{const r=Math.floor(Math.random()*16);return(c==="x"?r:(r&3|8)).toString(16)});
-        localStorage.setItem("mt_tz_device_id",deviceId);
-      }
-      const base="https://www.tz6868.cc";
-      const ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
-      const res=await CH.request({
-        url:base+"/api/v1/login",method:"POST",
-        headers:{"Content-Type":"application/json","User-Agent":ua,"Origin":base,"Referer":base+"/"},
-        data:{username:username.trim(),password,device_id:deviceId},dataType:"json",connectTimeout:15000,readTimeout:15000
-      });
-      const token=res?.data?.data?.token;
-      if(Number(res?.status)>=400||!token){
-        const msg=res?.data?.message||res?.data?.msg||`TZ 驗證失敗 (${res?.status??"未知"})`;
-        setError(String(msg));
-        return true;
-      }
-      // TZ 帳密只交給 Android 原生 HTTP；不送到 MT Assistant/Render 後端。
-      setPassword("");setError("");
-      onAuthenticated(`native-tz:${username.trim().toLowerCase()}:${Date.now()}`);
-      return true;
-    }catch(e:any){setError(e?.message?`TZ 原生驗證失敗：${e.message}`:"TZ 原生驗證失敗");return true}
-  };
+  const login=trpc.trackerAccess.login.useMutation({onSuccess:r=>r.success?(setError(""),onAuthenticated(r.sessionId)):setError("TZ 登入驗證失敗"),onError:()=>setError("登入工作階段建立失敗，請重試")});
   const submit=async()=>{
     if(!username.trim()||!password){setError("請輸入 TZ 帳號與密碼");return}
     setError("");
-    if(await nativeTzLogin())return;
-    // 瀏覽器版仍保留原本 MT Assistant 帳密登入；Android App 才走 TZ 原生驗證。
-    login.mutate({username,password});
+    try{
+      const deviceId=getTzLoginDeviceId();
+      const tzToken=await loginToTzFromBrowser(username.trim(),password,deviceId);
+      login.mutate({username:username.trim(),tzToken,deviceId});
+    }catch(error:any){
+      setError(error?.message||"TZ 登入驗證失敗");
+    }
   };
   return <ScreenContainer edges={["top","left","right","bottom"]} containerClassName="bg-[#020A12]" className="bg-[#020A12]">
     <View style={s.loginScreen}>{Platform.OS==="web"?createElement("video" as any,{ref:(node:any)=>{webVideoRef.current=node},src:"/poker.mp4",autoPlay:true,muted:true,defaultMuted:true,playsInline:true,preload:"auto",controls:false,disablePictureInPicture:true,style:{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",pointerEvents:"none"},onLoadedData:(e:any)=>{const v=e.currentTarget;v.muted=true;v.defaultMuted=true;void v.play?.().catch?.(()=>undefined)},onCanPlay:(e:any)=>{const v=e.currentTarget;v.muted=true;void v.play?.().catch?.(()=>undefined)},onEnded:(e:any)=>{const v=e.currentTarget;playCount.current+=1;if(playCount.current<2){v.currentTime=0;void v.play?.().catch?.(()=>undefined)}else{v.pause();try{v.currentTime=Math.max(0,(v.duration||0)-0.05)}catch{}}}}):<VideoView player={player} style={s.loginVideo} contentFit="cover" nativeControls={false}/>}<View style={s.loginShade}/><View style={s.loginPanel}>
@@ -615,9 +638,9 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
           <Pressable style={({pressed}:any)=>[s.threadsFollow,pressed&&s.threadsFollowPressed]} onPress={openThreads}><MaterialIcons name="add" size={16} color="#EAF8FF"/><Text style={s.threadsFollowText}>FOLLOW</Text></Pressable>
         </View>
       </View>
-      <View style={s.loginDivider}/><Text style={s.loginHint}>請輸入已授權的管理帳號與密碼。</Text>{notice?<Text style={s.kickNotice}>⚠ {notice}</Text>:null}
-      <Text style={s.loginLabel}>帳號</Text><TextInput value={username} onChangeText={setUsername} placeholder="輸入帳號" placeholderTextColor="#63798B" autoCapitalize="none" autoCorrect={false} style={s.loginInput}/>
-      <Text style={s.loginLabel}>密碼</Text><View style={s.passwordWrap}><TextInput value={password} onChangeText={setPassword} placeholder="輸入密碼" placeholderTextColor="#63798B" secureTextEntry={!showPassword} autoCapitalize="none" autoCorrect={false} style={s.passwordInput} onSubmitEditing={submit}/><Pressable style={s.eyeBtn} onPress={()=>setShowPassword(v=>!v)}><MaterialIcons name={showPassword?"visibility-off":"visibility"} size={19} color="#6F8CA1"/></Pressable></View>
+      <View style={s.loginDivider}/><Text style={s.loginHint}>請輸入 TZ 帳號與密碼，驗證成功即可進入。</Text>{notice?<Text style={s.kickNotice}>⚠ {notice}</Text>:null}
+      <Text style={s.loginLabel}>TZ 帳號</Text><TextInput value={username} onChangeText={setUsername} placeholder="輸入 TZ 帳號" placeholderTextColor="#63798B" autoCapitalize="none" autoCorrect={false} style={s.loginInput}/>
+      <Text style={s.loginLabel}>TZ 密碼</Text><View style={s.passwordWrap}><TextInput value={password} onChangeText={setPassword} placeholder="輸入密碼" placeholderTextColor="#63798B" secureTextEntry={!showPassword} autoCapitalize="none" autoCorrect={false} style={s.passwordInput} onSubmitEditing={submit}/><Pressable style={s.eyeBtn} onPress={()=>setShowPassword(v=>!v)}><MaterialIcons name={showPassword?"visibility-off":"visibility"} size={19} color="#6F8CA1"/></Pressable></View>
       <Pressable style={s.loginBtn} onPress={submit}><MaterialIcons name="verified-user" size={18} color="#fff"/><Text style={s.loginBtnText}>{login.isPending?"驗證中":"安全登入"}</Text></Pressable>{error?<Text style={s.error}>{error}</Text>:null}
       <View style={s.loginFooterRow}>
         <View style={s.loginFooterLeft}><MaterialIcons name="lock" size={11} color="#8EA4B4"/><Text style={s.loginFoot}>密碼只會用於本次登入驗證</Text></View>
@@ -851,13 +874,12 @@ export default function HomeScreen(){
   const [accessGranted,setAccessGranted]=useState(false);
   const [accessSessionId,setAccessSessionId]=useState("");
   const [accessNotice,setAccessNotice]=useState("");
-  const nativeTzAccess=accessSessionId.startsWith("native-tz:");
   const accessSessionCheck=trpc.trackerAccess.checkSession.useQuery(
     {sessionId:accessSessionId},
-    {enabled:accessGranted&&!!accessSessionId&&!nativeTzAccess,refetchInterval:3000,retry:false}
+    {enabled:accessGranted&&!!accessSessionId,refetchInterval:3000,retry:false}
   );
   useEffect(()=>{
-    if(!accessGranted||!accessSessionId||nativeTzAccess)return;
+    if(!accessGranted||!accessSessionId)return;
     if(accessSessionCheck.data && !accessSessionCheck.data.valid){
       setAccessGranted(false);
       setAccessSessionId("");
@@ -867,7 +889,7 @@ export default function HomeScreen(){
       setFloatingOpen(false);
       setInsideMt(false);
     }
-  },[accessGranted,accessSessionId,nativeTzAccess,accessSessionCheck.data?.valid]);
+  },[accessGranted,accessSessionId,accessSessionCheck.data?.valid]);
 
   const [connectionOpen,setConnectionOpen]=useState(false);
   const [helpOpen,setHelpOpen]=useState(false);
