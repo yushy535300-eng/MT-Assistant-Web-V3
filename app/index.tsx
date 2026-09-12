@@ -914,15 +914,24 @@ export default function HomeScreen(){
     {sessionId:accessSessionId},
     {enabled:accessGranted&&!!accessSessionId,refetchInterval:3000,retry:false}
   );
+  const logoutAccess=trpc.trackerAccess.logout.useMutation();
   useEffect(()=>{
     if(!accessGranted||!accessSessionId)return;
     if(accessSessionCheck.data && !accessSessionCheck.data.valid){
       setAccessGranted(false);
       setAccessSessionId("");
       setAccessNotice("此帳號已於其他裝置登入，本裝置已自動登出。");
-      try{socket?.close()}catch{}
+      try{socketRef.current?.close()}catch{}
+      socketRef.current=null;
+      setSocket(null);
       setConnected(false);
+      setToken("");
+      setMtUrl("");
+      lockedMtUrlRef.current="";
+      pendingAutoMtUrlRef.current="";
+      autoMtConnectDoneRef.current=false;
       setFloatingOpen(false);
+      setMtOpen(false);
       setInsideMt(false);
     }
   },[accessGranted,accessSessionId,accessSessionCheck.data?.valid]);
@@ -945,6 +954,8 @@ export default function HomeScreen(){
   const [mtUrl,setMtUrl]=useState("");
   const pendingAutoMtUrlRef=useRef("");
   const autoMtConnectDoneRef=useRef(false);
+  // Authoritative MT launch URL for this TZ login session. UI fields are display-only.
+  const lockedMtUrlRef=useRef("");
   const [wsUrl]=useState("wss://a1.ofalive99.net/game/ws");
   const [socket,setSocket]=useState<WebSocket|null>(null);
   // Single authoritative game socket. State is only for UI; lifecycle uses this ref.
@@ -1591,7 +1602,10 @@ export default function HomeScreen(){
   };
 
   const startConnection=(autoReason?:string,tokenSourceOverride?:string)=>{
-    const authToken=extractMtUrlToken(tokenSourceOverride||token||mtUrl);
+    // Once TZ is authenticated, the game socket may ONLY use the MT URL obtained
+    // from that TZ session. Manual/state-edited tokens are never accepted.
+    const tokenSource=accessGranted?lockedMtUrlRef.current:(tokenSourceOverride||token||mtUrl);
+    const authToken=extractMtUrlToken(tokenSource);
     if(!authToken){notify("請貼登入後含 token 的 MT 網址");reconnectingRef.current=false;return}
     if(autoReason){
       // Snapshot/封包可能短暫亂序：只記錄差異，絕不因此斷線重連。
@@ -1902,6 +1916,7 @@ export default function HomeScreen(){
     if(!autoUrl)return;
     autoMtConnectDoneRef.current=true;
     pendingAutoMtUrlRef.current="";
+    lockedMtUrlRef.current=autoUrl;
     setToken(autoUrl);
     setMtUrl(autoUrl);
     appendEvent("TZ 已自動取得 MT Token，正在連線");
@@ -1918,6 +1933,36 @@ export default function HomeScreen(){
     setSocket(null);
     setConnected(false);
     appendEvent("已手動中斷");
+  };
+  const logoutSession=()=>{
+    // Explicit logout owns the connection lifecycle: close MT first, then erase the
+    // session-bound MT launch data so it cannot be reused after logout.
+    if(accessSessionId){try{logoutAccess.mutate({sessionId:accessSessionId})}catch{}}
+    if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}
+    reconnectingRef.current=false;
+    awaitingFreshSnapshotRef.current=false;
+    socketGenerationRef.current+=1;
+    const ws=socketRef.current;
+    socketRef.current=null;
+    try{ws?.close()}catch{}
+    setSocket(null);
+    setConnected(false);
+    setConnectionOpen(false);
+    setHelpOpen(false);
+    setRadarOpen(false);
+    setRadarDetailId(null);
+    setAnalysisTable(null);
+    setFloatingOpen(false);
+    setMtOpen(false);
+    setInsideMt(false);
+    setToken("");
+    setMtUrl("");
+    lockedMtUrlRef.current="";
+    pendingAutoMtUrlRef.current="";
+    autoMtConnectDoneRef.current=false;
+    setAccessSessionId("");
+    setAccessNotice("");
+    setAccessGranted(false);
   };
   const syncAssist=()=>{const ws=socketRef.current;if(ws?.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));appendEvent("懸浮輔助已要求同步")}else notify("尚未連線")};
   const openMtPlatform=(table?:TableData)=>{if(table)setAssistTableId(table.apiId??`BAG${table.id}`);if(!(mtUrl.trim()||token.trim())){notify("請先在連線設定填入 MT 平台網址");setConnectionOpen(true);return}setMtOpen(true)};
@@ -2121,18 +2166,19 @@ export default function HomeScreen(){
     setAccessNotice("");
     autoMtConnectDoneRef.current=false;
     pendingAutoMtUrlRef.current=mtGameUrl||"";
+    lockedMtUrlRef.current=mtGameUrl||"";
     if(mtGameUrl){setToken(mtGameUrl);setMtUrl(mtGameUrl)}
     setAccessGranted(true);
   }}/>;
 
   return <ScreenContainer edges={["top","left","right","bottom"]} containerClassName="bg-[#080E17]" className="bg-[#080E17]">
     <View style={[s.screen,desktop&&Platform.OS==="web"?s.screenDesktopZoom:null]}>
-      <View style={[s.topbar,!desktop?s.topbarMobile:null]}><View style={s.brandRow}><View style={s.brandIcon}><MatrixMark size={29}/></View><View><Text style={s.kicker}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>MT MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>MT MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setConnectionOpen(true)}><MaterialIcons name="settings" size={16} color="#fff"/><Text style={s.headerBtnText}>連線</Text></Pressable></View></View>
+      <View style={[s.topbar,!desktop?s.topbarMobile:null]}><View style={s.brandRow}><View style={s.brandIcon}><MatrixMark size={29}/></View><View><Text style={s.kicker}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>MT MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>MT MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={logoutSession}><MaterialIcons name="logout" size={16} color="#fff"/><Text style={s.headerBtnText}>登出</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setConnectionOpen(true)}><MaterialIcons name="settings" size={16} color="#fff"/><Text style={s.headerBtnText}>連線</Text></Pressable></View></View>
       <ScrollView contentContainerStyle={s.content}><View style={[s.overview,!desktop&&s.overviewMobile]}><View style={!desktop?s.overviewTextMobile:undefined}><Text style={s.overKicker}>REAL-TIME MONITORING</Text><Text style={s.overTitle}>LIVE TABLE MATRIX</Text><Text style={s.overSub}>即時桌況 · 牌路分析 · 荷官同步</Text></View><View style={[s.overStats,!desktop&&s.overStatsMobile]}><View style={[s.overStat,!desktop&&s.overStatMobile]}><Text style={s.smallLabel}>連線狀態</Text><Text style={[s.overValue,{color:connected?"#4BD693":"#FF6973"}]}>{connected?"已連線":"未連線"}</Text></View><View style={[s.overStat,!desktop&&s.overStatMobile]}><Text style={s.smallLabel}>可用桌型</Text><Text style={s.overValue}>15 桌</Text></View></View></View><View style={s.listHead}><Text style={s.listTitle}>所有房型</Text><Text style={s.listHint}>歷史牌局 · 即時更新 · 荷官同步</Text></View><View style={[s.cardsGrid,desktop&&s.cardsGridDesktop,desktop&&s.cardsGridDesktopCentered]}>{tables.map(t=><View key={t.apiId} style={desktop?s.cardWrapDesktop:s.cardWrap}><MemoTableCard table={t} desktop={desktop} onAction={stableTableAction} connected={connected}/></View>)}</View></ScrollView>
 
       {toast?<View style={s.toast}><Text style={s.toastText}>{toast}</Text></View>:null}
 
-      <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>主頁與 MT 連線設定</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>主頁牌路 WebSocket 與 MT 平台使用獨立工作階段。關閉此視窗不會中斷已建立的連線。</Text><Text style={s.fieldLabel}>主頁牌路 WebSocket（固定）</Text><TextInput value={wsUrl} editable={false} secureTextEntry style={s.modalInput}/><Text style={s.fieldLabel}>主頁牌路來源 / Token</Text><TextInput value={token} onChangeText={setToken} secureTextEntry placeholder="貼入含 token 的登入網址" placeholderTextColor="#63798B" style={s.modalInput}/><Text style={s.fieldLabel}>MT 平台獨立網址</Text><TextInput value={mtUrl} onChangeText={setMtUrl} placeholder="https://.../?token=..." placeholderTextColor="#63798B" style={s.modalInput}/><View style={s.mappingRow}><Text style={s.mapChip}>winner 1：閒</Text><Text style={s.mapChip}>winner 2：莊</Text><Text style={s.mapChip}>winner 3：和</Text></View><View style={s.modalActions}><Pressable style={[s.actionBtn,{backgroundColor:"#1F6F9D"}]} onPress={syncAssist}><Text style={s.btnText}>驗證主頁牌路</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#238F58"}]} onPress={()=>startConnection()}><Text style={s.btnText}>開始連線</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#A63E48"}]} onPress={stopConnection}><Text style={s.btnText}>中斷</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View><Text style={s.syncText}>同步階段：主頁已同步 {tables.filter(t=>t.live).length} 桌</Text><Text style={s.fieldLabel}>即時事件</Text><ScrollView style={s.logBox}>{events.map((x,i)=><Text key={i} style={s.logText}>{x}</Text>)}</ScrollView></View></View></Modal>
+      <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>主頁與 MT 連線設定</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>主頁牌路 WebSocket 與 MT 平台使用獨立工作階段。關閉此視窗不會中斷已建立的連線。</Text><Text style={s.fieldLabel}>主頁牌路 WebSocket（固定）</Text><TextInput value={wsUrl} editable={false} secureTextEntry selectTextOnFocus={false} style={s.modalInput}/><Text style={s.fieldLabel}>主頁牌路來源 / Token</Text><TextInput value={token} editable={false} secureTextEntry selectTextOnFocus={false} placeholder="已由 TZ 自動授權" placeholderTextColor="#63798B" style={s.modalInput}/><Text style={s.fieldLabel}>MT 平台獨立網址</Text><TextInput value={mtUrl} editable={false} secureTextEntry selectTextOnFocus={false} placeholder="已由 TZ 自動授權" placeholderTextColor="#63798B" style={s.modalInput}/><View style={s.mappingRow}><Text style={s.mapChip}>winner 1：閒</Text><Text style={s.mapChip}>winner 2：莊</Text><Text style={s.mapChip}>winner 3：和</Text></View><View style={s.modalActions}><Pressable disabled style={[s.actionBtn,{backgroundColor:"#1F6F9D",opacity:.48}]}><Text style={s.btnText}>驗證主頁牌路</Text></Pressable><Pressable disabled style={[s.actionBtn,{backgroundColor:"#238F58",opacity:.48}]}><Text style={s.btnText}>開始連線</Text></Pressable><Pressable disabled style={[s.actionBtn,{backgroundColor:"#A63E48",opacity:.48}]}><Text style={s.btnText}>中斷</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View><Text style={s.syncText}>同步階段：主頁已同步 {tables.filter(t=>t.live).length} 桌</Text><Text style={s.fieldLabel}>即時事件</Text><ScrollView style={s.logBox}>{events.map((x,i)=><Text key={i} style={s.logText}>{x}</Text>)}</ScrollView></View></View></Modal>
       <Modal visible={helpOpen} transparent animationType="fade" onRequestClose={()=>setHelpOpen(false)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>說明</Text><Pressable onPress={()=>setHelpOpen(false)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>主頁顯示 15 桌即時牌路。MT 懸浮輔助可左右滑動 3 頁：即時輔助、資金策略、輸贏統計。</Text></View></View></Modal>
       <Modal visible={!!radarDetailTable} transparent animationType="fade" onRequestClose={()=>setRadarDetailId(null)}><View style={s.modalShade}><View style={s.radarDetailModal}><View style={s.modalHead}><View><Text style={s.radarKicker}>MT MATRIX · LIVE ROAD SNAPSHOT</Text><Text style={s.radarDetailTitle}>{radarDetailId} · 第 {radarDetailTable?.round??0} 局</Text></View><Pressable onPress={()=>setRadarDetailId(null)} style={s.radarClose}><MaterialIcons name="close" size={20} color="#DCEEFF"/></Pressable></View>{radarDetailTable?<><View style={s.radarDetailStats}><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前推薦</Text><Text style={[s.radarDetailValue,{color:resultColor(radarDetailDecision.side)}]}>{radarDetailDecision.side}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>信心度</Text><View style={s.radarDetailConfidence}><View style={[s.signalDot,{backgroundColor:confidenceState(radarDetailConfidence).color,shadowColor:confidenceState(radarDetailConfidence).color}]}/><Text style={[s.radarDetailValue,{color:confidenceState(radarDetailConfidence).color,marginTop:0}]}>{confidenceState(radarDetailConfidence).label}</Text></View></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前牌型</Text><Text numberOfLines={1} style={s.radarDetailValue}>{detectPattern(radarDetailTable.results)}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>莊／閒／和</Text><Text style={s.radarDetailValue}>{radarDetailTable.banker}／{radarDetailTable.player}／{radarDetailTable.tie}</Text></View></View><View style={[s.radarRoadWrap,{height:desktop?190:150}]}><RoadGrid table={radarDetailTable} desktop={desktop} transparent/></View><Text style={s.radarDetailNote}>{analysisText(radarDetailTable)}</Text></>:null}</View></View></Modal>
 

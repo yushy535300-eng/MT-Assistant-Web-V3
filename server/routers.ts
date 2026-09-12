@@ -31,6 +31,17 @@ export const appRouter = router({
       .query(({ input }) => ({
         valid: Array.from(activeSessions.values()).includes(input.sessionId),
       } as const)),
+    logout: publicProcedure
+      .input(z.object({ sessionId: z.string().min(1).max(128) }))
+      .mutation(({ input }) => {
+        for (const [username, sessionId] of activeSessions.entries()) {
+          if (sessionId === input.sessionId) {
+            activeSessions.delete(username);
+            break;
+          }
+        }
+        return { success: true } as const;
+      }),
   }),
 });
 
