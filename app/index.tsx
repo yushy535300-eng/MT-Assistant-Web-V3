@@ -1934,10 +1934,13 @@ export default function HomeScreen(){
     setConnected(false);
     appendEvent("已手動中斷");
   };
-  const logoutSession=async()=>{
-    // Logout must return to MT Assistant's own AccessScreen through React state.
-    // Do NOT reload/navigate the browser: production SPA reloads can leave a black screen.
+  const logoutSession=()=>{
+    // Logout is intentionally synchronous on the client: switch to AccessScreen first.
+    // Server session revocation is fire-and-forget so it can never block the screen change.
     const sessionToLogout=accessSessionId;
+    setAccessGranted(false);
+    setAccessSessionId("");
+    setAccessNotice("");
     if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}
     reconnectingRef.current=false;
     awaitingFreshSnapshotRef.current=false;
@@ -1960,12 +1963,8 @@ export default function HomeScreen(){
     lockedMtUrlRef.current="";
     pendingAutoMtUrlRef.current="";
     autoMtConnectDoneRef.current=false;
-    setAccessSessionId("");
-    setAccessNotice("");
-    // This is the actual screen switch: the render below immediately returns AccessScreen.
-    setAccessGranted(false);
-    // Revoke the server-side app session after the local UI has already been logged out.
-    if(sessionToLogout){try{await logoutAccess.mutateAsync({sessionId:sessionToLogout})}catch{}}
+    // Revoke the server-side app session without awaiting it. The login screen is already active.
+    if(sessionToLogout){void logoutAccess.mutateAsync({sessionId:sessionToLogout}).catch(()=>{});}
   };
   const syncAssist=()=>{const ws=socketRef.current;if(ws?.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));appendEvent("懸浮輔助已要求同步")}else notify("尚未連線")};
   const openMtPlatform=(table?:TableData)=>{if(table)setAssistTableId(table.apiId??`BAG${table.id}`);if(!(mtUrl.trim()||token.trim())){notify("請先在連線設定填入 MT 平台網址");setConnectionOpen(true);return}setMtOpen(true)};
