@@ -565,6 +565,37 @@ async function loginToTzFromBrowser(username:string,password:string,deviceId:str
   }
 }
 
+async function getMtLoginUrlFromTz(tzToken:string){
+  if(Platform.OS!=="web") throw new Error("自動取得 MT Token 目前僅支援網站版");
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),15000);
+  const request=async(withAuth:boolean)=>{
+    const headers:any={"Content-Type":"application/json","Accept":"application/json, text/plain, */*"};
+    if(withAuth&&tzToken)headers.Authorization=`Bearer ${tzToken}`;
+    return fetch("https://www.tz6868.cc/api/v2/game/MTLI/login",{
+      method:"POST",mode:"cors",headers,
+      body:JSON.stringify({game_return_url:"https://www.tz6868.cc",game_kind:"",game_type:"",game_device:"Desktop"}),
+      signal:controller.signal
+    });
+  };
+  try{
+    // 依 TZ 實際網頁流程：MTLI/login 本身未帶 Authorization；若站方規則變更再以 TZ token 重試。
+    let response=await request(false);
+    if((response.status===401||response.status===403)&&tzToken)response=await request(true);
+    let data:any=null;
+    try{data=await response.json()}catch{}
+    if(!response.ok)throw new Error(`TZ 取得 MT 授權失敗 (${response.status})`);
+    if(Number(data?.code)!==200)throw new Error(data?.message||"TZ 取得 MT 授權失敗");
+    const gameUrl=String(data?.data?.game_url??data?.raw?.url??"").trim();
+    const mtToken=extractMtUrlToken(gameUrl);
+    if(!gameUrl||!mtToken)throw new Error("TZ 已回傳 MT 資料，但找不到 MT Token");
+    return gameUrl;
+  }catch(error:any){
+    if(error?.name==="AbortError")throw new Error("取得 MT Token 逾時，仍可進入後手動連線");
+    throw error;
+  }finally{clearTimeout(timeout)}
+}
+
 function getTzLoginDeviceId(){
   if(typeof window === "undefined") return "web";
   const key="mt_tz_device_id";
@@ -579,7 +610,7 @@ function getTzLoginDeviceId(){
   return id;
 }
 
-function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:string)=>void;notice?:string}){
+function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:string,mtGameUrl?:string)=>void;notice?:string}){
   const {width}=useWindowDimensions();
   const desktop=width>=1000;
   const [username,setUsername]=useState("");
@@ -587,6 +618,7 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
   const [showPassword,setShowPassword]=useState(false);
   const [error,setError]=useState("");
   const playCount=useRef(0);
+  const pendingMtGameUrlRef=useRef("");
   const webVideoRef=useRef<any>(null);
   const player=useVideoPlayer({ uri: "/poker.mp4" },p=>{if(Platform.OS!=="web"){p.loop=false;p.muted=true;p.play()}});
   useEffect(()=>{if(Platform.OS==="web")return;const sub=player.addListener("playToEnd",()=>{playCount.current+=1;if(playCount.current<2){player.currentTime=0;player.play()}else player.pause()});return()=>sub.remove()},[player]);
@@ -610,13 +642,17 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
     const t2=setTimeout(start,600);
     return()=>{clearTimeout(t1);clearTimeout(t2)};
   },[]);
-  const login=trpc.trackerAccess.login.useMutation({onSuccess:r=>r.success?(setError(""),onAuthenticated(r.sessionId)):setError("TZ 登入驗證失敗"),onError:()=>setError("登入工作階段建立失敗，請重試")});
+  const login=trpc.trackerAccess.login.useMutation({onSuccess:r=>r.success?(setError(""),onAuthenticated(r.sessionId,pendingMtGameUrlRef.current)):setError("TZ 登入驗證失敗"),onError:()=>setError("登入工作階段建立失敗，請重試")});
   const submit=async()=>{
     if(!username.trim()||!password){setError("請輸入 TZ 帳號與密碼");return}
     setError("");
     try{
       const deviceId=getTzLoginDeviceId();
       const tzToken=await loginToTzFromBrowser(username.trim(),password,deviceId);
+      // TZ 驗證成功後，在背景直接取得新 MT 真人入口；畫面不跳轉。
+      // MT 取得失敗不阻擋登入，右上角原本的手動連線仍可當備用。
+      pendingMtGameUrlRef.current="";
+      try{pendingMtGameUrlRef.current=await getMtLoginUrlFromTz(tzToken)}catch{}
       login.mutate({username:username.trim(),tzToken,deviceId});
     }catch(error:any){
       setError(error?.message||"TZ 登入驗證失敗");
@@ -907,6 +943,8 @@ export default function HomeScreen(){
   const [connected,setConnected]=useState(false);
   const [token,setToken]=useState("");
   const [mtUrl,setMtUrl]=useState("");
+  const pendingAutoMtUrlRef=useRef("");
+  const autoMtConnectDoneRef=useRef(false);
   const [wsUrl]=useState("wss://a1.ofalive99.net/game/ws");
   const [socket,setSocket]=useState<WebSocket|null>(null);
   // Single authoritative game socket. State is only for UI; lifecycle uses this ref.
@@ -1552,8 +1590,8 @@ export default function HomeScreen(){
     }
   };
 
-  const startConnection=(autoReason?:string)=>{
-    const authToken=extractMtUrlToken(token||mtUrl);
+  const startConnection=(autoReason?:string,tokenSourceOverride?:string)=>{
+    const authToken=extractMtUrlToken(tokenSourceOverride||token||mtUrl);
     if(!authToken){notify("請貼登入後含 token 的 MT 網址");reconnectingRef.current=false;return}
     if(autoReason){
       // Snapshot/封包可能短暫亂序：只記錄差異，絕不因此斷線重連。
@@ -1858,6 +1896,17 @@ export default function HomeScreen(){
       appendEvent("WebSocket 已中斷");
     };
   };
+  useEffect(()=>{
+    if(!accessGranted||autoMtConnectDoneRef.current)return;
+    const autoUrl=pendingAutoMtUrlRef.current;
+    if(!autoUrl)return;
+    autoMtConnectDoneRef.current=true;
+    pendingAutoMtUrlRef.current="";
+    setToken(autoUrl);
+    setMtUrl(autoUrl);
+    appendEvent("TZ 已自動取得 MT Token，正在連線");
+    startConnection(undefined,autoUrl);
+  },[accessGranted]);
   const stopConnection=()=>{
     if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}
     reconnectingRef.current=false;
@@ -2067,9 +2116,12 @@ export default function HomeScreen(){
     </Animated.View>;
   };
 
-  if(!accessGranted)return <AccessScreen notice={accessNotice} onAuthenticated={(sessionId)=>{
+  if(!accessGranted)return <AccessScreen notice={accessNotice} onAuthenticated={(sessionId,mtGameUrl)=>{
     setAccessSessionId(sessionId);
     setAccessNotice("");
+    autoMtConnectDoneRef.current=false;
+    pendingAutoMtUrlRef.current=mtGameUrl||"";
+    if(mtGameUrl){setToken(mtGameUrl);setMtUrl(mtGameUrl)}
     setAccessGranted(true);
   }}/>;
 
