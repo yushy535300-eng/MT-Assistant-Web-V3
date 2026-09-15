@@ -45,7 +45,7 @@ export async function ensureWhitelistTables() {
     meta_value VARCHAR(255) NULL,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
-  const [seedRows] = await db.query<any[]>(`SELECT meta_value FROM mt_app_meta WHERE meta_key='tz_whitelist_initial_seed_v1' LIMIT 1`);
+  const [seedRows] = await db.query<any[]>(`SELECT meta_value FROM mt_app_meta WHERE meta_key='tz_whitelist_initial_seed_v2' LIMIT 1`);
   if (!seedRows.length) {
     const conn = await db.getConnection();
     try {
@@ -53,9 +53,9 @@ export async function ensureWhitelistTables() {
       for (const username of INITIAL_WHITELIST) {
         await conn.query(`INSERT IGNORE INTO tz_whitelist (username, enabled, expires_at, max_devices, note) VALUES (?,1,NULL,1,?)`, [username, "初始白名單"]);
       }
-      await conn.query(`INSERT INTO mt_app_meta (meta_key, meta_value) VALUES ('tz_whitelist_initial_seed_v1', ?) ON DUPLICATE KEY UPDATE meta_value=VALUES(meta_value)`, [String(INITIAL_WHITELIST.length)]);
+      await conn.query(`INSERT INTO mt_app_meta (meta_key, meta_value) VALUES ('tz_whitelist_initial_seed_v2', ?) ON DUPLICATE KEY UPDATE meta_value=VALUES(meta_value)`, [String(INITIAL_WHITELIST.length)]);
       await conn.commit();
-      console.log(`[MT Whitelist] initial seed completed: ${INITIAL_WHITELIST.length} accounts`);
+      console.log(`[MT Whitelist] initial seed v2 completed: ${INITIAL_WHITELIST.length} accounts`);
     } catch (e) {
       await conn.rollback();
       throw e;

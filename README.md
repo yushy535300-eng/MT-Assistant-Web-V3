@@ -65,3 +65,9 @@ http://localhost:3000
 部署後開啟 `https://你的網域/admin` 即可新增 7/30/90 天或永久授權、設定裝置上限、停用、+30 天、解除裝置與刪除。
 
 建議先保持 `TZ_WHITELIST_ENABLED=false` 完成部署並登入 `/admin` 新增自己的 TZ 帳號，確認資料庫正常後，再把 `TZ_WHITELIST_ENABLED` 改為 `true`，避免第一次部署時把自己鎖在程式外。
+
+## TZ whitelist v9
+- First batch: 98 TZ accounts preloaded as ACTIVE / permanent.
+- Uses persistent seed marker `tz_whitelist_initial_seed_v2`, so this deployment imports the first batch once even if an older v8 marker exists.
+- After v9 seed completes, deleting/disabling accounts in `/admin` is persistent and does not require Render restart/redeploy.
+- Login order remains TZ credential verification in browser -> server whitelist authorization -> MTLI.
