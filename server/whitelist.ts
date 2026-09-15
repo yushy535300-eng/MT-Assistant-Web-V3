@@ -32,14 +32,6 @@ export async function ensureWhitelistTables() {
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`);
   await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS tz_whitelist_username_ci ON tz_whitelist (LOWER(username))`);
-  await db.query(`CREATE TABLE IF NOT EXISTS tz_whitelist_devices (
-    id BIGSERIAL PRIMARY KEY,
-    whitelist_id BIGINT NOT NULL REFERENCES tz_whitelist(id) ON DELETE CASCADE,
-    device_id VARCHAR(128) NOT NULL,
-    first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (whitelist_id, device_id)
-  )`);
   await db.query(`CREATE TABLE IF NOT EXISTS mt_app_meta (
     meta_key VARCHAR(128) PRIMARY KEY,
     meta_value VARCHAR(255) NULL,
@@ -68,32 +60,23 @@ export async function ensureWhitelistTables() {
   return true;
 }
 
-export async function authorizeWhitelist(usernameRaw: string, deviceIdRaw?: string) {
+export async function authorizeWhitelist(usernameRaw: string) {
   if (!whitelistEnabled()) return { allowed: true, reason: "whitelist_disabled" } as const;
   const db = getPool();
   if (!db) return { allowed: false, reason: "database_unavailable" } as const;
   await ensureWhitelistTables();
   const username = usernameRaw.trim();
-  const deviceId = (deviceIdRaw || "web").trim().slice(0, 128);
   const result = await db.query(`SELECT * FROM tz_whitelist WHERE LOWER(username)=LOWER($1) LIMIT 1`, [username]);
   const row = result.rows[0];
   if (!row) return { allowed: false, reason: "not_whitelisted" } as const;
   if (!row.enabled) return { allowed: false, reason: "disabled" } as const;
   if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) return { allowed: false, reason: "expired" } as const;
-  const devices = await db.query(`SELECT id, device_id FROM tz_whitelist_devices WHERE whitelist_id=$1 ORDER BY first_seen ASC`, [row.id]);
-  const existing = devices.rows.find((d:any) => d.device_id === deviceId);
-  if (existing) await db.query(`UPDATE tz_whitelist_devices SET last_seen=NOW() WHERE id=$1`, [existing.id]);
-  else {
-    const maxDevices = Math.max(1, Number(row.max_devices) || 1);
-    if (devices.rows.length >= maxDevices) return { allowed: false, reason: "device_limit" } as const;
-    await db.query(`INSERT INTO tz_whitelist_devices (whitelist_id, device_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [row.id, deviceId]);
-  }
   return { allowed: true, reason: "ok" } as const;
 }
 
 export async function listWhitelist() {
   const db=getPool(); if(!db) throw new Error("DATABASE_URL 尚未設定"); await ensureWhitelistTables();
-  const r=await db.query(`SELECT w.*, COUNT(d.id)::int AS device_count FROM tz_whitelist w LEFT JOIN tz_whitelist_devices d ON d.whitelist_id=w.id GROUP BY w.id ORDER BY w.updated_at DESC`);
+  const r=await db.query(`SELECT w.* FROM tz_whitelist w ORDER BY w.updated_at DESC`);
   return r.rows;
 }
 
@@ -107,5 +90,4 @@ export async function upsertWhitelist(input:{username:string; days?:number|null;
 }
 export async function setWhitelistEnabled(id:number, enabled:boolean) { const db=getPool(); if(!db) throw new Error("DATABASE_URL 尚未設定"); await ensureWhitelistTables(); await db.query(`UPDATE tz_whitelist SET enabled=$1,updated_at=NOW() WHERE id=$2`,[enabled,id]); }
 export async function extendWhitelist(id:number, days:number) { const db=getPool(); if(!db) throw new Error("DATABASE_URL 尚未設定"); await ensureWhitelistTables(); await db.query(`UPDATE tz_whitelist SET expires_at=(CASE WHEN expires_at IS NULL OR expires_at < NOW() THEN NOW() ELSE expires_at END)+($1::text || ' days')::interval,enabled=TRUE,updated_at=NOW() WHERE id=$2`,[Math.max(1,days),id]); }
-export async function clearWhitelistDevices(id:number) { const db=getPool(); if(!db) throw new Error("DATABASE_URL 尚未設定"); await ensureWhitelistTables(); await db.query(`DELETE FROM tz_whitelist_devices WHERE whitelist_id=$1`,[id]); }
 export async function deleteWhitelist(id:number) { const db=getPool(); if(!db) throw new Error("DATABASE_URL 尚未設定"); await ensureWhitelistTables(); await db.query(`DELETE FROM tz_whitelist WHERE id=$1`,[id]); }

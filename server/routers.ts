@@ -8,7 +8,6 @@ import { authorizeWhitelist } from "./whitelist";
 // The browser talks to TZ directly so Render is not the source IP of the TZ login request.
 // Passwords are never sent to or stored by this server.
 const activeSessions = new Map<string, string>();
-const activeSessionDevices = new Map<string, string>();
 
 export const appRouter = router({
   trackerAccess: router({
@@ -24,12 +23,11 @@ export const appRouter = router({
         const username = input.username.trim().toLowerCase();
         if (!username || !input.tzToken.trim()) return { success: false, sessionId: "", reason: "invalid_login" } as const;
 
-        const access = await authorizeWhitelist(username, input.deviceId);
+        const access = await authorizeWhitelist(username);
         if (!access.allowed) return { success: false, sessionId: "", reason: access.reason } as const;
 
         const sessionId = randomUUID();
         activeSessions.set(username, sessionId);
-        activeSessionDevices.set(sessionId, input.deviceId || "web");
         return { success: true, sessionId } as const;
       }),
     checkSession: publicProcedure
@@ -43,10 +41,9 @@ export const appRouter = router({
 
         // Re-check the live whitelist on every session heartbeat. This makes admin
         // disable/delete/expiry changes affect users who are already online.
-        const access = await authorizeWhitelist(username, activeSessionDevices.get(input.sessionId) || "web");
+        const access = await authorizeWhitelist(username);
         if (!access.allowed) {
           activeSessions.delete(username);
-          activeSessionDevices.delete(input.sessionId);
           return { valid: false, reason: access.reason } as const;
         }
         return { valid: true, reason: "ok" } as const;
@@ -57,8 +54,7 @@ export const appRouter = router({
         for (const [username, sessionId] of activeSessions.entries()) {
           if (sessionId === input.sessionId) {
             activeSessions.delete(username);
-            activeSessionDevices.delete(input.sessionId);
-            break;
+              break;
           }
         }
         return { success: true } as const;

@@ -658,7 +658,7 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
       const access=await login.mutateAsync({username:username.trim(),tzToken,deviceId});
       if(!access.success){
         const reason=(access as any).reason;
-        const messages:any={not_whitelisted:"此 TZ 帳號尚未取得使用權限，請聯繫 LINE 協助",disabled:"此 TZ 帳號授權已停用",expired:"此 TZ 帳號授權已到期",device_limit:"此 TZ 帳號已達授權裝置上限",database_unavailable:"授權服務暫時無法使用"};
+        const messages:any={not_whitelisted:"此 TZ 帳號尚未取得使用權限，請聯繫 LINE 協助",disabled:"此 TZ 帳號授權已停用",expired:"此 TZ 帳號授權已到期",database_unavailable:"授權服務暫時無法使用"};
         setError(messages[reason]||"TZ 登入驗證失敗");
         return;
       }
@@ -953,7 +953,6 @@ export default function HomeScreen(){
         disabled:"此 TZ 帳號授權已被管理員停用。",
         expired:"此 TZ 帳號授權已到期。",
         not_whitelisted:"此 TZ 帳號已不在授權白名單。",
-        device_limit:"此 TZ 帳號已達授權裝置上限。",
         database_unavailable:"授權服務暫時無法使用。",
         session_invalid:"此帳號已於其他裝置登入，本裝置已自動登出。"
       };

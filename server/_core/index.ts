@@ -8,7 +8,7 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { randomUUID } from "node:crypto";
 import { adminPage } from "../admin-page";
-import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, clearWhitelistDevices, deleteWhitelist } from "../whitelist";
+import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -51,10 +51,9 @@ async function startServer() {
     const token=randomUUID();adminSessions.add(token);res.setHeader("Set-Cookie",`mt_admin_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800${process.env.NODE_ENV==="production"?"; Secure":""}`);adminRedirect(res);
   });
   app.post("/api/admin/logout-form",(req,res)=>{const t=getAdminToken(req);if(t)adminSessions.delete(t);res.setHeader("Set-Cookie",`mt_admin_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV==="production"?"; Secure":""}`);adminRedirect(res)});
-  app.post("/api/admin/whitelist-form",requireAdmin,async(req,res)=>{try{const u=String(req.body?.username||"").trim();if(!u)return adminRedirect(res,"請輸入 TZ 帳號");const d=String(req.body?.days||"permanent");await upsertWhitelist({username:u,permanent:d==="permanent",days:d==="permanent"?null:Number(d),maxDevices:Number(req.body?.maxDevices)||1,note:String(req.body?.note||"")});adminRedirect(res,`${u} 已新增並立即生效`)}catch(e:any){adminRedirect(res,`新增失敗：${e?.message||e}`)}});
+  app.post("/api/admin/whitelist-form",requireAdmin,async(req,res)=>{try{const u=String(req.body?.username||"").trim();if(!u)return adminRedirect(res,"請輸入 TZ 帳號");const d=String(req.body?.days||"permanent");await upsertWhitelist({username:u,permanent:d==="permanent",days:d==="permanent"?null:Number(d),note:String(req.body?.note||"")});adminRedirect(res,`${u} 已新增並立即生效`)}catch(e:any){adminRedirect(res,`新增失敗：${e?.message||e}`)}});
   app.post("/api/admin/whitelist/:id/toggle-form",requireAdmin,async(req,res)=>{try{await setWhitelistEnabled(Number(req.params.id),String(req.body?.enabled)==="1");adminRedirect(res,"授權狀態已更新") }catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
   app.post("/api/admin/whitelist/:id/extend-form",requireAdmin,async(req,res)=>{try{await extendWhitelist(Number(req.params.id),30);adminRedirect(res,"已延長 30 天")}catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
-  app.post("/api/admin/whitelist/:id/devices-form",requireAdmin,async(req,res)=>{try{await clearWhitelistDevices(Number(req.params.id));adminRedirect(res,"裝置綁定已解除")}catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
   app.post("/api/admin/whitelist/:id/delete-form",requireAdmin,async(req,res)=>{try{await deleteWhitelist(Number(req.params.id));adminRedirect(res,"帳號已刪除") }catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
 
   app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
