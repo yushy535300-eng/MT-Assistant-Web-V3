@@ -34,49 +34,28 @@ async function startServer() {
     if(!token || !adminSessions.has(token)) return res.status(401).json({error:"管理員登入已失效"});
     next();
   };
-  app.get("/admin", (req,res)=>{
-    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-    res.setHeader("Pragma", "no-cache");
-    res.setHeader("Expires", "0");
-    const token = getAdminToken(req);
-    res.type("html").send(adminPage(!!token && adminSessions.has(token)));
-  });
-  app.get("/api/admin/status", (_req,res)=>{
-    const configured = String(process.env.ADMIN_PASSWORD ?? "").trim().length > 0;
-    res.setHeader("Cache-Control", "no-store");
-    res.json({ok:true,configured});
+  const adminRedirect=(res:any,msg="")=>res.redirect(303,"/admin"+(msg?"?msg="+encodeURIComponent(msg):""));
+  app.get("/admin", async (req,res)=>{
+    res.setHeader("Cache-Control","no-store, no-cache, must-revalidate");
+    const token=getAdminToken(req); const logged=!!token&&adminSessions.has(token);
+    if(!logged) return res.type("html").send(adminPage(false));
+    let items:any[]=[]; let dbError="";
+    try { items=await listWhitelist(); console.log(`[MT Admin] whitelist loaded: ${items.length}`); }
+    catch(e:any){ dbError=e?.message||"讀取失敗"; console.error("[MT Admin] whitelist load failed:",e); }
+    res.type("html").send(adminPage(true,"",items,String(req.query.msg||""),dbError));
   });
   app.post("/api/admin/login", (req,res)=>{
-    const expected=String(process.env.ADMIN_PASSWORD ?? "").trim();
-    const supplied=String(req.body?.password ?? "").trim();
-    const wantsHtml = String(req.headers["content-type"] || "").includes("application/x-www-form-urlencoded");
-    console.log(`[MT Admin] login request received configured=${expected.length > 0} mode=${wantsHtml ? "form" : "api"}`);
-    res.setHeader("Cache-Control", "no-store");
-    const fail=(status:number,message:string)=>{
-      console.warn(`[MT Admin] login rejected: ${message}`);
-      if(wantsHtml) return res.status(status).type("html").send(adminPage(false,message));
-      return res.status(status).json({error:message});
-    };
-    if(!expected) return fail(503,"Render 尚未設定 ADMIN_PASSWORD");
-    if(!supplied) return fail(400,"請輸入管理員密碼");
-    if(supplied!==expected) return fail(401,"管理員密碼錯誤，請確認 Render 的 ADMIN_PASSWORD");
-    const token=randomUUID(); adminSessions.add(token);
-    console.log("[MT Admin] login success");
-    res.setHeader("Set-Cookie", `mt_admin_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
-    if(wantsHtml) return res.redirect(303,"/admin");
-    res.json({ok:true,token});
+    const expected=String(process.env.ADMIN_PASSWORD??"").trim(), supplied=String(req.body?.password??"").trim();
+    if(!expected)return res.status(503).type("html").send(adminPage(false,"Render 尚未設定 ADMIN_PASSWORD"));
+    if(supplied!==expected)return res.status(401).type("html").send(adminPage(false,"管理員密碼錯誤"));
+    const token=randomUUID();adminSessions.add(token);res.setHeader("Set-Cookie",`mt_admin_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800${process.env.NODE_ENV==="production"?"; Secure":""}`);adminRedirect(res);
   });
-  app.post("/api/admin/logout", (req,res)=>{
-    const token=getAdminToken(req); if(token) adminSessions.delete(token);
-    res.setHeader("Set-Cookie", `mt_admin_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
-    res.json({ok:true});
-  });
-  app.get("/api/admin/whitelist", requireAdmin, async (_req,res)=>{try{res.json({items:await listWhitelist()})}catch(e:any){res.status(500).json({error:e?.message||"讀取失敗"})}});
-  app.post("/api/admin/whitelist", requireAdmin, async (req,res)=>{try{if(!String(req.body?.username||"").trim())return res.status(400).json({error:"請輸入 TZ 帳號"});await upsertWhitelist(req.body);res.json({ok:true})}catch(e:any){res.status(500).json({error:e?.message||"儲存失敗"})}});
-  app.post("/api/admin/whitelist/:id/toggle", requireAdmin, async (req,res)=>{try{await setWhitelistEnabled(Number(req.params.id),!!req.body?.enabled);res.json({ok:true})}catch(e:any){res.status(500).json({error:e?.message||"操作失敗"})}});
-  app.post("/api/admin/whitelist/:id/extend", requireAdmin, async (req,res)=>{try{await extendWhitelist(Number(req.params.id),Number(req.body?.days)||30);res.json({ok:true})}catch(e:any){res.status(500).json({error:e?.message||"操作失敗"})}});
-  app.post("/api/admin/whitelist/:id/devices", requireAdmin, async (req,res)=>{try{await clearWhitelistDevices(Number(req.params.id));res.json({ok:true})}catch(e:any){res.status(500).json({error:e?.message||"操作失敗"})}});
-  app.post("/api/admin/whitelist/:id/delete", requireAdmin, async (req,res)=>{try{await deleteWhitelist(Number(req.params.id));res.json({ok:true})}catch(e:any){res.status(500).json({error:e?.message||"操作失敗"})}});
+  app.post("/api/admin/logout-form",(req,res)=>{const t=getAdminToken(req);if(t)adminSessions.delete(t);res.setHeader("Set-Cookie",`mt_admin_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV==="production"?"; Secure":""}`);adminRedirect(res)});
+  app.post("/api/admin/whitelist-form",requireAdmin,async(req,res)=>{try{const u=String(req.body?.username||"").trim();if(!u)return adminRedirect(res,"請輸入 TZ 帳號");const d=String(req.body?.days||"permanent");await upsertWhitelist({username:u,permanent:d==="permanent",days:d==="permanent"?null:Number(d),maxDevices:Number(req.body?.maxDevices)||1,note:String(req.body?.note||"")});adminRedirect(res,`${u} 已新增並立即生效`)}catch(e:any){adminRedirect(res,`新增失敗：${e?.message||e}`)}});
+  app.post("/api/admin/whitelist/:id/toggle-form",requireAdmin,async(req,res)=>{try{await setWhitelistEnabled(Number(req.params.id),String(req.body?.enabled)==="1");adminRedirect(res,"授權狀態已更新") }catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
+  app.post("/api/admin/whitelist/:id/extend-form",requireAdmin,async(req,res)=>{try{await extendWhitelist(Number(req.params.id),30);adminRedirect(res,"已延長 30 天")}catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
+  app.post("/api/admin/whitelist/:id/devices-form",requireAdmin,async(req,res)=>{try{await clearWhitelistDevices(Number(req.params.id));adminRedirect(res,"裝置綁定已解除")}catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
+  app.post("/api/admin/whitelist/:id/delete-form",requireAdmin,async(req,res)=>{try{await deleteWhitelist(Number(req.params.id));adminRedirect(res,"帳號已刪除") }catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
 
   app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
 
