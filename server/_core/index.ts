@@ -22,16 +22,24 @@ async function startServer() {
   app.get("/api/health", (_req, res) => res.json({ ok: true, timestamp: Date.now() }));
 
   const adminSessions = new Set<string>();
+  const getAdminToken = (req:any) => {
+    const headerToken = String(req.header("X-Admin-Token") || "");
+    if (headerToken) return headerToken;
+    const cookie = String(req.headers.cookie || "");
+    const match = cookie.match(/(?:^|;\s*)mt_admin_token=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  };
   const requireAdmin = (req:any,res:any,next:any) => {
-    const token=String(req.header("X-Admin-Token")||"");
+    const token = getAdminToken(req);
     if(!token || !adminSessions.has(token)) return res.status(401).json({error:"管理員登入已失效"});
     next();
   };
-  app.get("/admin", (_req,res)=>{
+  app.get("/admin", (req,res)=>{
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     res.setHeader("Pragma", "no-cache");
     res.setHeader("Expires", "0");
-    res.type("html").send(adminPage);
+    const token = getAdminToken(req);
+    res.type("html").send(adminPage(!!token && adminSessions.has(token)));
   });
   app.get("/api/admin/status", (_req,res)=>{
     const configured = String(process.env.ADMIN_PASSWORD ?? "").trim().length > 0;
@@ -39,18 +47,29 @@ async function startServer() {
     res.json({ok:true,configured});
   });
   app.post("/api/admin/login", (req,res)=>{
-    console.log(`[MT Admin] login request received configured=${String(process.env.ADMIN_PASSWORD ?? "").trim().length > 0}`);
-    // Render env values can accidentally contain leading/trailing whitespace or CR/LF.
-    // Normalize only the outer whitespace; the actual password contents remain case-sensitive.
     const expected=String(process.env.ADMIN_PASSWORD ?? "").trim();
     const supplied=String(req.body?.password ?? "").trim();
+    const wantsHtml = String(req.headers["content-type"] || "").includes("application/x-www-form-urlencoded");
+    console.log(`[MT Admin] login request received configured=${expected.length > 0} mode=${wantsHtml ? "form" : "api"}`);
     res.setHeader("Cache-Control", "no-store");
-    if(!expected) { console.warn("[MT Admin] login rejected: ADMIN_PASSWORD not configured"); return res.status(503).json({error:"Render 尚未設定 ADMIN_PASSWORD"}); }
-    if(!supplied) { console.warn("[MT Admin] login rejected: empty password"); return res.status(400).json({error:"請輸入管理員密碼"}); }
-    if(supplied!==expected) { console.warn("[MT Admin] login rejected: password mismatch"); return res.status(401).json({error:"管理員密碼錯誤，請確認 Render 的 ADMIN_PASSWORD"}); }
+    const fail=(status:number,message:string)=>{
+      console.warn(`[MT Admin] login rejected: ${message}`);
+      if(wantsHtml) return res.status(status).type("html").send(adminPage(false,message));
+      return res.status(status).json({error:message});
+    };
+    if(!expected) return fail(503,"Render 尚未設定 ADMIN_PASSWORD");
+    if(!supplied) return fail(400,"請輸入管理員密碼");
+    if(supplied!==expected) return fail(401,"管理員密碼錯誤，請確認 Render 的 ADMIN_PASSWORD");
     const token=randomUUID(); adminSessions.add(token);
     console.log("[MT Admin] login success");
+    res.setHeader("Set-Cookie", `mt_admin_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
+    if(wantsHtml) return res.redirect(303,"/admin");
     res.json({ok:true,token});
+  });
+  app.post("/api/admin/logout", (req,res)=>{
+    const token=getAdminToken(req); if(token) adminSessions.delete(token);
+    res.setHeader("Set-Cookie", `mt_admin_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
+    res.json({ok:true});
   });
   app.get("/api/admin/whitelist", requireAdmin, async (_req,res)=>{try{res.json({items:await listWhitelist()})}catch(e:any){res.status(500).json({error:e?.message||"讀取失敗"})}});
   app.post("/api/admin/whitelist", requireAdmin, async (req,res)=>{try{if(!String(req.body?.username||"").trim())return res.status(400).json({error:"請輸入 TZ 帳號"});await upsertWhitelist(req.body);res.json({ok:true})}catch(e:any){res.status(500).json({error:e?.message||"儲存失敗"})}});
