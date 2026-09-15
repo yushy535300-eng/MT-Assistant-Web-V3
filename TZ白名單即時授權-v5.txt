@@ -1,0 +1,16 @@
+MT MATRIX / TZ 白名單即時授權 v5
+
+新增：
+- 已登入使用者每 3 秒重新檢查一次後端白名單授權。
+- /admin 停用帳號：在線使用者最慢約 3 秒失效並回 TZ 登入頁。
+- /admin 刪除帳號：在線使用者最慢約 3 秒失效並回 TZ 登入頁。
+- 授權到期：在線使用者在下一次檢查時失效。
+- 重新啟用/新增：可立即重新登入，不需重新部署。
+- 沿用原 trackerAccess.checkSession，不新增 MT WebSocket，不修改牌路/今日輸贏/馬丁/終值奇偶模型。
+
+Render 必要設定：
+TZ_WHITELIST_ENABLED=true
+DATABASE_URL=你的資料庫連線
+ADMIN_PASSWORD=你的管理員密碼
+
+注意：若 TZ_WHITELIST_ENABLED=false，白名單為旁路模式，不會停權任何使用者。

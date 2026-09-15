@@ -8,6 +8,7 @@ import { authorizeWhitelist } from "./whitelist";
 // The browser talks to TZ directly so Render is not the source IP of the TZ login request.
 // Passwords are never sent to or stored by this server.
 const activeSessions = new Map<string, string>();
+const activeSessionDevices = new Map<string, string>();
 
 export const appRouter = router({
   trackerAccess: router({
@@ -28,19 +29,35 @@ export const appRouter = router({
 
         const sessionId = randomUUID();
         activeSessions.set(username, sessionId);
+        activeSessionDevices.set(sessionId, input.deviceId || "web");
         return { success: true, sessionId } as const;
       }),
     checkSession: publicProcedure
       .input(z.object({ sessionId: z.string().min(1).max(128) }))
-      .query(({ input }) => ({
-        valid: Array.from(activeSessions.values()).includes(input.sessionId),
-      } as const)),
+      .query(async ({ input }) => {
+        let username = "";
+        for (const [name, sessionId] of activeSessions.entries()) {
+          if (sessionId === input.sessionId) { username = name; break; }
+        }
+        if (!username) return { valid: false, reason: "session_invalid" } as const;
+
+        // Re-check the live whitelist on every session heartbeat. This makes admin
+        // disable/delete/expiry changes affect users who are already online.
+        const access = await authorizeWhitelist(username, activeSessionDevices.get(input.sessionId) || "web");
+        if (!access.allowed) {
+          activeSessions.delete(username);
+          activeSessionDevices.delete(input.sessionId);
+          return { valid: false, reason: access.reason } as const;
+        }
+        return { valid: true, reason: "ok" } as const;
+      }),
     logout: publicProcedure
       .input(z.object({ sessionId: z.string().min(1).max(128) }))
       .mutation(({ input }) => {
         for (const [username, sessionId] of activeSessions.entries()) {
           if (sessionId === input.sessionId) {
             activeSessions.delete(username);
+            activeSessionDevices.delete(input.sessionId);
             break;
           }
         }

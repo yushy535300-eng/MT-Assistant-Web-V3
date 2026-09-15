@@ -943,7 +943,16 @@ export default function HomeScreen(){
     if(accessSessionCheck.data && !accessSessionCheck.data.valid){
       setAccessGranted(false);
       setAccessSessionId("");
-      setAccessNotice("此帳號已於其他裝置登入，本裝置已自動登出。");
+      const reason=(accessSessionCheck.data as any)?.reason;
+      const notices:any={
+        disabled:"此 TZ 帳號授權已被管理員停用。",
+        expired:"此 TZ 帳號授權已到期。",
+        not_whitelisted:"此 TZ 帳號已不在授權白名單。",
+        device_limit:"此 TZ 帳號已達授權裝置上限。",
+        database_unavailable:"授權服務暫時無法使用。",
+        session_invalid:"此帳號已於其他裝置登入，本裝置已自動登出。"
+      };
+      setAccessNotice(notices[reason]||"此帳號授權已失效，請重新登入。");
       try{socketRef.current?.close()}catch{}
       socketRef.current=null;
       setSocket(null);
@@ -957,7 +966,7 @@ export default function HomeScreen(){
       setMtOpen(false);
       setInsideMt(false);
     }
-  },[accessGranted,accessSessionId,accessSessionCheck.data?.valid]);
+  },[accessGranted,accessSessionId,accessSessionCheck.data?.valid,(accessSessionCheck.data as any)?.reason]);
 
   const [connectionOpen,setConnectionOpen]=useState(false);
   const [helpOpen,setHelpOpen]=useState(false);
