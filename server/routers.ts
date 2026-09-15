@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { publicProcedure, router } from "./_core/trpc";
 import { randomUUID } from "node:crypto";
+import { authorizeWhitelist } from "./whitelist";
 
 
 // TZ website authorization + single-login registry.
@@ -16,11 +17,14 @@ export const appRouter = router({
         tzToken: z.string().min(16).max(8192),
         deviceId: z.string().min(1).max(128).optional(),
       }))
-      .mutation(({ input }) => {
+      .mutation(async ({ input }) => {
         // TZ already authenticated the credentials in the user's browser.
         // Do not persist the TZ token; it is only proof that the browser login completed.
         const username = input.username.trim().toLowerCase();
-        if (!username || !input.tzToken.trim()) return { success: false, sessionId: "" } as const;
+        if (!username || !input.tzToken.trim()) return { success: false, sessionId: "", reason: "invalid_login" } as const;
+
+        const access = await authorizeWhitelist(username, input.deviceId);
+        if (!access.allowed) return { success: false, sessionId: "", reason: access.reason } as const;
 
         const sessionId = randomUUID();
         activeSessions.set(username, sessionId);

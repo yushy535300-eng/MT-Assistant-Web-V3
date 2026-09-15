@@ -642,20 +642,28 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
     const t2=setTimeout(start,600);
     return()=>{clearTimeout(t1);clearTimeout(t2)};
   },[]);
-  const login=trpc.trackerAccess.login.useMutation({onSuccess:r=>r.success?(setError(""),onAuthenticated(r.sessionId,pendingMtGameUrlRef.current)):setError("TZ 登入驗證失敗"),onError:()=>setError("登入工作階段建立失敗，請重試")});
+  const login=trpc.trackerAccess.login.useMutation();
   const submit=async()=>{
     if(!username.trim()||!password){setError("請輸入 TZ 帳號與密碼");return}
     setError("");
     try{
       const deviceId=getTzLoginDeviceId();
       const tzToken=await loginToTzFromBrowser(username.trim(),password,deviceId);
-      // TZ 驗證成功後，在背景直接取得新 MT 真人入口；畫面不跳轉。
-      // MT 取得失敗不阻擋登入，右上角原本的手動連線仍可當備用。
+      // 先由自己的後端確認 TZ 白名單；未授權者不會進入 MT Assistant。
+      const access=await login.mutateAsync({username:username.trim(),tzToken,deviceId});
+      if(!access.success){
+        const reason=(access as any).reason;
+        const messages:any={not_whitelisted:"此 TZ 帳號尚未取得 MT MATRIX 使用授權",disabled:"此 TZ 帳號授權已停用",expired:"此 TZ 帳號授權已到期",device_limit:"此 TZ 帳號已達授權裝置上限",database_unavailable:"授權服務暫時無法使用"};
+        setError(messages[reason]||"TZ 登入驗證失敗");
+        return;
+      }
+      // 白名單通過後才取得 MT 真人入口；取得失敗仍保留原手動連線備用。
       pendingMtGameUrlRef.current="";
       try{pendingMtGameUrlRef.current=await getMtLoginUrlFromTz(tzToken)}catch{}
-      login.mutate({username:username.trim(),tzToken,deviceId});
+      setError("");
+      onAuthenticated(access.sessionId,pendingMtGameUrlRef.current);
     }catch(error:any){
-      setError(error?.message||"TZ 登入驗證失敗");
+      setError(error?.message||"登入工作階段建立失敗，請重試");
     }
   };
   return <ScreenContainer edges={["top","left","right","bottom"]} containerClassName="bg-[#020A12]" className="bg-[#020A12]">

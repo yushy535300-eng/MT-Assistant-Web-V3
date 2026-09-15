@@ -53,3 +53,15 @@ http://localhost:3000
 網站本身已獨立於 Manus，但真實牌路仍需要來源 MT 工作階段授權。登入 MT 後，把帶 `token` 的完整 MT 網址貼進「連線」視窗，再開始連線。
 
 > 若來源 WebSocket 有 Origin、Cookie、Token 或 IP 限制，是否能從公開網域連線仍由來源伺服器決定，這與 Manus 無關。
+
+## TZ 白名單管理後台
+
+本版本新增 `/admin` 授權管理頁。Render Environment 需要設定：
+
+- `ADMIN_PASSWORD`：管理後台登入密碼（請使用長且唯一的密碼）
+- `TZ_WHITELIST_ENABLED=true`：啟用 TZ 白名單檢查
+- `DATABASE_URL`：既有 MySQL 資料庫連線；白名單資料會持久化於資料庫
+
+部署後開啟 `https://你的網域/admin` 即可新增 7/30/90 天或永久授權、設定裝置上限、停用、+30 天、解除裝置與刪除。
+
+建議先保持 `TZ_WHITELIST_ENABLED=false` 完成部署並登入 `/admin` 新增自己的 TZ 帳號，確認資料庫正常後，再把 `TZ_WHITELIST_ENABLED` 改為 `true`，避免第一次部署時把自己鎖在程式外。
