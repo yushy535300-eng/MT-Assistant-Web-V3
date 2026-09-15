@@ -27,11 +27,26 @@ async function startServer() {
     if(!token || !adminSessions.has(token)) return res.status(401).json({error:"管理員登入已失效"});
     next();
   };
-  app.get("/admin", (_req,res)=>res.type("html").send(adminPage));
+  app.get("/admin", (_req,res)=>{
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.type("html").send(adminPage);
+  });
+  app.get("/api/admin/status", (_req,res)=>{
+    const configured = String(process.env.ADMIN_PASSWORD ?? "").trim().length > 0;
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ok:true,configured});
+  });
   app.post("/api/admin/login", (req,res)=>{
-    const expected=String(process.env.ADMIN_PASSWORD||"");
+    // Render env values can accidentally contain leading/trailing whitespace or CR/LF.
+    // Normalize only the outer whitespace; the actual password contents remain case-sensitive.
+    const expected=String(process.env.ADMIN_PASSWORD ?? "").trim();
+    const supplied=String(req.body?.password ?? "").trim();
+    res.setHeader("Cache-Control", "no-store");
     if(!expected) return res.status(503).json({error:"Render 尚未設定 ADMIN_PASSWORD"});
-    if(String(req.body?.password||"")!==expected) return res.status(401).json({error:"管理員密碼錯誤"});
+    if(!supplied) return res.status(400).json({error:"請輸入管理員密碼"});
+    if(supplied!==expected) return res.status(401).json({error:"管理員密碼錯誤，請確認 Render 的 ADMIN_PASSWORD"});
     const token=randomUUID(); adminSessions.add(token);
     res.json({ok:true,token});
   });
