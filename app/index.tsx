@@ -854,6 +854,21 @@ function mtCardRank(cardId:number):string|null{
   if(rank===13)return "K";
   return String(rank);
 }
+function terminalParityFaceValue(card:string){
+  if(card==="A")return 1;
+  if(card==="J")return 11;
+  if(card==="Q")return 12;
+  if(card==="K")return 13;
+  const n=Number(card);
+  return Number.isFinite(n)&&n>=2&&n<=10?n:0;
+}
+function terminalParityResult(cards:string[]){
+  const values=cards.map(terminalParityFaceValue);
+  const total=values.reduce((sum,n)=>sum+n,0);
+  const first=Math.floor(total/10)+(total%10);
+  const finalValue=first>=10?first%10:first;
+  return {values,total,first,finalValue,side:(finalValue%2===0?"莊":"閒") as V38Side};
+}
 function baccaratCardValue(card:string){
   if(card==="A")return 1;
   const n=Number(card);
@@ -1025,6 +1040,10 @@ export default function HomeScreen(){
   const v38ByTableRef=useRef<Record<string,V38PokerState>>({});
   const v38Position=useRef(new Animated.ValueXY()).current;
   const v38DraggingRef=useRef(false);
+  // Independent Terminal Parity Model. It passively reuses the existing show_poker state.
+  const [terminalParityOpen,setTerminalParityOpen]=useState(false);
+  const terminalParityPosition=useRef(new Animated.ValueXY()).current;
+  const terminalParityDraggingRef=useRef(false);
   const panelSizeRef=useRef({width:panelBaseWidth,height:245});
   const orbDraggingRef=useRef(false);
   const panelDraggingRef=useRef(false);
@@ -1297,6 +1316,27 @@ export default function HomeScreen(){
     onPanResponderTerminate:()=>{v38Position.flattenOffset();clampV38Position();v38DraggingRef.current=false},
     onPanResponderTerminationRequest:()=>false,
   }),[v38Position,width,height,desktop]);
+
+  const clampTerminalParityPosition=()=>{
+    const boxW=desktop?300:Math.min(300,width-24),boxH=205;
+    const baseLeft=desktop?Math.max(12,width-boxW-88):12;
+    const baseTop=desktop?120:115;
+    const minX=8-baseLeft,maxX=Math.max(minX,width-8-boxW-baseLeft);
+    const minY=8-baseTop,maxY=Math.max(minY,height-36-baseTop);
+    terminalParityPosition.stopAnimation((v:any)=>terminalParityPosition.setValue({
+      x:Math.max(minX,Math.min(maxX,Number(v?.x)||0)),
+      y:Math.max(minY,Math.min(maxY,Number(v?.y)||0)),
+    }));
+  };
+  const terminalParityDrag=useMemo(()=>PanResponder.create({
+    onStartShouldSetPanResponder:()=>false,
+    onMoveShouldSetPanResponder:(_,g)=>Math.abs(g.dx)>=2||Math.abs(g.dy)>=2,
+    onPanResponderGrant:()=>{terminalParityDraggingRef.current=true;terminalParityPosition.stopAnimation(()=>terminalParityPosition.extractOffset())},
+    onPanResponderMove:(_,g)=>terminalParityPosition.setValue({x:g.dx,y:g.dy}),
+    onPanResponderRelease:()=>{terminalParityPosition.flattenOffset();clampTerminalParityPosition();terminalParityDraggingRef.current=false},
+    onPanResponderTerminate:()=>{terminalParityPosition.flattenOffset();clampTerminalParityPosition();terminalParityDraggingRef.current=false},
+    onPanResponderTerminationRequest:()=>false,
+  }),[terminalParityPosition,width,height,desktop]);
 
   const clampRadarPosition=()=>{
     const launcherWidth=desktop?210:188;
@@ -2025,7 +2065,7 @@ export default function HomeScreen(){
     const page3=<View {...pageSwipe.panHandlers} style={s.assistPage}><View style={s.betButtons}><Pressable style={[s.betBtn,{backgroundColor:"#B8323B"}]} onPress={()=>placeManualBet("莊")}><Text style={s.betBtnText}>本局莊</Text></Pressable><Pressable style={[s.betBtn,{backgroundColor:"#1764C0"}]} onPress={()=>placeManualBet("閒")}><Text style={s.betBtnText}>本局閒</Text></Pressable><Pressable style={[s.betBtn,{backgroundColor:"#238A4B"}]} onPress={()=>placeManualBet("和")}><Text style={s.betBtnText}>和局</Text></Pressable></View><View style={s.statsGrid}><View><Text style={s.smallLabel}>目前本金</Text><Text style={s.statsValue}>{bankroll.toLocaleString()}</Text></View><View><Text style={s.smallLabel}>總損益</Text><Text style={[s.statsValue,{color:bankroll-initialBankroll>=0?"#4ED58B":"#FF6973"}]}>{(bankroll-initialBankroll>=0?"+":"")+(bankroll-initialBankroll).toLocaleString()}</Text></View><View><Text style={s.smallLabel}>勝 / 負</Text><Text style={s.statsValue}>{wins} / {losses}</Text></View><View><Text style={s.smallLabel}>勝率</Text><Text style={s.statsValue}>{decisions?((wins/decisions)*100).toFixed(1):"0.0"}%</Text></View></View><View style={s.recordBar}><Text style={s.microText}>{pendingBet?`等待開獎：${pendingBet.side} ${pendingBet.amount.toLocaleString()}`:`連${records[0]?.pnl>0?"勝":records[0]?.pnl<0?"敗":"續"} ${streak}　最大回撤 -${maxDrawdown.toLocaleString()}`}</Text><Pressable onPress={resetStats}><Text style={s.resetText}>重置統計</Text></Pressable></View><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.historyRow}>{records.slice(0,8).map((r,i)=><View key={i} style={s.historyChip}><Text style={{color:r.pnl>=0?"#53D990":"#FF7079",fontSize:9,fontWeight:"800"}}>{r.side} {r.pnl>=0?"+":""}{r.pnl.toLocaleString()}</Text></View>)}</ScrollView></View>;
     if(!floatingOpen)return null;
     return <Animated.View onLayout={(e:any)=>{const l=e.nativeEvent?.layout;if(l?.width&&l?.height){panelSizeRef.current={width:l.width,height:l.height}}}} style={[s.floatPanel,!desktop?s.floatPanelMobile:null,{width:panelBaseWidth},insideMt?s.floatPanelMt:null,Platform.OS==="web"?({overscrollBehavior:"contain",transformOrigin:"top left"} as any):null,{transform:!desktop?[...panelPosition.getTranslateTransform(),{scale:panelMobileScale}]:panelPosition.getTranslateTransform()}]}>
-      <View style={[s.floatHeader,Platform.OS==="web"?({touchAction:"none",userSelect:"none",WebkitUserSelect:"none"} as any):null]} {...panelDrag.panHandlers}><View style={s.floatHeadLeft}><MatrixMark size={25}/><View><View style={s.floatBrandLine}><Text style={s.floatTitle}>MATRIX ASSIST</Text><Text style={s.floatStatus}>{connected?"● LIVE":"● OFFLINE"}</Text></View><ThreadsSignature/></View></View><View style={s.row}><Pressable onPress={syncAssist} style={s.iconTextBtn}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.iconText}>同步</Text></Pressable><Pressable onPress={()=>setV38Open(v=>!v)} style={[s.iconTextBtn,v38Open&&s.v38LaunchActive]}><MaterialIcons name="calculate" size={15} color="#fff"/><Text style={s.iconText}>算牌</Text></Pressable><Pressable onPress={()=>setFloatingOpen(false)} style={s.iconBtn}><MaterialIcons name="close" size={18} color="#fff"/></Pressable></View></View>
+      <View style={[s.floatHeader,Platform.OS==="web"?({touchAction:"none",userSelect:"none",WebkitUserSelect:"none"} as any):null]} {...panelDrag.panHandlers}><View style={s.floatHeadLeft}><MatrixMark size={25}/><View><View style={s.floatBrandLine}><Text style={s.floatTitle}>MATRIX ASSIST</Text><Text style={s.floatStatus}>{connected?"● LIVE":"● OFFLINE"}</Text></View><ThreadsSignature/></View></View><View style={s.row}><Pressable onPress={syncAssist} style={s.iconTextBtn}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.iconText}>同步</Text></Pressable><Pressable onPress={()=>setV38Open(v=>!v)} style={[s.iconTextBtn,v38Open&&s.v38LaunchActive]}><MaterialIcons name="calculate" size={15} color="#fff"/><Text style={s.iconText}>算牌</Text></Pressable><Pressable onPress={()=>setTerminalParityOpen(v=>!v)} style={[s.iconTextBtn,terminalParityOpen&&s.v38LaunchActive]}><MaterialIcons name="functions" size={15} color="#fff"/><Text style={s.iconText}>奇偶</Text></Pressable><Pressable onPress={()=>setFloatingOpen(false)} style={s.iconBtn}><MaterialIcons name="close" size={18} color="#fff"/></Pressable></View></View>
       <View style={s.selectorWrap}>
         <Pressable style={s.selector} onPress={()=>{
           if(roomDropdownOpen){ roomDropdownOpenRef.current=false; setRoomDropdownOpen(false); }
@@ -2077,6 +2117,38 @@ export default function HomeScreen(){
     </Animated.View>;
   };
 
+
+  const TerminalParityModel=({insideMt=false}:{insideMt?:boolean})=>{
+    if(!terminalParityOpen)return null;
+    const data=v38ByTable[assistTableId];
+    // Preserve MT's actual deal order: P1, B1, P2, B2, optional P3, optional B3.
+    const dealt:string[]=[];
+    if(data){
+      const r=data.result;
+      [0,1,2,3,4,5].forEach(i=>{const rank=mtCardRank(r[i]);if(rank)dealt.push(rank)});
+    }
+    const calc=terminalParityResult(dealt);
+    const ready=!!data?.complete;
+    const side=ready?calc.side:"觀望" as V38Side;
+    const sideColor=side==="莊"?"#EF4E57":side==="閒"?"#2879E5":"#A7B5BF";
+    const status=!connected?"未連線":!data?"等待牌面":ready?"已完成":"發牌中";
+    const faceLine=dealt.length?dealt.join("  "):"—";
+    const valueLine=calc.values.length?calc.values.join("  "):"—";
+    const tens=ready?Math.floor(calc.total/10):0,ones=ready?calc.total%10:0;
+    const formula=ready?`${calc.total} → ${tens}+${ones} → ${calc.first}${calc.first>=10?` → ${calc.finalValue}`:""}`:"等待完整開牌";
+    return <Animated.View style={[s.terminalPanel,!desktop&&s.terminalPanelMobile,insideMt&&s.v38PanelMt,{transform:terminalParityPosition.getTranslateTransform()}]}>
+      <View style={s.terminalHeader} {...terminalParityDrag.panHandlers}>
+        <View style={s.v38HeaderLeft}><MaterialIcons name="functions" size={16} color="#8ED8FF"/><View><Text style={s.terminalTitle}>終值奇偶模型</Text><Text style={s.v38Sub}>Terminal Parity Model · {status}</Text></View></View>
+        <Pressable onPress={()=>setTerminalParityOpen(false)} style={s.iconBtn}><MaterialIcons name="close" size={17} color="#fff"/></Pressable>
+      </View>
+      <View style={s.terminalBody}>
+        <View style={s.terminalLine}><Text style={s.terminalLabel}>牌面</Text><Text style={s.terminalCards}>{faceLine}</Text></View>
+        <View style={s.terminalLine}><Text style={s.terminalLabel}>牌值</Text><Text style={s.terminalValues}>{valueLine}</Text></View>
+        <View style={s.terminalCalcBox}><Text style={s.terminalCalc}>{formula}</Text></View>
+        <View style={s.terminalResultRow}><View><Text style={s.terminalResultLabel}>終值</Text><Text style={s.terminalFinal}>{ready?`${calc.finalValue} · ${calc.finalValue%2===0?"偶數":"奇數"}`:"—"}</Text></View><View style={s.terminalSideWrap}><Text style={s.terminalNext}>下一局方向</Text><Text style={[s.terminalSide,{color:sideColor}]}>{side}</Text></View></View>
+      </View>
+    </Animated.View>;
+  };
 
   const V38Calculator=({insideMt=false}:{insideMt?:boolean})=>{
     if(!v38Open)return null;
@@ -2189,6 +2261,7 @@ export default function HomeScreen(){
       {MultiTableRadar({insideMt:mtOpen})}
       {FloatingAssistant({insideMt:mtOpen})}
       {V38Calculator({insideMt:mtOpen})}
+      {TerminalParityModel({insideMt:mtOpen})}
       <FloatingOrb position={orbPosition} responder={orbResponder} size={orbSize} iconSize={orbIconSize} connected={connected} insideMt={mtOpen}/>
     </View>
   </ScreenContainer>;
@@ -2205,6 +2278,7 @@ const s=StyleSheet.create({
   orb:{position:"absolute",right:16,bottom:24,zIndex:10020,width:50,height:50,borderRadius:25,backgroundColor:"#07131E",borderWidth:2,borderColor:"#6CC8FF",alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:0.5,shadowRadius:10,elevation:12,touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},orbMt:{bottom:34,zIndex:10020,elevation:40},orbStatus:{position:"absolute",right:4,top:4,width:8,height:8,borderRadius:4,borderWidth:1,borderColor:"#fff"},
   v38LaunchActive:{backgroundColor:"#0F7AAE"},
   v38InfoBtn:{height:28,paddingHorizontal:8,borderRadius:5,borderWidth:1,borderColor:"#315F78",backgroundColor:"#0C2A3D",flexDirection:"row",alignItems:"center",gap:4},v38InfoBtnText:{color:"#D9F1FF",fontSize:8,fontWeight:"900"},v38DetailScroll:{height:194},v38DetailContent:{padding:7,paddingBottom:12,gap:6},v38VectorBox:{backgroundColor:"#0A1C29",borderWidth:1,borderColor:"#31576D",borderRadius:6,padding:7},v38DetailHeadRow:{flexDirection:"row",alignItems:"center",justifyContent:"space-between",marginBottom:5},v38SectionCode:{color:"#8ED8FF",fontSize:8,fontWeight:"900",letterSpacing:.7},v38LiveDot:{fontSize:7.5,fontWeight:"900"},v38VectorLine:{color:"#D7E5ED",fontSize:8.5,fontWeight:"700",fontFamily:Platform.OS==="web"?"monospace":undefined,lineHeight:14},v38ModelBox:{backgroundColor:"#091722",borderWidth:1,borderColor:"#274A60",borderRadius:6,padding:7},v38ModelTop:{flexDirection:"row",alignItems:"center",gap:6,marginBottom:5},v38ModelName:{color:"#F4FAFF",fontSize:9,fontWeight:"900",letterSpacing:.5},v38ModelTag:{color:"#7599AD",fontSize:6.8,fontWeight:"900",flex:1},v38ModelOut:{fontSize:11,fontWeight:"900"},v38Equation:{color:"#BCE8FF",fontSize:9,fontWeight:"800",fontFamily:Platform.OS==="web"?"monospace":undefined,marginBottom:4},v38Calc:{color:"#D5E0E7",fontSize:8,fontWeight:"700",fontFamily:Platform.OS==="web"?"monospace":undefined,lineHeight:13},v38Rule:{color:"#7897AA",fontSize:7,fontWeight:"700",marginTop:4},
+  terminalPanel:{position:"absolute",right:88,top:120,width:300,zIndex:10012,backgroundColor:"rgba(5,15,24,.985)",borderWidth:1,borderColor:"#3B789C",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.5,shadowRadius:12,elevation:32},terminalPanelMobile:{left:12,right:"auto" as any,top:115,width:300,maxWidth:"92%" as any},terminalHeader:{height:38,paddingHorizontal:8,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#082033",borderBottomWidth:1,borderBottomColor:"#285B79",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},terminalTitle:{color:"#F4FAFF",fontSize:11,fontWeight:"900",letterSpacing:.35},terminalBody:{padding:8},terminalLine:{minHeight:26,flexDirection:"row",alignItems:"center",borderBottomWidth:1,borderBottomColor:"#173246"},terminalLabel:{width:38,color:"#7FA1B5",fontSize:8,fontWeight:"900"},terminalCards:{flex:1,color:"#F4FAFF",fontSize:12,fontWeight:"900",letterSpacing:.7},terminalValues:{flex:1,color:"#B8CBD7",fontSize:9,fontWeight:"800",letterSpacing:.6},terminalCalcBox:{marginTop:6,minHeight:31,borderRadius:5,backgroundColor:"#0B1B29",borderWidth:1,borderColor:"#24465D",alignItems:"center",justifyContent:"center",paddingHorizontal:6},terminalCalc:{color:"#BCE8FF",fontSize:10,fontWeight:"900",fontFamily:Platform.OS==="web"?"monospace":undefined},terminalResultRow:{marginTop:6,minHeight:48,borderRadius:6,backgroundColor:"#10283A",borderWidth:1,borderColor:"#326884",paddingHorizontal:8,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},terminalResultLabel:{color:"#86A5B7",fontSize:7.5,fontWeight:"900"},terminalFinal:{color:"#F1F7FA",fontSize:12,fontWeight:"900",marginTop:2},terminalSideWrap:{alignItems:"flex-end"},terminalNext:{color:"#86A5B7",fontSize:7.5,fontWeight:"900"},terminalSide:{fontSize:20,fontWeight:"900",marginTop:1},
   v38Panel:{position:"absolute",right:88,top:120,width:360,zIndex:10010,backgroundColor:"rgba(5,15,24,.985)",borderWidth:1,borderColor:"#3B789C",borderRadius:10,overflow:"hidden",shadowColor:"#000",shadowOpacity:.5,shadowRadius:14,elevation:30},v38PanelMobile:{left:12,right:"auto" as any,top:115,width:340,maxWidth:"92%" as any},v38PanelMt:{zIndex:10015,elevation:45},v38Header:{height:42,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#082033",borderBottomWidth:1,borderBottomColor:"#285B79",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},v38HeaderLeft:{flexDirection:"row",alignItems:"center",gap:8},v38Title:{color:"#F4FAFF",fontSize:12,fontWeight:"900",letterSpacing:.5},v38Sub:{color:"#80A7BD",fontSize:8,fontWeight:"800",marginTop:1},v38Body:{padding:8},v38MetaRow:{flexDirection:"row",justifyContent:"space-between",marginBottom:6},v38Meta:{color:"#9DB2C0",fontSize:9,fontWeight:"800"},v38Cards:{flexDirection:"row",gap:6},v38Hand:{flex:1,minHeight:54,backgroundColor:"#0E2232",borderWidth:1,borderColor:"#294C63",borderRadius:6,padding:7},v38HandSide:{fontSize:10,fontWeight:"900"},v38CardText:{color:"#F5FAFD",fontSize:14,fontWeight:"900",marginTop:5},v38Point:{color:"#C7D7E1",fontSize:9,fontWeight:"800",marginTop:3},v38FormulaGrid:{flexDirection:"row",gap:5,marginTop:6},v38Formula:{flex:1,backgroundColor:"#0B1B29",borderWidth:1,borderColor:"#24465D",borderRadius:5,paddingVertical:6,alignItems:"center"},v38FormulaName:{color:"#9EB6C6",fontSize:8,fontWeight:"900"},v38FormulaSide:{fontSize:13,fontWeight:"900",marginTop:2},v38Recommend:{marginTop:6,minHeight:50,backgroundColor:"#10283A",borderWidth:1,borderColor:"#326884",borderRadius:6,paddingHorizontal:8,paddingVertical:6,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},v38RecommendLabel:{color:"#E8F4FA",fontSize:10,fontWeight:"900"},v38RecommendHint:{color:"#83A2B5",fontSize:7.5,fontWeight:"700",marginTop:3},v38RecommendSide:{fontSize:21,fontWeight:"900"},
   floatPanel:{position:"absolute",right:74,bottom:22,zIndex:100,backgroundColor:"rgba(6,16,25,.975)",borderWidth:1,borderColor:"#416C88",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:14,elevation:15},floatPanelMt:{zIndex:9999},floatHeader:{height:38,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#081A28",borderBottomWidth:1,borderBottomColor:"#234A63",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},floatHeadLeft:{flexDirection:"row",alignItems:"center",gap:8},floatBrandLine:{flexDirection:"row",alignItems:"center",gap:7},floatTitle:{color:"#F5FAFD",fontWeight:"900",fontSize:12,letterSpacing:.7},floatStatus:{color:"#56D48C",fontSize:8,fontWeight:"900"},iconBtn:{width:27,height:27,borderRadius:5,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},iconTextBtn:{height:27,paddingHorizontal:7,borderRadius:5,backgroundColor:"#214A70",flexDirection:"row",gap:3,alignItems:"center"},iconText:{color:"#fff",fontSize:8,fontWeight:"800"},selectorWrap:{marginHorizontal:6,marginTop:6,position:"relative",zIndex:130},selector:{height:38,paddingHorizontal:9,borderWidth:1,borderColor:"#31516B",borderRadius:5,backgroundColor:"#09151F",flexDirection:"row",alignItems:"center",justifyContent:"space-between"},selectorLeft:{flexDirection:"row",alignItems:"center",gap:4},selectorConfidence:{flexDirection:"row",alignItems:"center",gap:4,marginLeft:4},selectorValue:{color:"#F0F5F8",fontSize:11,fontWeight:"900"},selectorMeta:{color:"#B6C5D0",fontSize:9},roomDropdown:{position:"absolute",left:0,right:0,top:42,maxHeight:205,backgroundColor:"#0A1722",borderWidth:1,borderColor:"#345A76",borderRadius:6,zIndex:160,elevation:30,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:10},roomDropdownScroll:{height:205,maxHeight:205,overflow:"scroll"},roomDropdownContent:{paddingBottom:2},roomDropdownItem:{minHeight:42,paddingHorizontal:10,paddingVertical:5,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#183044"},roomDropdownItemActive:{backgroundColor:"#1B5B88"},roomDropdownLeft:{flex:1,minWidth:0,paddingRight:8},roomDropdownText:{color:"#EDF5FA",fontSize:10,fontWeight:"900"},roomDropdownDealer:{color:"#AFC1CD",fontSize:8,marginTop:2},roomDropdownMeta:{color:"#8EA7B9",fontSize:8,fontWeight:"800"},roomDropdownRight:{alignItems:"flex-end",justifyContent:"center",gap:3},roomConfidence:{flexDirection:"row",alignItems:"center",gap:5},roomConfidenceText:{fontSize:8,fontWeight:"900",textShadowRadius:7},assistPage:{padding:6,minHeight:150},decisionRow:{flexDirection:"row",gap:5},decisionBox:{flex:1,minHeight:68,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,padding:7},smallLabel:{color:"#FFFFFF",fontSize:12,fontWeight:"900"},latestLine:{flexDirection:"row",alignItems:"center",gap:7,marginTop:7},glowDot:{width:17,height:17,borderRadius:8.5,shadowOpacity:1,shadowRadius:10,elevation:8},latestText:{fontSize:16,fontWeight:"900"},detectText:{color:"#FFFFFF",fontSize:14,fontWeight:"900",marginTop:7},recommendText:{fontSize:17,fontWeight:"900",marginTop:7},microText:{color:"#FFFFFF",fontSize:12,fontWeight:"900",marginTop:4},todayPnlBox:{marginTop:5,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,paddingHorizontal:8,paddingVertical:6,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},todayPnlValue:{fontSize:16,fontWeight:"900"},aiBox:{marginTop:5,backgroundColor:"#0B1925",borderRadius:5,padding:7},aiTitle:{color:"#B7D3E6",fontSize:11,fontWeight:"900"},aiText:{color:"#C6D2DB",fontSize:11,lineHeight:17,marginTop:5},aiTextMobile:{fontSize:9.5,lineHeight:13,marginTop:3},moneyGrid:{flexDirection:"row",gap:5},fieldBox:{flex:1,backgroundColor:"#102335",borderRadius:5,padding:7,minHeight:58},moneyInput:{color:"#fff",fontSize:13,fontWeight:"900",padding:0,marginTop:5},nextAmount:{color:"#54D79A",fontSize:15,fontWeight:"900",marginTop:6},strategyScroll:{marginTop:6,maxHeight:30},strategyRow:{gap:4},strategyChip:{height:25,paddingHorizontal:8,borderRadius:4,backgroundColor:"#172B3B",justifyContent:"center"},strategyChipActive:{backgroundColor:"#2B78B5"},strategyChipText:{color:"#AABCC8",fontSize:7.5,fontWeight:"800"},progressBox:{marginTop:6,backgroundColor:"#0B1925",borderRadius:5,padding:7},progressText:{color:"#DDE9F0",fontSize:9,fontWeight:"800",marginTop:4},recommendHeader:{flexDirection:"row",alignItems:"center",justifyContent:"space-between"},martinResetMini:{paddingHorizontal:7,height:20,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetMiniText:{color:"#fff",fontSize:8,fontWeight:"900"},martinResetBtn:{marginTop:7,height:27,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetText:{color:"#fff",fontSize:9,fontWeight:"900"},betButtons:{flexDirection:"row",gap:5},betBtn:{flex:1,height:38,borderRadius:5,alignItems:"center",justifyContent:"center"},betBtnText:{color:"#fff",fontSize:12,fontWeight:"900"},statsGrid:{marginTop:6,backgroundColor:"#102335",borderRadius:5,padding:7,flexDirection:"row",justifyContent:"space-between"},statsValue:{color:"#fff",fontSize:11,fontWeight:"900",marginTop:3},recordBar:{marginTop:5,flexDirection:"row",justifyContent:"space-between",alignItems:"center"},resetText:{color:"#51BDF1",fontSize:8,fontWeight:"900"},historyRow:{gap:4,marginTop:5},historyChip:{backgroundColor:"#142A3B",borderRadius:4,paddingHorizontal:6,paddingVertical:4},pageDots:{height:19,flexDirection:"row",gap:7,alignItems:"center",justifyContent:"center"},pageDot:{width:6,height:6,borderRadius:3,backgroundColor:"#526574"},pageDotActive:{backgroundColor:"#fff"},
   recommendTitleConfidence:{flexDirection:"row",alignItems:"center",gap:5},
