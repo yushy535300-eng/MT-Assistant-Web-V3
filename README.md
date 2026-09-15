@@ -71,3 +71,6 @@ http://localhost:3000
 - Uses persistent seed marker `tz_whitelist_initial_seed_v2`, so this deployment imports the first batch once even if an older v8 marker exists.
 - After v9 seed completes, deleting/disabling accounts in `/admin` is persistent and does not require Render restart/redeploy.
 - Login order remains TZ credential verification in browser -> server whitelist authorization -> MTLI.
+
+## TZ 白名單資料庫（Render PostgreSQL）
+本版白名單已改為 PostgreSQL。Render 建立 PostgreSQL 後，把 Web Service 的 `DATABASE_URL` 設為該資料庫的 Internal Database URL（同區域優先），並設定 `TZ_WHITELIST_ENABLED=true`。第一次成功連線會自動建立白名單資料表並匯入第一批 98 個 TZ 帳號；之後新增、停用、刪除都直接寫入 PostgreSQL，不需要重新部署。
