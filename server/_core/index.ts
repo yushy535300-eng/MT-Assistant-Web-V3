@@ -39,15 +39,17 @@ async function startServer() {
     res.json({ok:true,configured});
   });
   app.post("/api/admin/login", (req,res)=>{
+    console.log(`[MT Admin] login request received configured=${String(process.env.ADMIN_PASSWORD ?? "").trim().length > 0}`);
     // Render env values can accidentally contain leading/trailing whitespace or CR/LF.
     // Normalize only the outer whitespace; the actual password contents remain case-sensitive.
     const expected=String(process.env.ADMIN_PASSWORD ?? "").trim();
     const supplied=String(req.body?.password ?? "").trim();
     res.setHeader("Cache-Control", "no-store");
-    if(!expected) return res.status(503).json({error:"Render 尚未設定 ADMIN_PASSWORD"});
-    if(!supplied) return res.status(400).json({error:"請輸入管理員密碼"});
-    if(supplied!==expected) return res.status(401).json({error:"管理員密碼錯誤，請確認 Render 的 ADMIN_PASSWORD"});
+    if(!expected) { console.warn("[MT Admin] login rejected: ADMIN_PASSWORD not configured"); return res.status(503).json({error:"Render 尚未設定 ADMIN_PASSWORD"}); }
+    if(!supplied) { console.warn("[MT Admin] login rejected: empty password"); return res.status(400).json({error:"請輸入管理員密碼"}); }
+    if(supplied!==expected) { console.warn("[MT Admin] login rejected: password mismatch"); return res.status(401).json({error:"管理員密碼錯誤，請確認 Render 的 ADMIN_PASSWORD"}); }
     const token=randomUUID(); adminSessions.add(token);
+    console.log("[MT Admin] login success");
     res.json({ok:true,token});
   });
   app.get("/api/admin/whitelist", requireAdmin, async (_req,res)=>{try{res.json({items:await listWhitelist()})}catch(e:any){res.status(500).json({error:e?.message||"讀取失敗"})}});
