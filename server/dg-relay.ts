@@ -69,6 +69,112 @@ function extractToken(gameUrl: string) {
   catch { return String(gameUrl || "").match(/[?&]token=([^&#]+)/i)?.[1] ? decodeURIComponent(String(gameUrl).match(/[?&]token=([^&#]+)/i)![1]) : ""; }
 }
 
+type DgLaunchInfo = {
+  launchUrl: string;
+  origin: string;
+  basePath: string;
+  token: string;
+  jsonType: number;
+};
+
+function cleanHtmlUrl(value: string) {
+  return String(value || "")
+    .replace(/&amp;/gi, "&")
+    .replace(/\\\//g, "/")
+    .trim();
+}
+
+function findNavigationUrl(html: string, base: URL, token: string) {
+  const patterns = [
+    /(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']/i,
+    /location\.(?:replace|assign)\(\s*["']([^"']+)["']\s*\)/i,
+    /<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["'][^"']*url=([^"'>]+)["']/i,
+    /["']([^"']*\/ddnewpc\/index\.html\?[^"']+)["']/i,
+    /["'](index\.html\?[^"']+)["']/i,
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (!m?.[1]) continue;
+    try {
+      const next = new URL(cleanHtmlUrl(m[1]), base);
+      if (next.protocol !== "https:") continue;
+      if (!next.searchParams.get("token") && token) next.searchParams.set("token", token);
+      return next;
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * Resolve the one-time DG direct1 URL the same way the vendor page does.
+ * We deliberately do not pin a historical DG host or a region. The final
+ * index.html query's `type` is the value the DG bundle itself uses to pick
+ * game_wss / game_wss_overseas / game_wss_* (verified from the captured JS).
+ */
+async function resolveDgLaunch(gameUrl: string): Promise<DgLaunchInfo> {
+  const original = new URL(gameUrl);
+  const token = original.searchParams.get("token") || extractToken(gameUrl);
+  if (!token) throw new Error("DG 授權網址缺少 token");
+  let current = new URL(original.toString());
+  const seen = new Set<string>();
+
+  for (let step = 0; step < 5; step++) {
+    if (seen.has(current.toString())) break;
+    seen.add(current.toString());
+    let response: Response;
+    try {
+      response = await fetch(current.toString(), {
+        redirect: "manual",
+        headers: {
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept-Language": "zh-TW,zh;q=0.9",
+          "Cache-Control": "no-cache",
+          Pragma: "no-cache",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+        },
+        signal: AbortSignal.timeout(7000),
+      });
+    } catch {
+      break;
+    }
+
+    const location = response.headers.get("location");
+    if (response.status >= 300 && response.status < 400 && location) {
+      try { current = new URL(location, current); continue; } catch { break; }
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (/text\/html/i.test(contentType)) {
+      try {
+        const html = await response.text();
+        const next = findNavigationUrl(html, current, token);
+        if (next && next.toString() !== current.toString()) { current = next; continue; }
+      } catch {}
+    }
+    break;
+  }
+
+  if (!current.searchParams.get("token")) current.searchParams.set("token", token);
+  const rawType = Number(current.searchParams.get("type"));
+  // This mirrors DG's bundle exactly: jsonType defaults to 0 and only accepts 0..5.
+  const jsonType = Number.isInteger(rawType) && rawType >= 0 && rawType <= 5 ? rawType : 0;
+  const match = current.pathname.match(/^(.*?\/ddnewpc)(?:\/|$)/i);
+  const basePath = match?.[1]?.replace(/\/$/, "") || "/ddnewpc";
+  return { launchUrl: current.toString(), origin: current.origin, basePath, token, jsonType };
+}
+
+function primaryWsForType(pc: any, jsonType: number) {
+  switch (jsonType) {
+    case 1: return pc?.game_wss_overseas;
+    case 2: return pc?.game_wss_my;
+    case 3: return pc?.game_wss_th;
+    case 4: return pc?.game_wss_vn;
+    case 5: return pc?.game_wss_tw;
+    case 0:
+    default: return pc?.game_wss;
+  }
+}
+
 function n(value: bigint | number | undefined | null) {
   if (typeof value === "bigint") return Number(value);
   const x = Number(value ?? 0);
@@ -288,6 +394,8 @@ export class DgRelay {
   private wsFailuresThisCycle = 0;
   private wsLastError = "";
   private gameBasePath = "/ddnewpc";
+  private launchUrl: string;
+  private jsonType = 0;
   private ws: RawWsClient | null = null;
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -299,7 +407,8 @@ export class DgRelay {
   private initialVideoRequested = new Set<number>();
   constructor(public readonly sessionId: string, public readonly gameUrl: string) {
     this.token = extractToken(gameUrl);
-    this.origin = (() => { try { return new URL(gameUrl).origin; } catch { return "https://new-dd-cn.dingdangmail.com"; } })();
+    this.launchUrl = gameUrl;
+    this.origin = (() => { try { return new URL(gameUrl).origin; } catch { return ""; } })();
     try {
       const u = new URL(gameUrl);
       const m = u.pathname.match(/^(.*?\/ddnewpc)(?:\/|$)/i);
@@ -308,41 +417,70 @@ export class DgRelay {
     if (!this.token) throw new Error("DG 授權網址缺少 token");
   }
   async start() {
+    // Resolve direct1 -> the actual DG index page first. This is important:
+    // the index query's `type` is what the vendor bundle uses to select its
+    // regional WebSocket. Hard-coding TW/overseas produces the wrong endpoint.
     try {
-      const cfg = await fetch(`${this.origin}${this.gameBasePath}/game_settings.json?v=${Date.now()}`, { headers: { Accept: "application/json", Referer: this.gameUrl, "User-Agent": "Mozilla/5.0 Chrome/135 Safari/537.36" }, signal: AbortSignal.timeout(7000) });
-      if (cfg.ok) {
-        const json: any = await cfg.json();
-        const pc = json?.pc_h5 || {};
-        const rawCandidates = [
-          // Follow the same regional preference as the real DG browser session first.
-          // If the Taiwan edge is unavailable, rotate through DG's advertised backup lines.
-          process.env.DG_WS_URL,
-          pc.game_wss_tw,
-          pc.game_wss_line2, pc.game_wss_line3, pc.game_wss_line4,
-          pc.game_wss, pc.game_wss_cn, pc.game_wss_overseas,
-          DEFAULT_DG_WS,
-        ].map((v:any)=>String(v||"").trim()).filter(Boolean);
-        const validated: string[] = [];
-        for (const candidate of rawCandidates) {
-          try {
-            const parsed = new URL(candidate);
-            const allowed = parsed.protocol === "wss:" && /(?:^|\.)(?:kindlestone\.com|taxyss\.com|ywjxi\.com)$/i.test(parsed.hostname);
-            const normalized = candidate.replace(/\/$/, "");
-            if (allowed && !validated.includes(normalized)) validated.push(normalized);
-          } catch {}
-        }
-        this.wsCandidates = validated.length ? validated : [DEFAULT_DG_WS];
-        this.wsCandidateIndex = 0;
-        this.wsFailuresThisCycle = 0;
-        this.wsLastError = "";
-        this.wsUrl = this.wsCandidates[0]!;
+      const launch = await resolveDgLaunch(this.gameUrl);
+      this.launchUrl = launch.launchUrl;
+      this.origin = launch.origin;
+      this.gameBasePath = launch.basePath;
+      this.token = launch.token;
+      this.jsonType = launch.jsonType;
+      this.event(`DG 啟動頁已確認：type=${this.jsonType}｜${new URL(this.launchUrl).hostname}`);
+    } catch (error: any) {
+      this.event(`DG 啟動頁解析未完成，依原始網址與 type=0 規則繼續：${error?.message || "unknown"}`);
+      this.jsonType = 0;
+    }
+
+    try {
+      const cfg = await fetch(`${this.origin}${this.gameBasePath}/game_settings.json?v=${Date.now()}`, {
+        headers: {
+          Accept: "application/json, text/plain, */*",
+          Referer: this.launchUrl,
+          "Accept-Language": "zh-TW,zh;q=0.9",
+          "Cache-Control": "no-cache",
+          Pragma: "no-cache",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+        },
+        signal: AbortSignal.timeout(7000),
+      });
+      if (!cfg.ok) throw new Error(`game_settings ${cfg.status}`);
+      const json: any = await cfg.json();
+      const pc = json?.pc_h5 || {};
+      const primary = primaryWsForType(pc, this.jsonType);
+      const rawCandidates = [
+        process.env.DG_WS_URL,
+        primary,
+        pc.game_wss_line2,
+        pc.game_wss_line3,
+        pc.game_wss_line4,
+      ].map((v:any)=>String(v||"").trim()).filter(Boolean);
+      const validated: string[] = [];
+      for (const candidate of rawCandidates) {
+        try {
+          const parsed = new URL(candidate);
+          const allowed = parsed.protocol === "wss:" && /(?:^|\.)(?:kindlestone\.com|taxyss\.com|ywjxi\.com)$/i.test(parsed.hostname);
+          const normalized = candidate.replace(/\/$/, "");
+          if (allowed && !validated.includes(normalized)) validated.push(normalized);
+        } catch {}
       }
-    } catch {
+      if (!validated.length) throw new Error(`DG type=${this.jsonType} 沒有可用 WSS`);
+      this.wsCandidates = validated;
+      this.wsCandidateIndex = 0;
+      this.wsFailuresThisCycle = 0;
+      this.wsLastError = "";
+      this.wsUrl = this.wsCandidates[0]!;
+      this.event(`DG WSS 已確認：type=${this.jsonType} → ${new URL(this.wsUrl).hostname}`);
+    } catch (error: any) {
+      // Use the known TW endpoint only as a final transport fallback. Do not
+      // pretend it is the vendor-selected region when settings could not load.
       this.wsCandidates = [DEFAULT_DG_WS];
       this.wsCandidateIndex = 0;
       this.wsFailuresThisCycle = 0;
       this.wsLastError = "";
       this.wsUrl = DEFAULT_DG_WS;
+      this.event(`DG 設定讀取失敗，使用最後備援：${error?.message || "unknown"}`);
     }
     this.open();
   }

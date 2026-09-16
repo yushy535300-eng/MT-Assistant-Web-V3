@@ -130,7 +130,9 @@ function normalizeTable(raw: any, previous: DgTableData | undefined, gameUrl: st
   const gameId = numberOf(raw?.gameId);
   const isExisting = !!previous;
   if (!isExisting) {
-    if (gameId !== 1 || !/^BAC\d+/i.test(fms)) return null;
+    // DG's baccarat lobby contains both BAC*** and TID*** display codes.
+    // gameId=1 is the authoritative baccarat discriminator in PublicBean.Table.
+    if (gameId !== 1 || !fms) return null;
   }
   const roads = Array.isArray(raw?.roads) && raw.roads.length ? raw.roads : undefined;
   const results = roads ? parseRoads(roads) : (previous?.results ?? []);
@@ -354,26 +356,164 @@ async function connectDgBrowserDirect(gameUrl: string, callbacks: DgCallbacks): 
 }
 
 
+function base64ToBytes(base64: string) {
+  const binary = atob(String(base64 || ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i) & 0xff;
+  return bytes;
+}
+
+/**
+ * Android app path: let the real DG page own the WebSocket inside a hidden
+ * native WebView. That preserves DG's actual Origin, direct1 -> index redirect,
+ * regional type selection, sign generation and command bootstrap. The native
+ * wrapper only mirrors the already-received protobuf frames back here.
+ */
+async function connectDgNativeWebView(gameUrl: string, callbacks: DgCallbacks): Promise<DgController | null> {
+  if (typeof window === "undefined") return null;
+  const w = window as any;
+  const native = w.NativeBridge;
+  if (!native || typeof native.startDg !== "function" || typeof native.stopDg !== "function") return null;
+
+  callbacks.onStatus?.("loading", "正在啟動 DG 原生連線");
+  await ensureVendor();
+  const protobuf = w.protobuf;
+  const protoText = await fetch("/dg-vendor/PublicBeanProto.proto", { cache: "no-store" }).then(r => {
+    if (!r.ok) throw new Error("DG Protobuf 定義載入失敗");
+    return r.text();
+  });
+  const PublicBean = protobuf.parse(protoText).root.lookupType("PublicBean");
+  const map = new Map<number, DgTableData>();
+  let closed = false;
+  let connected = false;
+  let lastEmitAt = 0;
+
+  const emit = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastEmitAt < 45) return;
+    lastEmitAt = now;
+    callbacks.onTables(sortDgTables(Array.from(map.values())));
+  };
+
+  const handlePacket = (decoded: any) => {
+    const cmd = numberOf(decoded?.cmd);
+    if (cmd === 10086) {
+      const code = numberOf(decoded?.codeId);
+      if (code === 0) {
+        if (!connected) callbacks.onEvent?.("DG 原生驗證完成，正在同步真人桌");
+        connected = true;
+        callbacks.onStatus?.("connected", "DG 已連線");
+      } else {
+        callbacks.onStatus?.("error", `DG 驗證失敗 (${code})`);
+      }
+    }
+
+    if (cmd === 1004 && decoded?.tableId && Array.isArray(decoded?.list) && decoded.list.length) {
+      const id = numberOf(decoded.tableId);
+      const previous = map.get(id);
+      if (previous) {
+        const next = normalizeTable({ tableId: id, roads: decoded.list }, previous, gameUrl);
+        if (next) { map.set(id, next); emit(true); }
+      }
+    }
+
+    if (cmd === 29 && decoded?.tableId && typeof decoded?.object === "string" && /^https?:\/\//i.test(decoded.object)) {
+      const id = numberOf(decoded.tableId);
+      const previous = map.get(id);
+      if (previous) { map.set(id, { ...previous, streamUrl: decoded.object, lastUpdated: Date.now() }); emit(true); }
+    }
+
+    const incoming = Array.isArray(decoded?.table) ? decoded.table : [];
+    if (incoming.length) {
+      let changed = false;
+      for (const raw of incoming) {
+        const id = numberOf(raw?.tableId);
+        if (!id) continue;
+        const previous = map.get(id);
+        const next = normalizeTable(raw, previous, gameUrl);
+        if (!next) continue;
+        map.set(id, next);
+        changed = true;
+      }
+      if (changed) emit(cmd === 2 || cmd === 44);
+    }
+  };
+
+  const previousPacket = w.__MT_DG_NATIVE_PACKET;
+  const previousState = w.__MT_DG_NATIVE_STATE;
+
+  const packetHandler = (base64: string) => {
+    if (closed) return;
+    try {
+      const bytes = base64ToBytes(base64);
+      const decoded = PublicBean.toObject(PublicBean.decode(bytes), { longs: Number, enums: String, defaults: false, arrays: true, objects: true });
+      handlePacket(decoded);
+    } catch (error: any) {
+      callbacks.onEvent?.(`DG 原生封包解析略過：${error?.message || "unknown"}`);
+    }
+  };
+  const stateHandler = (state: string, detail: string) => {
+    if (closed) return;
+    switch (String(state || "")) {
+      case "page": callbacks.onStatus?.("loading", "DG 原生頁面載入中..."); break;
+      case "inject":
+      case "hook": callbacks.onStatus?.("connecting", "DG 原生通訊已載入"); break;
+      case "socket_create": callbacks.onStatus?.("connecting", "DG 原生 WebSocket 連線中..."); break;
+      case "open": callbacks.onStatus?.("connecting", "DG WebSocket 已建立，正在驗證"); break;
+      case "close": if (!connected) callbacks.onStatus?.("error", `DG 原生連線關閉 ${detail || ""}`.trim()); break;
+      case "error": callbacks.onStatus?.("error", "DG 原生 WebSocket 連線錯誤"); break;
+      case "page_error": callbacks.onStatus?.("error", `DG 原生頁面錯誤：${detail || "unknown"}`); break;
+      case "inject_error": callbacks.onEvent?.(`DG 注入失敗：${detail || "unknown"}`); break;
+    }
+  };
+
+  w.__MT_DG_NATIVE_PACKET = packetHandler;
+  w.__MT_DG_NATIVE_STATE = stateHandler;
+  try {
+    native.startDg(gameUrl);
+  } catch (error: any) {
+    if (w.__MT_DG_NATIVE_PACKET === packetHandler) w.__MT_DG_NATIVE_PACKET = previousPacket;
+    if (w.__MT_DG_NATIVE_STATE === stateHandler) w.__MT_DG_NATIVE_STATE = previousState;
+    throw new Error(error?.message || "DG 原生 WebView 啟動失敗");
+  }
+
+  return {
+    close: () => {
+      if (closed) return;
+      closed = true;
+      try { native.stopDg(); } catch {}
+      if (w.__MT_DG_NATIVE_PACKET === packetHandler) w.__MT_DG_NATIVE_PACKET = previousPacket;
+      if (w.__MT_DG_NATIVE_STATE === stateHandler) w.__MT_DG_NATIVE_STATE = previousState;
+      callbacks.onStatus?.("closed", "DG 已停止");
+    },
+  };
+}
+
+
 function jsonOf<T>(event: MessageEvent, fallback: T): T {
   try { return JSON.parse(String(event.data ?? "")) as T; } catch { return fallback; }
 }
 
 /**
- * Prefer the Node relay because it can preserve DG's vendor Origin header.
- * If the cloud relay cannot reach DG (common 5xx / data-center edge filtering),
- * automatically fall back to a browser-local WebSocket using the user's own network.
+ * Connection order:
+ * 1) Android wrapper: real DG page in a hidden native WebView (preferred).
+ * 2) Normal browser: server relay using the dynamically resolved DG launch URL.
+ *
+ * We intentionally no longer fall back to browser-direct WebSocket. A normal
+ * browser cannot override the WebSocket Origin header, so that path can look
+ * like an endless "connecting" state even though DG rejects it.
  */
 export async function connectDgLive(gameUrl: string, sessionId: string, callbacks: DgCallbacks): Promise<DgController> {
-  if (typeof window === "undefined" || typeof EventSource === "undefined") throw new Error("DG 即時連線目前僅支援網站版");
+  if (typeof window === "undefined" || typeof EventSource === "undefined") throw new Error("DG 即時連線目前僅支援網站/App版");
   if (!sessionId) throw new Error("登入工作階段已失效");
+
+  const nativeController = await connectDgNativeWebView(gameUrl, callbacks);
+  if (nativeController) return nativeController;
 
   let closed = false;
   let source: EventSource | null = null;
-  let direct: DgController | null = null;
-  let fallbackStarted = false;
   let watchdog: ReturnType<typeof setTimeout> | null = null;
   let connected = false;
-  let sseErrors = 0;
 
   const stopRelay = () => {
     try { source?.close(); } catch {}
@@ -386,86 +526,62 @@ export async function connectDgLive(gameUrl: string, sessionId: string, callback
     }).catch(() => undefined);
   };
 
-  const startBrowserFallback = async (reason: string) => {
-    if (closed || fallbackStarted || connected) return;
-    fallbackStarted = true;
-    if (watchdog) clearTimeout(watchdog);
-    stopRelay();
-    callbacks.onEvent?.(`DG 雲端中繼無法完成連線，切換本機直連：${reason}`);
-    callbacks.onStatus?.("connecting", "DG 雲端線路不可用，切換本機直連...");
-    try {
-      direct = await connectDgBrowserDirect(gameUrl, {
-        ...callbacks,
-        onStatus: (status, message) => {
-          if (status === "connected") connected = true;
-          callbacks.onStatus?.(status, message);
-        },
-      });
-    } catch (error: any) {
-      callbacks.onStatus?.("error", error?.message || "DG 本機直連啟動失敗");
-    }
-  };
-
-  callbacks.onStatus?.("loading", "正在準備 DG 即時連線");
-  try {
-    const start = await fetch("/api/dg/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ sessionId, gameUrl }),
-    });
-    let startData: any = null; try { startData = await start.json(); } catch {}
-    if (!start.ok || !startData?.ok) {
-      await startBrowserFallback(String(startData?.error || `relay_start_${start.status}`));
-    } else if (!fallbackStarted) {
-      source = new EventSource(`/api/dg/stream?sessionId=${encodeURIComponent(sessionId)}`);
-      callbacks.onStatus?.("connecting", "DG 連線中...");
-
-      source.addEventListener("status", (raw: Event) => {
-        if (closed || fallbackStarted) return;
-        const data = jsonOf<{status?:DgStatus;message?:string}>(raw as MessageEvent, {});
-        const status = data.status || "connecting";
-        const message = data.message || "DG 連線中...";
-        if (status === "connected") {
-          connected = true;
-          if (watchdog) clearTimeout(watchdog);
-        }
-        callbacks.onStatus?.(status, message);
-        if (status === "error" && /所有線路握手失敗|HTTP\/1\.[01]\s+(?:502|503|504)|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH/i.test(message)) {
-          void startBrowserFallback(message);
-        }
-      });
-      source.addEventListener("tables", (raw: Event) => {
-        if (closed || fallbackStarted) return;
-        const next = jsonOf<DgTableData[]>(raw as MessageEvent, []);
-        if (Array.isArray(next)) callbacks.onTables(next);
-      });
-      source.addEventListener("event", (raw: Event) => {
-        if (closed || fallbackStarted) return;
-        const data = jsonOf<{message?:string}>(raw as MessageEvent, {});
-        if (data.message) callbacks.onEvent?.(data.message);
-      });
-      source.onerror = () => {
-        if (closed || fallbackStarted || connected) return;
-        sseErrors += 1;
-        callbacks.onStatus?.("connecting", "DG 即時通道重連中...");
-        if (sseErrors >= 3) void startBrowserFallback("SSE relay unavailable");
-      };
-      watchdog = setTimeout(() => {
-        if (!closed && !connected && !fallbackStarted) void startBrowserFallback("雲端中繼連線逾時");
-      }, 18000);
-    }
-  } catch (error: any) {
-    await startBrowserFallback(error?.message || "relay fetch failed");
+  callbacks.onStatus?.("loading", "正在確認 DG 啟動網址");
+  const start = await fetch("/api/dg/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ sessionId, gameUrl }),
+  });
+  let startData: any = null; try { startData = await start.json(); } catch {}
+  if (!start.ok || !startData?.ok) {
+    const message = String(startData?.error || `DG relay 啟動失敗 (${start.status})`);
+    callbacks.onStatus?.("error", message);
+    throw new Error(message);
   }
+
+  source = new EventSource(`/api/dg/stream?sessionId=${encodeURIComponent(sessionId)}`);
+  callbacks.onStatus?.("connecting", "DG 連線中...");
+
+  source.addEventListener("status", (raw: Event) => {
+    if (closed) return;
+    const data = jsonOf<{status?:DgStatus;message?:string}>(raw as MessageEvent, {});
+    const status = data.status || "connecting";
+    const message = data.message || "DG 連線中...";
+    if (status === "connected") {
+      connected = true;
+      if (watchdog) clearTimeout(watchdog);
+    }
+    callbacks.onStatus?.(status, message);
+  });
+  source.addEventListener("tables", (raw: Event) => {
+    if (closed) return;
+    const next = jsonOf<DgTableData[]>(raw as MessageEvent, []);
+    if (Array.isArray(next)) callbacks.onTables(next);
+  });
+  source.addEventListener("event", (raw: Event) => {
+    if (closed) return;
+    const data = jsonOf<{message?:string}>(raw as MessageEvent, {});
+    if (data.message) callbacks.onEvent?.(data.message);
+  });
+  source.onerror = () => {
+    if (closed || connected) return;
+    callbacks.onStatus?.("error", "DG 即時通道中斷");
+  };
+  watchdog = setTimeout(() => {
+    if (!closed && !connected) {
+      callbacks.onStatus?.("error", "DG WebSocket 握手逾時");
+      callbacks.onEvent?.("DG 雲端中繼逾時；App 版會改走原生 WebView，純瀏覽器不再使用無效的 Origin 直連。");
+      stopRelay();
+    }
+  }, 20000);
 
   return {
     close: () => {
       if (closed) return;
       closed = true;
       if (watchdog) clearTimeout(watchdog);
-      try { direct?.close(); } catch {}
-      direct = null;
       stopRelay();
     },
   };
 }
+
