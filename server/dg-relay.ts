@@ -222,7 +222,7 @@ class RawWsClient {
       const req = [
         `GET ${path} HTTP/1.1`, `Host: ${host}${port === 443 ? "" : `:${port}`}`, "Upgrade: websocket", "Connection: Upgrade",
         `Sec-WebSocket-Key: ${key}`, "Sec-WebSocket-Version: 13", `Origin: ${this.origin}`,
-        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/135 Safari/537.36", "Pragma: no-cache", "Cache-Control: no-cache", "", ""
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/135 Safari/537.36", "Accept-Language: zh-TW,zh;q=0.9", "Pragma: no-cache", "Cache-Control: no-cache", "", ""
       ].join("\r\n");
       sock.write(req);
     });
@@ -279,6 +279,8 @@ export class DgRelay {
   private token: string;
   private origin: string;
   private wsUrl = DEFAULT_DG_WS;
+  private wsCandidates: string[] = [DEFAULT_DG_WS];
+  private wsCandidateIndex = 0;
   private gameBasePath = "/ddnewpc";
   private ws: RawWsClient | null = null;
   private stopped = false;
@@ -304,14 +306,32 @@ export class DgRelay {
       const cfg = await fetch(`${this.origin}${this.gameBasePath}/game_settings.json?v=${Date.now()}`, { headers: { Accept: "application/json", Referer: this.gameUrl, "User-Agent": "Mozilla/5.0 Chrome/135 Safari/537.36" }, signal: AbortSignal.timeout(7000) });
       if (cfg.ok) {
         const json: any = await cfg.json();
-        const candidate = String(json?.pc_h5?.game_wss_tw || json?.pc_h5?.game_wss || DEFAULT_DG_WS);
-        try {
-          const parsed = new URL(candidate);
-          const allowed = parsed.protocol === "wss:" && /(?:^|\.)(?:kindlestone\.com|taxyss\.com|ywjxi\.com)$/i.test(parsed.hostname);
-          this.wsUrl = allowed ? candidate : DEFAULT_DG_WS;
-        } catch { this.wsUrl = DEFAULT_DG_WS; }
+        const pc = json?.pc_h5 || {};
+        const rawCandidates = [
+          // Render/雲端機房連台灣專線有時會被上游 503，先嘗試通用/海外線，再回退台灣線與備援線。
+          process.env.DG_WS_URL,
+          pc.game_wss_overseas, pc.game_wss, pc.game_wss_cn,
+          pc.game_wss_tw, pc.game_wss_line2, pc.game_wss_line3, pc.game_wss_line4,
+          DEFAULT_DG_WS,
+        ].map((v:any)=>String(v||"").trim()).filter(Boolean);
+        const validated: string[] = [];
+        for (const candidate of rawCandidates) {
+          try {
+            const parsed = new URL(candidate);
+            const allowed = parsed.protocol === "wss:" && /(?:^|\.)(?:kindlestone\.com|taxyss\.com|ywjxi\.com)$/i.test(parsed.hostname);
+            const normalized = candidate.replace(/\/$/, "");
+            if (allowed && !validated.includes(normalized)) validated.push(normalized);
+          } catch {}
+        }
+        this.wsCandidates = validated.length ? validated : [DEFAULT_DG_WS];
+        this.wsCandidateIndex = 0;
+        this.wsUrl = this.wsCandidates[0]!;
       }
-    } catch { this.wsUrl = DEFAULT_DG_WS; }
+    } catch {
+      this.wsCandidates = [DEFAULT_DG_WS];
+      this.wsCandidateIndex = 0;
+      this.wsUrl = DEFAULT_DG_WS;
+    }
     this.open();
   }
   subscribe(client: SseClient) {
@@ -330,7 +350,8 @@ export class DgRelay {
   private send(cmd: number, extra: Parameters<typeof encodePublicBean>[2] = {}) { this.ws?.sendBinary(encodePublicBean(cmd, this.authToken(cmd), extra)); }
   private open() {
     if (this.stopped) return;
-    this.setStatus("connecting", "DG 連線中...");
+    let endpointName = this.wsUrl; try { endpointName = new URL(this.wsUrl).hostname; } catch {}
+    this.setStatus("connecting", `連線中 ${endpointName}...`);
     const sign = encrypt3Des(this.token);
     const url = `${this.wsUrl.replace(/\/$/, "")}/?sign=${encodeURIComponent(sign)}`;
     this.ws = new RawWsClient(url, this.origin, data => this.handle(data), () => {
@@ -338,8 +359,18 @@ export class DgRelay {
       this.send(10086, { tableId: 1, type: 0, object: "PC" });
     }, why => {
       if (this.stopped) return;
-      this.setStatus("error", `DG 已中斷，準備重連${why && why !== "closed" ? `：${why}` : ""}`);
       if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
+      const canFailover = /(?:HTTP\/1\.[01]\s+(?:502|503|504)|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|連線逾時)/i.test(String(why || ""));
+      if (canFailover && this.wsCandidates.length > 1) {
+        this.wsCandidateIndex = (this.wsCandidateIndex + 1) % this.wsCandidates.length;
+        this.wsUrl = this.wsCandidates[this.wsCandidateIndex]!;
+        let host = this.wsUrl; try { host = new URL(this.wsUrl).hostname; } catch {}
+        this.setStatus("connecting", `DG 主線暫時不可用，切換備援 ${host}...`);
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = setTimeout(() => this.open(), 700);
+        return;
+      }
+      this.setStatus("error", `已中斷，準備重連${why && why !== "closed" ? `：${why}` : ""}`);
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
       this.reconnectTimer = setTimeout(() => this.open(), 2500);
     });
