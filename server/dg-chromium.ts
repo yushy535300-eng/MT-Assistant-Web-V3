@@ -3,10 +3,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 
+const DG_VIEW_WIDTH = 1280;
+const DG_VIEW_HEIGHT = 720;
 const NORMAL_CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
 const DG_HOST_RE = /(?:^|\.)(?:kindlestone\.com|taxyss\.com|ywjxi\.com|20299999\.com|dingdangmail\.com)$/i;
 
-export type DgChromiumTransport = { stop: () => void };
+export type DgBrowserInput =
+  | { kind: 'pointer'; action: 'down' | 'up' | 'move' | 'wheel'; x: number; y: number; button?: 'left' | 'middle' | 'right' | 'none'; deltaX?: number; deltaY?: number; clickCount?: number; buttons?: number }
+  | { kind: 'key'; action: 'down' | 'up' | 'text'; key?: string; code?: string; text?: string };
+
+export type DgChromiumTransport = {
+  stop: () => void;
+  subscribeView: (listener: (frame: Buffer) => void) => () => void;
+  dispatchInput: (input: DgBrowserInput) => Promise<void>;
+  viewport: { width: number; height: number };
+};
 export type DgChromiumHooks = {
   sessionId: string;
   gameUrl: string;
@@ -162,7 +173,7 @@ async function launchChrome(executable: string, sessionId: string, onLog: (messa
     '--remote-debugging-port=0',
     `--user-data-dir=${profile}`,
     `--user-agent=${NORMAL_CHROME_UA}`,
-    '--window-size=1280,720',
+    `--window-size=${DG_VIEW_WIDTH},${DG_VIEW_HEIGHT}`,
     'about:blank',
   ];
 
@@ -224,6 +235,8 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
   const requests = new Map<string, RequestMeta>();
   let watchdog: ReturnType<typeof setTimeout> | null = null;
   let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  let latestViewFrame: Buffer | null = null;
+  const viewListeners = new Set<(frame: Buffer) => void>();
 
   const diag = (message: string) => {
     if (diagCount >= 180) return;
@@ -236,7 +249,9 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
     stopped = true;
     if (watchdog) clearTimeout(watchdog);
     if (snapshotTimer) clearTimeout(snapshotTimer);
+    try { void cdp.send('Page.stopScreencast', {}, pageSessionId, 1500).catch(() => {}); } catch {}
     try { cdp.close(); } catch {}
+    viewListeners.clear();
     try { launched.child.kill('SIGTERM'); } catch {}
     setTimeout(() => { try { if (!launched.child.killed) launched.child.kill('SIGKILL'); } catch {} }, 1200).unref?.();
     try { fs.rmSync(launched.profile, { recursive: true, force: true }); } catch {}
@@ -283,6 +298,18 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
   cdp.onEvent((message) => {
     if (stopped || message.sessionId !== pageSessionId) return;
     const p = message.params || {};
+
+    if (message.method === 'Page.screencastFrame') {
+      try {
+        const frame = Buffer.from(String(p.data || ''), 'base64');
+        if (frame.length) {
+          latestViewFrame = frame;
+          for (const listener of viewListeners) { try { listener(frame); } catch {} }
+        }
+      } catch {}
+      void cdp.send('Page.screencastFrameAck', { sessionId: p.sessionId }, pageSessionId, 1500).catch(() => {});
+      return;
+    }
 
     if (message.method === 'Page.frameNavigated') {
       const frame = p.frame || {};
@@ -426,6 +453,14 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
   await cdp.send('Network.setCacheDisabled', { cacheDisabled: true }, pageSessionId).catch(() => {});
   await cdp.send('Network.setUserAgentOverride', { userAgent: NORMAL_CHROME_UA, acceptLanguage: 'zh-TW,zh;q=0.9', platform: 'Windows' }, pageSessionId);
 
+  await cdp.send('Page.startScreencast', {
+    format: 'jpeg',
+    quality: 68,
+    maxWidth: DG_VIEW_WIDTH,
+    maxHeight: DG_VIEW_HEIGHT,
+    everyNthFrame: 1,
+  }, pageSessionId).catch(error => hooks.onLog(`Chromium 畫面串流啟動失敗：${safeText((error as Error)?.message || error)}`));
+
   // Diagnostic build intentionally DOES NOT block images/fonts/video.
   // We want the DG page to initialize exactly like a normal Chrome tab first.
   diag('資源阻擋已關閉：本版讓 DG 頁面完整載入，避免初始化流程因資源被擋而中斷');
@@ -448,5 +483,36 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
     hooks.onFailure?.(`Chromium 意外結束 (code=${code}, signal=${signal})`);
   });
 
-  return { stop };
+  const subscribeView = (listener: (frame: Buffer) => void) => {
+    viewListeners.add(listener);
+    if (latestViewFrame) { try { listener(latestViewFrame); } catch {} }
+    return () => viewListeners.delete(listener);
+  };
+
+  const dispatchInput = async (input: DgBrowserInput) => {
+    if (stopped) throw new Error('DG Chromium 已停止');
+    if (input.kind === 'pointer') {
+      const x = Math.max(0, Math.min(DG_VIEW_WIDTH - 1, Number(input.x) || 0));
+      const y = Math.max(0, Math.min(DG_VIEW_HEIGHT - 1, Number(input.y) || 0));
+      if (input.action === 'wheel') {
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: Number(input.deltaX) || 0, deltaY: Number(input.deltaY) || 0, modifiers: 0, pointerType: 'mouse' }, pageSessionId, 3000);
+        return;
+      }
+      const type = input.action === 'down' ? 'mousePressed' : input.action === 'up' ? 'mouseReleased' : 'mouseMoved';
+      const button = input.button || (input.action === 'move' ? 'none' : 'left');
+      await cdp.send('Input.dispatchMouseEvent', { type, x, y, button, buttons: Math.max(0, Number(input.buttons) || (button === 'left' && input.action !== 'up' ? 1 : 0)), clickCount: Math.max(1, Number(input.clickCount) || 1), modifiers: 0, pointerType: 'mouse' }, pageSessionId, 3000);
+      return;
+    }
+    if (input.action === 'text') {
+      const text = String(input.text || '').slice(0, 200);
+      if (text) await cdp.send('Input.insertText', { text }, pageSessionId, 3000);
+      return;
+    }
+    const type = input.action === 'down' ? 'keyDown' : 'keyUp';
+    const key = String(input.key || '').slice(0, 64);
+    const code = String(input.code || '').slice(0, 64);
+    await cdp.send('Input.dispatchKeyEvent', { type, key, code, text: type === 'keyDown' && key.length === 1 ? key : undefined }, pageSessionId, 3000);
+  };
+
+  return { stop, subscribeView, dispatchInput, viewport: { width: DG_VIEW_WIDTH, height: DG_VIEW_HEIGHT } };
 }

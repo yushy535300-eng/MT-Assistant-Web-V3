@@ -51,6 +51,38 @@ type BetSide = "莊" | "閒" | "和";
 type BetRecord = { side: BetSide; result: Result; amount: number; pnl: number; at: number };
 type PendingBet = { tableId: string; side: BetSide; amount: number; resultKey?: string } | null;
 
+
+function DgSameSessionView({sessionId}:{sessionId:string}){
+  if(Platform.OS!=="web")return <View style={{flex:1,alignItems:"center",justifyContent:"center",backgroundColor:"#000"}}><Text style={{color:"#fff"}}>DG 同工作階段畫面目前僅支援 Web。</Text></View>;
+  const postInput=(input:any)=>{void fetch("/api/dg/browser-input",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId,input}),keepalive:true}).catch(()=>{})};
+  const point=(e:any)=>{
+    const el=e.currentTarget as HTMLElement;
+    const r=el.getBoundingClientRect();
+    const targetAR=1280/720, boxAR=r.width/Math.max(1,r.height);
+    let left=0,top=0,w=r.width,h=r.height;
+    if(boxAR>targetAR){w=r.height*targetAR;left=(r.width-w)/2}else{h=r.width/targetAR;top=(r.height-h)/2}
+    const x=Math.max(0,Math.min(1279,((e.clientX-r.left-left)/Math.max(1,w))*1280));
+    const y=Math.max(0,Math.min(719,((e.clientY-r.top-top)/Math.max(1,h))*720));
+    return {x,y};
+  };
+  const button=(e:any)=>e.button===2?"right":e.button===1?"middle":"left";
+  const src=`/api/dg/browser-view?sessionId=${encodeURIComponent(sessionId)}&v=1`;
+  return createElement("div",{
+    tabIndex:0,
+    onContextMenu:(e:any)=>e.preventDefault(),
+    onPointerDown:(e:any)=>{e.currentTarget.focus?.();const p=point(e);postInput({kind:"pointer",action:"down",...p,button:button(e),buttons:e.buttons,clickCount:1});},
+    onPointerUp:(e:any)=>{const p=point(e);postInput({kind:"pointer",action:"up",...p,button:button(e),buttons:0,clickCount:1});},
+    onPointerMove:(e:any)=>{if(!e.buttons)return;const p=point(e);postInput({kind:"pointer",action:"move",...p,button:"none",buttons:e.buttons,clickCount:1});},
+    onWheel:(e:any)=>{e.preventDefault();const p=point(e);postInput({kind:"pointer",action:"wheel",...p,deltaX:e.deltaX,deltaY:e.deltaY});},
+    onKeyDown:(e:any)=>{if(e.key&&e.key.length===1)postInput({kind:"key",action:"text",text:e.key});else postInput({kind:"key",action:"down",key:e.key,code:e.code});},
+    onKeyUp:(e:any)=>{if(!(e.key&&e.key.length===1))postInput({kind:"key",action:"up",key:e.key,code:e.code});},
+    style:{width:"100%",height:"100%",background:"#000",display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",outline:"none",touchAction:"none",userSelect:"none",position:"relative"}
+  },
+    createElement("img",{src,draggable:false,alt:"DG same session",style:{width:"100%",height:"100%",objectFit:"contain",display:"block",pointerEvents:"none",background:"#000"}}),
+    createElement("div",{style:{position:"absolute",left:8,bottom:8,padding:"5px 8px",borderRadius:6,background:"rgba(0,0,0,.58)",color:"#d6b36a",fontSize:11,fontWeight:700,pointerEvents:"none"}},"DG SAME SESSION · 連線不中斷")
+  );
+}
+
 const baccaratTableIds = ["BAG01","BAG02","BAG03","BAG03A","BAG05","BAG06","BAG07","BAG08","BAG09","BAG10","BAG11","BAG12","BAG13","BAG13A","BAG15"];
 const dealerStreamUrls: Record<string,string> = {
   BAG01: "https://pull.bighit888.com/livestream/bag01-1.flv",
@@ -2279,8 +2311,13 @@ export default function HomeScreen(){
   };
   const openCurrentPlatform=(table?:TableData)=>{
     if(table)setAssistTableId(table.apiId??table.id);
-    const url=activePlatform==="DG"?dgGameUrl:(mtUrl.trim()||token.trim());
-    if(!url){notify(`尚未取得 ${activePlatform} 平台授權`);return;}
+    if(activePlatform==="DG"){
+      if(!dgGameUrl||!dgConnected){notify("DG 尚未完成連線，請稍候");return;}
+      setMtOpen(true);
+      return;
+    }
+    const url=mtUrl.trim()||token.trim();
+    if(!url){notify("尚未取得 MT 平台授權");return;}
     setMtOpen(true);
   };
   const action=(kind:string,table:TableData)=>{if(kind==="平台")openCurrentPlatform(table);else if(kind==="分析")setAnalysisTable(table);else notify(`已關注百家樂 ${table.id}`)};
@@ -2556,7 +2593,7 @@ export default function HomeScreen(){
       <Modal visible={!!radarDetailTable} transparent animationType="fade" onRequestClose={()=>setRadarDetailId(null)}><View style={s.modalShade}><View style={s.radarDetailModal}><View style={s.modalHead}><View><Text style={s.radarKicker}>MT MATRIX · LIVE ROAD SNAPSHOT</Text><Text style={s.radarDetailTitle}>{radarDetailId} · 第 {radarDetailTable?.round??0} 局</Text></View><Pressable onPress={()=>setRadarDetailId(null)} style={s.radarClose}><MaterialIcons name="close" size={20} color="#DCEEFF"/></Pressable></View>{radarDetailTable?<><View style={s.radarDetailStats}><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前推薦</Text><Text style={[s.radarDetailValue,{color:resultColor(radarDetailDecision.side)}]}>{radarDetailDecision.side}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>信心度</Text><View style={s.radarDetailConfidence}><View style={[s.signalDot,{backgroundColor:confidenceState(radarDetailConfidence).color,shadowColor:confidenceState(radarDetailConfidence).color}]}/><Text style={[s.radarDetailValue,{color:confidenceState(radarDetailConfidence).color,marginTop:0}]}>{confidenceState(radarDetailConfidence).label}</Text></View></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前牌型</Text><Text numberOfLines={1} style={s.radarDetailValue}>{detectPattern(radarDetailTable.results)}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>莊／閒／和</Text><Text style={s.radarDetailValue}>{radarDetailTable.banker}／{radarDetailTable.player}／{radarDetailTable.tie}</Text></View></View><View style={[s.radarRoadWrap,{height:desktop?190:150}]}><RoadGrid table={radarDetailTable} desktop={desktop} transparent/></View><Text style={s.radarDetailNote}>{analysisText(radarDetailTable)}</Text></>:null}</View></View></Modal>
 
       <Modal visible={!!analysisTable} transparent animationType="fade" onRequestClose={()=>setAnalysisTable(null)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>百家樂 {analysisTable?.id} 分析</Text><Pressable onPress={()=>setAnalysisTable(null)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>{analysisText(analysisTable??undefined)}</Text></View></View></Modal>
-      {mtOpen?<View style={s.mtOverlay}><View style={s.mtScreen}><View style={[s.mtTop,activePlatform==="DG"&&s.topbarDg]}><View style={s.brandRow}><View style={[s.brandIcon,activePlatform==="DG"&&s.brandIconDg]}><MatrixMark size={29} brand={activePlatform}/></View><View><Text style={[s.kicker,activePlatform==="DG"&&s.kickerDg]}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setMtOpen(false)}><MaterialIcons name="arrow-back" size={16} color="#fff"/><Text style={s.headerBtnText}>回牌路</Text></Pressable></View></View><View style={s.iframeWrap}>{Platform.OS==="web"?createElement("iframe" as any,{src:activePlatform==="DG"?dgGameUrl:(mtUrl.trim()||token.trim()),style:{width:"100%",height:"100%",border:"0",background:"#000"},allow:"clipboard-read; clipboard-write; fullscreen"}):<View style={s.nativeMtFallback}><Text style={s.helpText}>目前原生模式請使用外部瀏覽器開啟目前平台。</Text></View>}</View></View></View>:null}
+      {mtOpen?<View style={s.mtOverlay}><View style={s.mtScreen}><View style={[s.mtTop,activePlatform==="DG"&&s.topbarDg]}><View style={s.brandRow}><View style={[s.brandIcon,activePlatform==="DG"&&s.brandIconDg]}><MatrixMark size={29} brand={activePlatform}/></View><View><Text style={[s.kicker,activePlatform==="DG"&&s.kickerDg]}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setMtOpen(false)}><MaterialIcons name="arrow-back" size={16} color="#fff"/><Text style={s.headerBtnText}>回牌路</Text></Pressable></View></View><View style={s.iframeWrap}>{Platform.OS==="web"?(activePlatform==="DG"?<DgSameSessionView sessionId={accessSessionId}/>:createElement("iframe" as any,{src:mtUrl.trim()||token.trim(),style:{width:"100%",height:"100%",border:"0",background:"#000"},allow:"clipboard-read; clipboard-write; fullscreen"})):<View style={s.nativeMtFallback}><Text style={s.helpText}>目前原生模式請使用外部瀏覽器開啟目前平台。</Text></View>}</View></View></View>:null}
       {MultiTableRadar({insideMt:mtOpen})}
       {FloatingAssistant({insideMt:mtOpen})}
       {V38Calculator({insideMt:mtOpen})}

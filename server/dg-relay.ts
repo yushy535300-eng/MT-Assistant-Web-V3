@@ -1,6 +1,6 @@
 import tls, { type TLSSocket } from "node:tls";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
-import { startDgChromiumTransport, type DgChromiumTransport } from "./dg-chromium";
+import { startDgChromiumTransport, type DgChromiumTransport, type DgBrowserInput } from "./dg-chromium";
 
 export type DgRoadResult = "莊" | "閒" | "和";
 export type DgTableSnapshot = {
@@ -844,6 +844,17 @@ export class DgRelay {
       }
     }
   }
+  hasBrowserView() { return this.transportMode === "browser" && !!this.chromium; }
+  subscribeBrowserView(listener: (frame: Buffer) => void) {
+    if (!this.chromium || this.transportMode !== "browser") throw new Error("DG Chromium 畫面尚未就緒");
+    return this.chromium.subscribeView(listener);
+  }
+  browserViewport() { return this.chromium?.viewport || { width: 1280, height: 720 }; }
+  async dispatchBrowserInput(input: DgBrowserInput) {
+    if (!this.chromium || this.transportMode !== "browser") throw new Error("DG Chromium 畫面尚未就緒");
+    await this.chromium.dispatchInput(input);
+  }
+
   stop() {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = null;

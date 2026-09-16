@@ -91,6 +91,47 @@ async function startServer() {
     const keepalive=setInterval(()=>{try{res.write(": keepalive\n\n")}catch{}},15000);
     req.on("close",()=>{clearInterval(keepalive);unsubscribe()});
   });
+  // Same-session DG view: stream the already-authenticated backend Chromium
+  // instead of opening a second DG iframe/token in the user's browser.
+  app.get("/api/dg/browser-view",(req,res)=>{
+    const sessionId=String(req.query.sessionId||"");
+    if(!hasActiveTrackerSession(sessionId)) return res.status(401).end();
+    const relay=getDgRelay(sessionId);
+    if(!relay||!relay.hasBrowserView()) return res.status(409).end();
+    const boundary="dgframe";
+    res.status(200);
+    res.setHeader("Content-Type",`multipart/x-mixed-replace; boundary=${boundary}`);
+    res.setHeader("Cache-Control","no-store, no-cache, must-revalidate, max-age=0");
+    res.setHeader("Pragma","no-cache");
+    res.setHeader("Connection","keep-alive");
+    res.setHeader("X-Accel-Buffering","no");
+    (res as any).flushHeaders?.();
+    let closed=false;
+    const unsubscribe=relay.subscribeBrowserView((frame:Buffer)=>{
+      if(closed)return;
+      try{
+        res.write(`--${boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.length}\r\nCache-Control: no-store\r\n\r\n`);
+        res.write(frame);
+        res.write("\r\n");
+      }catch{}
+    });
+    req.on("close",()=>{closed=true;unsubscribe()});
+  });
+
+  app.post("/api/dg/browser-input",async(req,res)=>{
+    const sessionId=String(req.body?.sessionId||"");
+    if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false,error:"session_invalid"});
+    const relay=getDgRelay(sessionId);
+    if(!relay||!relay.hasBrowserView()) return res.status(409).json({ok:false,error:"browser_view_not_ready"});
+    const input=req.body?.input||{};
+    try{
+      await relay.dispatchBrowserInput(input);
+      return res.json({ok:true});
+    }catch(e:any){
+      return res.status(400).json({ok:false,error:e?.message||"input_failed"});
+    }
+  });
+
   app.post("/api/dg/stop",(req,res)=>{
     const sessionId=String(req.body?.sessionId||"");
     if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false});
