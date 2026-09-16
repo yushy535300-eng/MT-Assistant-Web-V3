@@ -279,6 +279,7 @@ export class DgRelay {
   private token: string;
   private origin: string;
   private wsUrl = DEFAULT_DG_WS;
+  private gameBasePath = "/ddnewpc";
   private ws: RawWsClient | null = null;
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -291,11 +292,16 @@ export class DgRelay {
   constructor(public readonly sessionId: string, public readonly gameUrl: string) {
     this.token = extractToken(gameUrl);
     this.origin = (() => { try { return new URL(gameUrl).origin; } catch { return "https://new-dd-cn.dingdangmail.com"; } })();
+    try {
+      const u = new URL(gameUrl);
+      const m = u.pathname.match(/^(.*?\/ddnewpc)(?:\/|$)/i);
+      if (m?.[1]) this.gameBasePath = m[1].replace(/\/$/, "");
+    } catch {}
     if (!this.token) throw new Error("DG 授權網址缺少 token");
   }
   async start() {
     try {
-      const cfg = await fetch(`${this.origin}/ddnewpc/game_settings.json?v=${Date.now()}`, { headers: { Accept: "application/json", Referer: this.gameUrl, "User-Agent": "Mozilla/5.0 Chrome/135 Safari/537.36" }, signal: AbortSignal.timeout(7000) });
+      const cfg = await fetch(`${this.origin}${this.gameBasePath}/game_settings.json?v=${Date.now()}`, { headers: { Accept: "application/json", Referer: this.gameUrl, "User-Agent": "Mozilla/5.0 Chrome/135 Safari/537.36" }, signal: AbortSignal.timeout(7000) });
       if (cfg.ok) {
         const json: any = await cfg.json();
         const candidate = String(json?.pc_h5?.game_wss_tw || json?.pc_h5?.game_wss || DEFAULT_DG_WS);

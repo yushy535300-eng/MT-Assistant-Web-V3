@@ -64,9 +64,15 @@ async function startServer() {
     const gameUrl=String(req.body?.gameUrl||"");
     if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false,error:"session_invalid"});
     let parsed:URL; try{parsed=new URL(gameUrl)}catch{return res.status(400).json({ok:false,error:"invalid_game_url"})}
-    const dgHost=/^new-dd-cn\./i.test(parsed.hostname);
-    const dgPath=/\/ddnewpc\//i.test(parsed.pathname);
-    if(parsed.protocol!=="https:"||!dgHost||!dgPath||!/[?&]token=/i.test(gameUrl)) return res.status(400).json({ok:false,error:"invalid_game_url"});
+    // DG rotates launch domains. Do not pin the relay to one historical
+    // new-dd-cn.* hostname; validate the security properties instead.
+    const host=parsed.hostname.toLowerCase();
+    const looksLocal = host==="localhost" || host.endsWith(".localhost") || host==="0.0.0.0" || host==="::1" || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+    const hasToken=!!parsed.searchParams.get("token");
+    // The DG launch path/domain can rotate between gateways. The relay only
+    // needs a public HTTPS vendor origin plus the one-time token; do not reject
+    // a valid launch URL merely because its path is no longer /ddnewpc/direct1.
+    if(parsed.protocol!=="https:"||looksLocal||!hasToken) return res.status(400).json({ok:false,error:"invalid_game_url"});
     try{await startDgRelay(sessionId,gameUrl);return res.json({ok:true});}
     catch(e:any){console.error("[DG relay] start failed",e);return res.status(502).json({ok:false,error:e?.message||"dg_start_failed"});}
   });

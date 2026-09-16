@@ -591,8 +591,39 @@ async function getGameLoginUrlFromPlatform(platform:"TZ"|"OFA",token:string,prov
       response=await request(true); data=null; try{data=await response.json()}catch{}
     }
     if(!response.ok||Number(data?.code)!==200)throw new Error(String(data?.message??data?.msg??`取得 ${provider==="DGLI"?"DG":"MT"} 授權失敗`));
-    const gameUrl=String(data?.data?.game_url??data?.raw?.url??"").trim();
-    if(!gameUrl||!/[?&]token=/i.test(gameUrl))throw new Error(`找不到 ${provider==="DGLI"?"DG":"MT"} Token`);
+
+    // Different TZ/OFA gateways do not always return game_url in exactly the
+    // same field/shape. Prefer a real absolute HTTPS URL that actually carries
+    // the one-time game token. This also avoids forwarding a relative
+    // /ddnewpc/direct1.html URL to the Node relay (which previously surfaced as
+    // DG invalid_game_url).
+    const rawCandidates:any[]=[
+      data?.data?.game_url,
+      data?.data?.url,
+      data?.raw?.url,
+      data?.raw?.game_url,
+      typeof data?.raw==="string"?data.raw:undefined,
+    ];
+    const cleaned=rawCandidates
+      .filter(v=>typeof v==="string"&&v.trim())
+      .map(v=>String(v).trim().replace(/\\\//g,"/").replace(/^['"]|['"]$/g,""));
+    let gameUrl="";
+    for(const candidate of cleaned){
+      try{
+        const u=new URL(candidate);
+        if(u.protocol==="https:"&&u.searchParams.get("token")){gameUrl=u.toString();break;}
+      }catch{}
+    }
+    // If one field is relative but another field gives us the vendor origin,
+    // resolve the relative path against that origin.
+    if(!gameUrl){
+      const absolute=cleaned.find(v=>{try{return new URL(v).protocol==="https:"}catch{return false}});
+      const relative=cleaned.find(v=>/[?&]token=/i.test(v));
+      if(absolute&&relative){
+        try{const u=new URL(relative,new URL(absolute).origin);if(u.searchParams.get("token"))gameUrl=u.toString()}catch{}
+      }
+    }
+    if(!gameUrl)throw new Error(`找不到 ${provider==="DGLI"?"DG":"MT"} Token`);
     return gameUrl;
   }finally{clearTimeout(timeout)}
 }
