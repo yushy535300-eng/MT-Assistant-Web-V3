@@ -4,6 +4,7 @@ import path from 'node:path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 
 const NORMAL_CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
+const DG_HOST_RE = /(?:^|\.)(?:kindlestone\.com|taxyss\.com|ywjxi\.com|20299999\.com|dingdangmail\.com)$/i;
 
 export type DgChromiumTransport = { stop: () => void };
 export type DgChromiumHooks = {
@@ -17,6 +18,7 @@ export type DgChromiumHooks = {
 };
 
 type CdpMessage = { id?: number; method?: string; params?: any; result?: any; error?: any; sessionId?: string };
+type RequestMeta = { url: string; type: string; method: string };
 
 function findChromeExecutable() {
   const root = process.cwd();
@@ -38,8 +40,47 @@ function findChromeExecutable() {
 function isDgWs(url: string) {
   try {
     const u = new URL(url);
-    return u.protocol === 'wss:' && /(?:^|\.)(?:kindlestone\.com|taxyss\.com|ywjxi\.com)$/i.test(u.hostname);
+    return u.protocol === 'wss:' && DG_HOST_RE.test(u.hostname);
   } catch { return false; }
+}
+
+function redactUrl(value: string) {
+  try {
+    const u = new URL(value);
+    for (const key of ['token', 'sign', 'auth', 'authorization', 'session', 'sessionId']) {
+      if (u.searchParams.has(key)) u.searchParams.set(key, '***');
+    }
+    return u.toString();
+  } catch {
+    return String(value || '')
+      .replace(/([?&](?:token|sign|auth|authorization|session|sessionId)=)[^&#\s]+/gi, '$1***')
+      .slice(0, 800);
+  }
+}
+
+function safeText(value: unknown, max = 500) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function interestingRequest(url: string, type: string) {
+  try {
+    const u = new URL(url);
+    if (DG_HOST_RE.test(u.hostname)) return true;
+    if (/game_settings\.json|bundle(?:\.min)?\.js|common(?:\.min)?\.js|\.json(?:$|\?)/i.test(u.pathname + u.search)) return true;
+    return ['Document', 'Script', 'XHR', 'Fetch', 'WebSocket'].includes(type);
+  } catch { return false; }
+}
+
+function cdpRemoteValue(arg: any) {
+  if (!arg) return '';
+  if (arg.value != null) {
+    if (typeof arg.value === 'string') return arg.value;
+    try { return JSON.stringify(arg.value); } catch { return String(arg.value); }
+  }
+  if (arg.unserializableValue != null) return String(arg.unserializableValue);
+  if (arg.description != null) return String(arg.description);
+  return String(arg.type || '');
 }
 
 class CdpClient {
@@ -103,7 +144,6 @@ async function launchChrome(executable: string, sessionId: string, onLog: (messa
     '--disable-setuid-sandbox',
     '--disable-dev-shm-usage',
     '--disable-gpu',
-    '--disable-background-networking',
     '--disable-component-update',
     '--disable-default-apps',
     '--disable-extensions',
@@ -116,6 +156,8 @@ async function launchChrome(executable: string, sessionId: string, onLog: (messa
     '--no-default-browser-check',
     '--password-store=basic',
     '--use-mock-keychain',
+    '--autoplay-policy=no-user-gesture-required',
+    '--lang=zh-TW',
     '--remote-debugging-address=127.0.0.1',
     '--remote-debugging-port=0',
     `--user-data-dir=${profile}`,
@@ -174,52 +216,183 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
   let stopped = false;
   let got101 = false;
   let finalUrl = hooks.gameUrl;
+  let diagCount = 0;
+  let wsCreatedCount = 0;
+  let wsHandshakeCount = 0;
+  let failedRequestCount = 0;
   const dgRequests = new Map<string, string>();
+  const requests = new Map<string, RequestMeta>();
   let watchdog: ReturnType<typeof setTimeout> | null = null;
+  let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const diag = (message: string) => {
+    if (diagCount >= 180) return;
+    diagCount++;
+    hooks.onLog(`Chromium DIAG｜${message}`);
+  };
 
   const stop = () => {
     if (stopped) return;
     stopped = true;
     if (watchdog) clearTimeout(watchdog);
+    if (snapshotTimer) clearTimeout(snapshotTimer);
     try { cdp.close(); } catch {}
     try { launched.child.kill('SIGTERM'); } catch {}
     setTimeout(() => { try { if (!launched.child.killed) launched.child.kill('SIGKILL'); } catch {} }, 1200).unref?.();
     try { fs.rmSync(launched.profile, { recursive: true, force: true }); } catch {}
   };
 
+  const dumpPageState = async (reason: string) => {
+    if (stopped) return;
+    try {
+      const result = await cdp.send('Runtime.evaluate', {
+        expression: `(() => ({
+          href: location.href,
+          origin: location.origin,
+          readyState: document.readyState,
+          title: document.title,
+          bodyLength: document.body ? document.body.innerText.length : -1,
+          scriptCount: document.scripts ? document.scripts.length : -1,
+          iframeCount: document.querySelectorAll ? document.querySelectorAll('iframe').length : -1,
+          localStorageKeys: (() => { try { return Object.keys(localStorage); } catch { return ['<blocked>']; } })(),
+          sessionStorageKeys: (() => { try { return Object.keys(sessionStorage); } catch { return ['<blocked>']; } })(),
+          userAgent: navigator.userAgent,
+          webdriver: navigator.webdriver,
+          languages: navigator.languages,
+          online: navigator.onLine
+        }))()`,
+        returnByValue: true,
+        awaitPromise: true,
+      }, pageSessionId, 8000);
+      const value = result?.result?.value || {};
+      diag(`頁面狀態(${reason})｜url=${redactUrl(String(value.href || finalUrl))}｜ready=${value.readyState}｜title=${safeText(value.title, 120)}｜body=${value.bodyLength}｜scripts=${value.scriptCount}｜iframes=${value.iframeCount}｜webdriver=${String(value.webdriver)}｜online=${String(value.online)}`);
+      diag(`Storage(${reason})｜local=[${(Array.isArray(value.localStorageKeys) ? value.localStorageKeys : []).slice(0, 30).join(',')}]｜session=[${(Array.isArray(value.sessionStorageKeys) ? value.sessionStorageKeys : []).slice(0, 30).join(',')}]`);
+    } catch (error) {
+      diag(`頁面狀態讀取失敗(${reason})｜${safeText((error as Error)?.message || error)}`);
+    }
+
+    try {
+      const cookies = await cdp.send('Network.getCookies', { urls: [finalUrl] }, pageSessionId, 8000);
+      const names = Array.isArray(cookies?.cookies) ? cookies.cookies.map((x: any) => String(x?.name || '')).filter(Boolean).slice(0, 40) : [];
+      diag(`Cookies(${reason})｜count=${Array.isArray(cookies?.cookies) ? cookies.cookies.length : 0}｜names=[${names.join(',')}]`);
+    } catch (error) {
+      diag(`Cookies 讀取失敗(${reason})｜${safeText((error as Error)?.message || error)}`);
+    }
+  };
+
   cdp.onEvent((message) => {
     if (stopped || message.sessionId !== pageSessionId) return;
     const p = message.params || {};
+
     if (message.method === 'Page.frameNavigated') {
       const frame = p.frame || {};
       if (!frame.parentId && /^https:\/\//i.test(String(frame.url || ''))) {
         finalUrl = String(frame.url);
         hooks.onMainUrl?.(finalUrl);
-        hooks.onLog(`Chromium 頁面：${finalUrl}`);
+        hooks.onLog(`Chromium 頁面：${redactUrl(finalUrl)}`);
       }
       return;
     }
+
+    if (message.method === 'Runtime.consoleAPICalled') {
+      const level = String(p.type || 'log');
+      if (!['error', 'warning', 'assert'].includes(level)) return;
+      const text = (Array.isArray(p.args) ? p.args : []).map(cdpRemoteValue).join(' ');
+      diag(`Console ${level}｜${safeText(text, 700)}`);
+      return;
+    }
+
+    if (message.method === 'Runtime.exceptionThrown') {
+      const detail = p.exceptionDetails || {};
+      const description = detail.exception?.description || detail.text || 'unknown exception';
+      const where = detail.url ? `｜${redactUrl(String(detail.url))}:${detail.lineNumber ?? '?'}:${detail.columnNumber ?? '?'}` : '';
+      diag(`JS Exception｜${safeText(description, 900)}${where}`);
+      return;
+    }
+
+    if (message.method === 'Log.entryAdded') {
+      const entry = p.entry || {};
+      if (String(entry.level || '').toLowerCase() === 'error' || String(entry.source || '').toLowerCase() === 'javascript') {
+        diag(`Browser Log｜${safeText(entry.text, 700)}${entry.url ? `｜${redactUrl(String(entry.url))}` : ''}`);
+      }
+      return;
+    }
+
+    if (message.method === 'Network.requestWillBeSent') {
+      const requestId = String(p.requestId || '');
+      const url = String(p.request?.url || '');
+      const type = String(p.type || 'Other');
+      const method = String(p.request?.method || 'GET');
+      if (requestId) requests.set(requestId, { url, type, method });
+      if (interestingRequest(url, type) && /game_settings\.json/i.test(url)) {
+        diag(`REQ ${type} ${method}｜${redactUrl(url)}`);
+      }
+      return;
+    }
+
+    if (message.method === 'Network.responseReceived') {
+      const requestId = String(p.requestId || '');
+      const meta = requests.get(requestId);
+      const url = String(p.response?.url || meta?.url || '');
+      const status = Number(p.response?.status || 0);
+      const type = String(p.type || meta?.type || 'Other');
+      if (interestingRequest(url, type) && (status >= 400 || /game_settings\.json/i.test(url))) {
+        diag(`RESP ${status || '?'} ${type}｜${redactUrl(url)}｜mime=${safeText(p.response?.mimeType, 80)}｜remote=${safeText(p.response?.remoteIPAddress, 80)}`);
+      }
+      return;
+    }
+
+    if (message.method === 'Network.loadingFailed') {
+      const requestId = String(p.requestId || '');
+      const meta = requests.get(requestId);
+      failedRequestCount++;
+      const url = meta?.url || '';
+      diag(`LOAD FAIL ${meta?.type || p.type || 'Other'}｜${url ? redactUrl(url) : `requestId=${requestId}`}｜error=${safeText(p.errorText, 260)}｜blocked=${safeText(p.blockedReason, 120)}｜canceled=${String(!!p.canceled)}`);
+      return;
+    }
+
     if (message.method === 'Network.webSocketCreated') {
       const url = String(p.url || '');
+      wsCreatedCount++;
       if (isDgWs(url)) {
         dgRequests.set(String(p.requestId), url);
         hooks.onLog(`Chromium WSS 建立：${new URL(url).hostname}`);
+        diag(`WebSocketCreated｜host=${new URL(url).hostname}｜url=${redactUrl(url)}`);
+      } else {
+        diag(`WebSocketCreated(其他)｜${redactUrl(url)}`);
       }
       return;
     }
+
+    if (message.method === 'Network.webSocketWillSendHandshakeRequest') {
+      const requestId = String(p.requestId || '');
+      const url = dgRequests.get(requestId);
+      if (!url) return;
+      const headers = p.request?.headers || {};
+      const origin = headers.Origin || headers.origin || '';
+      const ua = headers['User-Agent'] || headers['user-agent'] || '';
+      diag(`WS HANDSHAKE REQ｜host=${new URL(url).hostname}｜Origin=${safeText(origin, 180)}｜UA=${safeText(ua, 180)}`);
+      return;
+    }
+
     if (message.method === 'Network.webSocketHandshakeResponseReceived') {
       const requestId = String(p.requestId || '');
       const url = dgRequests.get(requestId);
       if (!url) return;
+      wsHandshakeCount++;
       const status = Number(p.response?.status || 0);
+      const statusText = safeText(p.response?.statusText, 100);
       hooks.onLog(`Chromium WebSocket ${status || '?'}：${new URL(url).hostname}｜Origin=${(() => { try { return new URL(finalUrl).origin; } catch { return ''; } })()}`);
+      diag(`WS HANDSHAKE RESP｜host=${new URL(url).hostname}｜status=${status || '?'} ${statusText}｜remote=${safeText(p.response?.remoteIPAddress, 100)}`);
       hooks.onHandshake?.(url, status);
       if (status === 101) {
         got101 = true;
         if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+        void dumpPageState('WS101');
       }
       return;
     }
+
     if (message.method === 'Network.webSocketFrameReceived') {
       const requestId = String(p.requestId || '');
       if (!dgRequests.has(requestId)) return;
@@ -228,35 +401,47 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
       try { hooks.onBinary(Buffer.from(String(response.payloadData), 'base64')); } catch {}
       return;
     }
+
     if (message.method === 'Network.webSocketFrameError') {
       const requestId = String(p.requestId || '');
       const url = dgRequests.get(requestId);
       if (url) hooks.onLog(`Chromium WSS 錯誤：${new URL(url).hostname}｜${String(p.errorMessage || 'unknown')}`);
+      diag(`WebSocketFrameError｜${safeText(p.errorMessage, 500)}`);
       return;
     }
+
     if (message.method === 'Network.webSocketClosed') {
       const requestId = String(p.requestId || '');
       const url = dgRequests.get(requestId);
       if (url) hooks.onLog(`Chromium WSS 已關閉：${new URL(url).hostname}`);
+      diag(`WebSocketClosed｜host=${url ? new URL(url).hostname : 'unknown'}`);
     }
   });
 
-  await cdp.send('Network.enable', {}, pageSessionId);
+  await cdp.send('Network.enable', { maxTotalBufferSize: 10_000_000, maxResourceBufferSize: 2_000_000 }, pageSessionId);
   await cdp.send('Page.enable', {}, pageSessionId);
   await cdp.send('Runtime.enable', {}, pageSessionId);
+  await cdp.send('Log.enable', {}, pageSessionId).catch(() => {});
+  await cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, pageSessionId).catch(() => {});
+  await cdp.send('Network.setCacheDisabled', { cacheDisabled: true }, pageSessionId).catch(() => {});
   await cdp.send('Network.setUserAgentOverride', { userAgent: NORMAL_CHROME_UA, acceptLanguage: 'zh-TW,zh;q=0.9', platform: 'Windows' }, pageSessionId);
-  await cdp.send('Network.setBlockedURLs', {
-    urls: ['*.flv', '*.mp4', '*.m3u8', '*.ts', '*.jpg', '*.jpeg', '*.png', '*.gif', '*.webp', '*.woff', '*.woff2', '*.ttf']
-  }, pageSessionId).catch(() => {});
+
+  // Diagnostic build intentionally DOES NOT block images/fonts/video.
+  // We want the DG page to initialize exactly like a normal Chrome tab first.
+  diag('資源阻擋已關閉：本版讓 DG 頁面完整載入，避免初始化流程因資源被擋而中斷');
+
   await cdp.send('Page.navigate', { url: hooks.gameUrl }, pageSessionId, 15000);
   hooks.onLog(`Chromium 已導航至 DG direct1｜host=${new URL(hooks.gameUrl).hostname}`);
 
+  snapshotTimer = setTimeout(() => { void dumpPageState('5s'); }, 5000);
+
   watchdog = setTimeout(() => {
     if (stopped || got101) return;
-    const message = 'Chromium 15 秒內仍未取得 DG WebSocket 101';
+    const message = `Chromium 20 秒內仍未取得 DG WebSocket 101｜wsCreated=${wsCreatedCount}｜handshake=${wsHandshakeCount}｜loadFailed=${failedRequestCount}`;
     hooks.onLog(message);
+    void dumpPageState('20s');
     hooks.onFailure?.(message);
-  }, 15000);
+  }, 20000);
 
   launched.child.once('exit', (code, signal) => {
     if (stopped) return;
