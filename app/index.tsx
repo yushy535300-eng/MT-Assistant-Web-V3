@@ -818,6 +818,15 @@ function eventName(payload:any){
 }
 function eventTables(payload:any):any[]|null{const c=[payload?.msg?.tables?.tables,payload?.msg?.tables,payload?.data?.tables?.tables,payload?.data?.tables,payload?.tables?.tables,payload?.tables];return c.find(Array.isArray)??null}
 function extractMtUrlToken(value:string){try{return new URL(value.trim()).searchParams.get("token")?.trim()??""}catch{return value.trim().replace(/^token=/i,"")}}
+function readonlyConnectionUrl(value:string){
+  if(!value)return "自動取得中";
+  try{
+    const u=new URL(value);
+    if(u.searchParams.has("token"))u.searchParams.set("token","••••••••");
+    if(u.searchParams.has("sign"))u.searchParams.set("sign","••••••••");
+    return u.toString();
+  }catch{return value}
+}
 function resultKeyFromPayload(payload:any){const b=payload?.body??payload?.msg??payload?.data??{};return `${String(b?.shoe??"")}|${String(b?.round??"")}`}
 
 function extractTableStreamUrl(source:any):string {
@@ -1082,6 +1091,8 @@ export default function HomeScreen(){
       setWalletTransferBusy(false);
       setDgNeedsRecovery(false);
       dgHasConnectedRef.current=false;
+      suppressDgRecoveryRef.current=false;
+      roadConnectBusyRef.current=false;
       setFloatingOpen(false);
       setMtOpen(false);
       setInsideMt(false);
@@ -1126,6 +1137,8 @@ export default function HomeScreen(){
   const [dgTables,setDgTables]=useState<TableData[]>([]);
   const dgControllerRef=useRef<{close:()=>void}|null>(null);
   const platformTokenRef=useRef("");
+  const roadConnectBusyRef=useRef(false);
+  const suppressDgRecoveryRef=useRef(false);
   const [loginPlatform,setLoginPlatform]=useState<"TZ"|"OFA">("TZ");
   const [token,setToken]=useState("");
   const [mtUrl,setMtUrl]=useState("");
@@ -1864,8 +1877,7 @@ export default function HomeScreen(){
       awaitingFreshSnapshotRef.current=false;
       return;
     }
-    // 只有使用者主動按「連線」才建立主 WS。
-    // 若主線仍 OPEN / CONNECTING，直接沿用，禁止重複建立。
+    // 主頁登入後會自動建立主 WS；若主線仍 OPEN / CONNECTING，直接沿用，禁止重複建立。
     const activeSocket=socketRef.current;
     if(activeSocket && (activeSocket.readyState===WebSocket.OPEN || activeSocket.readyState===WebSocket.CONNECTING)){
       appendEvent("主連線仍有效，不重複連線");
@@ -2179,24 +2191,79 @@ export default function HomeScreen(){
       setSocket(null);
       setConnected(false);
       appendEvent("WebSocket 已中斷");
+      // 主頁牌路維持自動連線。若是正常掉線，沿用既有 MT token 自動恢復；
+      // stopConnection/logout 會先遞增 generation，因此不會誤觸這裡。
+      if(accessGranted&&lockedMtUrlRef.current){
+        if(reconnectTimerRef.current)clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current=setTimeout(()=>{
+          reconnectTimerRef.current=null;
+          startConnection(undefined,lockedMtUrlRef.current);
+        },1200);
+      }
     };
   };
-  // After app login, only pre-warm the Chromium PROCESS.
-  // Do not call MTLI/login or DGLI/login here: entering a vendor game may trigger
-  // TZ/OFA automatic wallet transfer, which must happen only after the user taps
-  // MT平台 / DG平台.
-  useEffect(()=>{
-    if(!accessGranted||!accessSessionId)return;
+
+  const connectRoadDashboard=async(force=false)=>{
+    if(!accessGranted||!accessSessionId||roadConnectBusyRef.current)return;
+    const platformToken=platformTokenRef.current;
+    if(!platformToken)return;
+    roadConnectBusyRef.current=true;
+    suppressDgRecoveryRef.current=false;
+    if(force){
+      if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}
+      socketGenerationRef.current+=1;
+      const old=socketRef.current;socketRef.current=null;
+      try{old?.close()}catch{}
+      setSocket(null);
+      setConnected(false);
+      try{dgControllerRef.current?.close()}catch{}
+      dgControllerRef.current=null;
+      setDgConnected(false);
+      setDgStatus("連線中");
+    }else{
+      if(!connected)setConnected(false);
+      if(!dgConnected)setDgStatus("連線中");
+    }
+    // Chromium 先預熱，但不等待它完成；MT / DG 授權同步取得，縮短主頁等待時間。
     void fetch("/api/dg/prewarm",{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
+      method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({sessionId:accessSessionId}),
     }).catch(()=>undefined);
-  },[accessGranted,accessSessionId]);
+    const needMt=force||!lockedMtUrlRef.current||!connected;
+    const needDg=force||!dgGameUrl||!dgConnected;
+    const [mtResult,dgResult]=await Promise.allSettled([
+      needMt?getMtLoginUrlFromPlatform(loginPlatform,platformToken):Promise.resolve(lockedMtUrlRef.current),
+      needDg?getDgLoginUrlFromPlatform(loginPlatform,platformToken):Promise.resolve(dgGameUrl),
+    ]);
+    if(platformTokenRef.current!==platformToken){roadConnectBusyRef.current=false;return;}
+    if(mtResult.status==="fulfilled"&&mtResult.value){
+      const url=mtResult.value;
+      lockedMtUrlRef.current=url;
+      setToken(url);
+      setMtUrl(url);
+      startConnection(undefined,url);
+    }else if(mtResult.status==="rejected"){
+      appendEvent(`MT 自動連線失敗：${String((mtResult.reason as any)?.message||mtResult.reason||"unknown")}`);
+    }
+    if(dgResult.status==="fulfilled"&&dgResult.value){
+      setDgGameUrl(dgResult.value);
+      setDgStatus("連線中");
+    }else if(dgResult.status==="rejected"){
+      setDgConnected(false);
+      setDgStatus("連線中");
+      appendEvent(`DG 自動連線失敗：${String((dgResult.reason as any)?.message||dgResult.reason||"unknown")}`);
+    }
+    roadConnectBusyRef.current=false;
+  };
 
-  // DG relay starts only after the user has actually entered DG once.
-  // The game URL is never fetched during assistant login, so TZ/OFA automatic
-  // wallet transfer cannot be triggered just by opening the road dashboard.
+  // 一進牌路主頁就自動連 MT / DG，跟舊版一樣。
+  // 這裡只負責牌路資料連線；MT平台 / DG平台按鈕仍然是另外的遊戲入口。
+  useEffect(()=>{
+    if(!accessGranted||!accessSessionId)return;
+    void connectRoadDashboard(false);
+  },[accessGranted,accessSessionId,loginPlatform]);
+
+  // DG relay follows the automatically obtained background DG URL.
   useEffect(()=>{
     if(!accessGranted)return;
     if(!dgGameUrl){setDgConnected(false);return;}
@@ -2238,12 +2305,10 @@ export default function HomeScreen(){
     };
   },[accessGranted,accessSessionId,dgGameUrl]);
 
-  // If the real DG game page takes over the account session and the background
-  // relay is kicked, do not fight the live game with another login. Wait until
-  // the user returns to the road dashboard, then obtain a fresh DGLI URL and
-  // recover the relay automatically while keeping the last road snapshot visible.
+  // 如果 DG 原生遊戲把背景 relay 踢掉，遊戲開著時不搶 session；
+  // 回到牌路主頁後再自動重新授權並恢復。
   useEffect(()=>{
-    if(!accessGranted||mtOpen||walletTransferBusy||!dgWasOpened||!dgNeedsRecovery)return;
+    if(!accessGranted||mtOpen||walletTransferBusy||!dgNeedsRecovery||suppressDgRecoveryRef.current)return;
     const platformToken=platformTokenRef.current;
     if(!platformToken)return;
     let cancelled=false;
@@ -2262,7 +2327,7 @@ export default function HomeScreen(){
       });
     },700);
     return()=>{cancelled=true;clearTimeout(timer)};
-  },[accessGranted,mtOpen,walletTransferBusy,dgWasOpened,dgNeedsRecovery,loginPlatform]);
+  },[accessGranted,mtOpen,walletTransferBusy,dgNeedsRecovery,loginPlatform]);
 
   // Reuse the existing four-formula / parity floating tools with DG's live poker field.
   // This only updates when the actual dealt cards change, not on every countdown packet.
@@ -2342,6 +2407,8 @@ export default function HomeScreen(){
     setWalletTransferBusy(false);
     setDgNeedsRecovery(false);
     dgHasConnectedRef.current=false;
+    suppressDgRecoveryRef.current=false;
+    roadConnectBusyRef.current=false;
     // Revoke the server-side app session without awaiting it. The login screen is already active.
     if(sessionToLogout){void logoutAccess.mutateAsync({sessionId:sessionToLogout}).catch(()=>{});}
   };
@@ -2371,11 +2438,12 @@ export default function HomeScreen(){
         setGameViewPlatform("MT");
         setGameViewUrl(url);
       }else{
+        // DG 原生遊戲使用自己的新網址；背景牌路 relay 保留原本的工作階段，
+        // 不把遊戲 URL 塞回 dgGameUrl，避免主動把牌路連線切掉。
         const url=await getDgLoginUrlFromPlatform(loginPlatform,platformToken);
+        suppressDgRecoveryRef.current=false;
         setDgWasOpened(true);
         setDgNeedsRecovery(false);
-        setDgStatus("連線中");
-        setDgGameUrl(url);
         setGameViewPlatform("DG");
         setGameViewUrl(url);
       }
@@ -2397,16 +2465,10 @@ export default function HomeScreen(){
     try{
       const result=await transferAllToMainWallet(loginPlatform,platformToken);
       if(result.ok){
-        // Once points are returned to the main wallet, do not immediately perform
-        // a background DGLI re-login: on TZ that could auto-transfer the points
-        // straight back into DG. DG data will reconnect only after the next real
-        // DG平台 entry.
+        // 轉回後不要關掉目前正在收牌路的 relay；只禁止「重新登入 DG」的自動恢復，
+        // 避免剛轉回主錢包又因新的 DGLI/login 被平台自動轉回 DG。
+        suppressDgRecoveryRef.current=true;
         setDgNeedsRecovery(false);
-        try{dgControllerRef.current?.close()}catch{}
-        dgControllerRef.current=null;
-        setDgGameUrl("");
-        setDgConnected(false);
-        setDgStatus("連線中");
         notify("轉回成功");setWalletTransferOpen(false);
       }
       else if(result.empty){notify("目前無可轉回點數");setWalletTransferOpen(false);}
@@ -2656,6 +2718,8 @@ export default function HomeScreen(){
     setDgStatus("連線中");
     setDgNeedsRecovery(false);
     dgHasConnectedRef.current=false;
+    suppressDgRecoveryRef.current=false;
+    roadConnectBusyRef.current=false;
     setHasEnteredGame(false);
     setDgWasOpened(false);
     setGameViewUrl("");
@@ -2689,7 +2753,7 @@ export default function HomeScreen(){
         <Pressable style={s.stopLossAckBtn} onPress={()=>setStopLossAlertOpen(false)}><Text style={s.stopLossAckText}>我知道了</Text></Pressable>
       </View></View></Modal>
 
-      <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>主頁與 MT 連線設定</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>主頁牌路 WebSocket 與 MT 平台使用獨立工作階段。關閉此視窗不會中斷已建立的連線。</Text><Text style={s.fieldLabel}>主頁牌路 WebSocket（固定）</Text><TextInput value={wsUrl} editable={false} secureTextEntry selectTextOnFocus={false} style={s.modalInput}/><Text style={s.fieldLabel}>主頁牌路來源 / Token</Text><TextInput value={token} editable={false} secureTextEntry selectTextOnFocus={false} placeholder="進入 MT 平台後才取得" placeholderTextColor="#63798B" style={s.modalInput}/><Text style={s.fieldLabel}>MT 平台獨立網址</Text><TextInput value={mtUrl} editable={false} secureTextEntry selectTextOnFocus={false} placeholder="進入 MT 平台後才取得" placeholderTextColor="#63798B" style={s.modalInput}/><View style={s.mappingRow}><Text style={s.mapChip}>winner 1：閒</Text><Text style={s.mapChip}>winner 2：莊</Text><Text style={s.mapChip}>winner 3：和</Text></View><View style={s.modalActions}><Pressable disabled style={[s.actionBtn,{backgroundColor:"#1F6F9D",opacity:.48}]}><Text style={s.btnText}>驗證主頁牌路</Text></Pressable><Pressable disabled style={[s.actionBtn,{backgroundColor:"#238F58",opacity:.48}]}><Text style={s.btnText}>開始連線</Text></Pressable><Pressable disabled style={[s.actionBtn,{backgroundColor:"#A63E48",opacity:.48}]}><Text style={s.btnText}>中斷</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View><Text style={s.syncText}>同步階段：主頁已同步 {tables.filter(t=>t.live).length} 桌</Text><Text style={s.fieldLabel}>即時事件</Text><ScrollView style={s.logBox}>{events.map((x,i)=><Text key={i} style={s.logText}>{x}</Text>)}</ScrollView></View></View></Modal>
+      <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>牌路連線中心</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>MT、DG 進入牌路主頁後會自動連線。下列網址只供顯示，使用者無法修改。</Text><View style={s.connectionStatusRow}><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>MT</Text><Text style={[s.connectionStatusText,{color:connected?"#4BD693":"#FFB54D"}]}>{connected?"已連線":"連線中"}</Text></View><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>DG</Text><Text style={[s.connectionStatusText,{color:dgConnected?"#4BD693":"#FFB54D"}]}>{dgConnected?"已連線":"連線中"}</Text></View></View><Text style={s.fieldLabel}>MT 即時牌路 WebSocket（固定）</Text><TextInput value={wsUrl} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>MT 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(mtUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>DG 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(dgGameUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><View style={s.modalActions}><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>void connectRoadDashboard(true)}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.btnText}>重新連線</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#344553"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View></View></View></Modal>
       <Modal visible={helpOpen} transparent animationType="fade" onRequestClose={()=>setHelpOpen(false)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>說明</Text><Pressable onPress={()=>setHelpOpen(false)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>主頁顯示 15 桌即時牌路。MT 懸浮輔助可左右滑動 3 頁：即時輔助、資金策略、輸贏統計。</Text></View></View></Modal>
       <Modal visible={!!radarDetailTable} transparent animationType="fade" onRequestClose={()=>setRadarDetailId(null)}><View style={s.modalShade}><View style={s.radarDetailModal}><View style={s.modalHead}><View><Text style={s.radarKicker}>MT MATRIX · LIVE ROAD SNAPSHOT</Text><Text style={s.radarDetailTitle}>{radarDetailId} · 第 {radarDetailTable?.round??0} 局</Text></View><Pressable onPress={()=>setRadarDetailId(null)} style={s.radarClose}><MaterialIcons name="close" size={20} color="#DCEEFF"/></Pressable></View>{radarDetailTable?<><View style={s.radarDetailStats}><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前推薦</Text><Text style={[s.radarDetailValue,{color:resultColor(radarDetailDecision.side)}]}>{radarDetailDecision.side}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>信心度</Text><View style={s.radarDetailConfidence}><View style={[s.signalDot,{backgroundColor:confidenceState(radarDetailConfidence).color,shadowColor:confidenceState(radarDetailConfidence).color}]}/><Text style={[s.radarDetailValue,{color:confidenceState(radarDetailConfidence).color,marginTop:0}]}>{confidenceState(radarDetailConfidence).label}</Text></View></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前牌型</Text><Text numberOfLines={1} style={s.radarDetailValue}>{detectPattern(radarDetailTable.results)}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>莊／閒／和</Text><Text style={s.radarDetailValue}>{radarDetailTable.banker}／{radarDetailTable.player}／{radarDetailTable.tie}</Text></View></View><View style={[s.radarRoadWrap,{height:desktop?190:150}]}><RoadGrid table={radarDetailTable} desktop={desktop} transparent/></View><Text style={s.radarDetailNote}>{analysisText(radarDetailTable)}</Text></>:null}</View></View></Modal>
 
@@ -2726,7 +2790,7 @@ const s=StyleSheet.create({
   matrixMark:{backgroundColor:"#071521",borderWidth:1,borderColor:"#4DA8D8",alignItems:"center",justifyContent:"center",overflow:"hidden",shadowColor:"#57C7FF",shadowOpacity:.26,shadowRadius:6,elevation:3},matrixMarkInner:{width:"72%",height:"72%",borderRadius:5,borderWidth:1,borderColor:"rgba(107,205,255,.45)",backgroundColor:"rgba(20,72,102,.22)",alignItems:"center",justifyContent:"center"},matrixMarkAccent:{position:"absolute",bottom:"13%",width:"46%",height:2,borderRadius:1,backgroundColor:"#53D1F5",shadowColor:"#53D1F5",shadowOpacity:.9,shadowRadius:4},matrixMarkAccentDg:{backgroundColor:"#D3A64D",shadowColor:"#D3A64D"},matrixMarkText:{color:"#EAF9FF",fontWeight:"900",letterSpacing:-.9,textShadowColor:"#5FD4FF",textShadowRadius:5},matrixMarkTextDg:{color:"#FFE7A5",textShadowColor:"#C99C42"},threadsSignature:{flexDirection:"row",alignItems:"center",gap:4},threadsGlyph:{color:"#F2F8FC",fontSize:11,fontWeight:"900",borderWidth:1,borderColor:"#557487",borderRadius:8,width:16,height:16,lineHeight:14,textAlign:"center"},threadsId:{color:"#D9E3EA",fontSize:10.5,fontWeight:"900",letterSpacing:.15},threadsSignatureMobile:{marginTop:1,gap:3},threadsWord:{color:"#F2F8FC",fontSize:8.5,fontWeight:"900",letterSpacing:.15},threadsIdMobile:{fontSize:9.5},
   floatPanelMobile:{left:18,top:170,right:"auto" as any,bottom:"auto" as any,borderRadius:9},floatHeaderMobile:{height:28,paddingHorizontal:6},selectorWrapMobile:{marginHorizontal:5,marginTop:4},selectorMobile:{height:28,paddingHorizontal:7},assistPageMobile:{paddingHorizontal:5,paddingTop:4,paddingBottom:2,minHeight:96},decisionRowMobile:{gap:4},decisionBoxMobile:{minHeight:46,paddingHorizontal:5,paddingVertical:4},todayPnlBoxMobile:{marginTop:3,paddingHorizontal:7,paddingVertical:3},aiBoxMobile:{marginTop:3,paddingHorizontal:5,paddingVertical:4},pageDotsMobile:{height:12},
   loginScreen:{flex:1,backgroundColor:"#020A12",alignItems:"center",justifyContent:"center",padding:18,overflow:"hidden"},loginVideo:{...StyleSheet.absoluteFillObject},loginShade:{...StyleSheet.absoluteFillObject,backgroundColor:"rgba(2,10,18,.46)"},loginPanel:{width:"100%",maxWidth:480,backgroundColor:"rgba(7,31,44,.76)",borderWidth:1,borderColor:"rgba(82,151,177,.62)",borderRadius:18,padding:18,shadowColor:"#000",shadowOpacity:.4,shadowRadius:20,elevation:14},loginTopline:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:26},loginTopText:{color:"#A9BED0",fontSize:9,letterSpacing:1.8,fontWeight:"700"},loginSafe:{color:"#39E0B0",fontSize:9,fontWeight:"800"},loginHero:{flexDirection:"row",alignItems:"stretch",width:"100%",marginBottom:16,minHeight:112},loginHeroMobile:{minHeight:108},loginBrandMobile:{flex:1.9,gap:8,paddingRight:7},loginTitleMobile:{fontSize:23,letterSpacing:-.45},threadsCardMobile:{flex:.82,minWidth:166,marginLeft:7,paddingHorizontal:10},loginBrand:{flex:1.9,flexDirection:"row",alignItems:"center",justifyContent:"flex-start",gap:13,paddingLeft:2,paddingRight:12},loginBrandCopy:{flexShrink:1},loginIcon:{width:56,height:56,borderRadius:14,borderWidth:1,borderColor:"#315D79",alignItems:"center",justifyContent:"center",backgroundColor:"rgba(5,20,31,.34)"},loginKicker:{color:"#8DB4CE",fontSize:10,letterSpacing:1.5,fontWeight:"800"},loginTitle:{color:"#F5F8FA",fontSize:28,fontWeight:"900",marginTop:5},loginSub:{color:"#91A7B8",fontSize:11.5,marginTop:4},loginSubMobile:{fontSize:9.5,letterSpacing:-.2},loginHeroDivider:{width:1,marginVertical:7,backgroundColor:"rgba(111,169,197,.25)"},threadsCard:{flex:.9,minWidth:142,marginLeft:13,paddingHorizontal:14,paddingVertical:9,borderRadius:15,borderWidth:1,borderColor:"rgba(108,177,205,.40)",backgroundColor:"rgba(3,18,29,.32)",justifyContent:"center"},threadsHead:{flexDirection:"row",alignItems:"center",gap:6},threadsLogo:{width:32,height:32,borderRadius:9,borderWidth:1,borderColor:"rgba(224,243,255,.52)",backgroundColor:"rgba(255,255,255,.07)",alignItems:"center",justifyContent:"center"},threadsLogoText:{color:"#F5FBFF",fontSize:22,fontWeight:"900",lineHeight:26},threadsLabel:{color:"#A9C4D6",fontSize:9,fontWeight:"900",letterSpacing:1.35},threadsName:{color:"#F5F9FC",fontSize:17,fontWeight:"900",marginTop:6},threadsAccount:{color:"#56D7D0",fontSize:14,fontWeight:"900",marginTop:1},threadsFollow:{height:34,marginTop:6,borderRadius:8,borderWidth:1,borderColor:"rgba(78,192,235,.65)",backgroundColor:"rgba(23,128,180,.22)",flexDirection:"row",alignItems:"center",justifyContent:"center",gap:4},threadsFollowPressed:{opacity:.72,transform:[{scale:.985}]},threadsFollowText:{color:"#EAF8FF",fontSize:10,fontWeight:"900",letterSpacing:1.15},loginDivider:{height:1,backgroundColor:"rgba(109,157,184,.32)",marginBottom:20},loginHintRow:{flexDirection:"row",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:11},loginHint:{color:"#A7B8C5",fontSize:11,flexShrink:1},registerBtn:{height:28,paddingHorizontal:11,borderRadius:7,borderWidth:1,borderColor:"rgba(66,185,245,.68)",backgroundColor:"rgba(22,140,235,.16)",alignItems:"center",justifyContent:"center",flexShrink:0},registerBtnPressed:{opacity:.72},registerBtnText:{color:"#42B9F5",fontSize:10,fontWeight:"900"},kickNotice:{color:"#FFB4B9",fontSize:10,fontWeight:"800",lineHeight:15,backgroundColor:"rgba(132,35,45,.22)",borderWidth:1,borderColor:"rgba(255,105,115,.35)",borderRadius:7,paddingHorizontal:10,paddingVertical:8,marginTop:-8,marginBottom:14},loginLabel:{color:"#B9C8D3",fontSize:11,fontWeight:"700",marginBottom:6},loginInput:{height:48,backgroundColor:"rgba(2,17,28,.68)",borderRadius:8,borderWidth:1,borderColor:"#385B70",color:"#fff",paddingHorizontal:14,fontSize:14,marginBottom:14},passwordWrap:{height:48,backgroundColor:"rgba(2,17,28,.68)",borderRadius:8,borderWidth:1,borderColor:"#385B70",flexDirection:"row",alignItems:"center",marginBottom:16},passwordInput:{flex:1,height:"100%",color:"#fff",paddingHorizontal:14,fontSize:14},eyeBtn:{width:46,height:"100%",alignItems:"center",justifyContent:"center"},loginBtn:{height:50,backgroundColor:"#168CEB",borderRadius:8,alignItems:"center",justifyContent:"center",flexDirection:"row",gap:8},loginBtnText:{color:"#fff",fontSize:14,fontWeight:"900"},error:{color:"#FF959C",fontSize:11,textAlign:"center",marginTop:10},loginFooterRow:{marginTop:10,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:7,flexWrap:"nowrap"},loginFooterLeft:{flexDirection:"row",alignItems:"center",gap:4},loginFooterDivider:{color:"rgba(145,171,188,.55)",fontSize:10},loginFoot:{color:"#71899A",fontSize:8.5,textAlign:"center"},loginHelp:{color:"#42B9F5",fontSize:10,fontWeight:"800",textAlign:"center",marginTop:0},
-  modalShade:{flex:1,backgroundColor:"rgba(0,0,0,.72)",alignItems:"center",justifyContent:"center",padding:16},stopLossShade:{flex:1,backgroundColor:"rgba(0,0,0,.62)",alignItems:"center",justifyContent:"center",padding:14,zIndex:20000},stopLossModal:{width:"88%",maxWidth:300,backgroundColor:"#101E2A",borderWidth:1,borderColor:"#315D79",borderRadius:9,padding:11,shadowColor:"#000",shadowOpacity:.5,shadowRadius:18,elevation:30},stopLossHead:{height:25,flexDirection:"row",alignItems:"center",justifyContent:"space-between",marginBottom:7},stopLossTitleWrap:{flexDirection:"row",alignItems:"center",gap:6},stopLossTitle:{color:"#F1F7FB",fontSize:13,fontWeight:"900"},stopLossClose:{width:24,height:24,alignItems:"center",justifyContent:"center"},stopLossRow:{height:31,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderTopWidth:1,borderTopColor:"#20384A"},stopLossLabel:{color:"#B8C9D4",fontSize:10,fontWeight:"800"},stopLossBalance:{color:"#F3F8FB",fontSize:13,fontWeight:"900"},stopLossPrincipalRow:{height:38,flexDirection:"row",alignItems:"center",gap:8},stopLossInput:{flex:1,height:30,borderWidth:1,borderColor:"#36536A",borderRadius:5,backgroundColor:"#08131D",color:"#fff",paddingHorizontal:8,fontSize:11,fontWeight:"800"},useBalanceBtn:{alignSelf:"flex-end",height:24,paddingHorizontal:8,borderRadius:4,backgroundColor:"#173B56",borderWidth:1,borderColor:"#315D79",alignItems:"center",justifyContent:"center",marginBottom:5},useBalanceBtnText:{color:"#BDE8FF",fontSize:8,fontWeight:"900"},stopLossPercentRow:{height:34,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderTopWidth:1,borderTopColor:"#20384A"},stopLossStepper:{flexDirection:"row",alignItems:"center",gap:7},stepBtn:{width:25,height:24,borderRadius:4,backgroundColor:"#173B56",alignItems:"center",justifyContent:"center"},stepBtnText:{color:"#fff",fontSize:16,fontWeight:"900",lineHeight:18},stopLossPercent:{minWidth:38,textAlign:"center",color:"#F5FAFD",fontSize:12,fontWeight:"900"},stopLossThresholdRow:{height:33,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderTopWidth:1,borderTopColor:"#20384A"},stopLossThreshold:{color:"#FFCB66",fontSize:13,fontWeight:"900"},stopLossEnableBtn:{height:32,borderRadius:5,backgroundColor:"#1E7AB5",alignItems:"center",justifyContent:"center",marginTop:5},stopLossEnableText:{color:"#fff",fontSize:10,fontWeight:"900"},stopLossAlertModal:{width:"82%",maxWidth:270,backgroundColor:"#101E2A",borderWidth:1,borderColor:"#6B5A32",borderRadius:10,paddingHorizontal:15,paddingVertical:14,alignItems:"center",shadowColor:"#000",shadowOpacity:.55,shadowRadius:18,elevation:31},stopLossAlertIcon:{width:38,height:38,borderRadius:19,backgroundColor:"rgba(255,203,102,.10)",alignItems:"center",justifyContent:"center",marginBottom:5},stopLossAlertTitle:{color:"#FFF3D2",fontSize:15,fontWeight:"900"},stopLossAlertText:{color:"#F1F6F9",fontSize:11,fontWeight:"900",marginTop:7,textAlign:"center"},stopLossAlertSub:{color:"#AFC0CB",fontSize:9.5,marginTop:4,textAlign:"center"},stopLossAckBtn:{height:31,minWidth:108,borderRadius:5,backgroundColor:"#1E7AB5",alignItems:"center",justifyContent:"center",marginTop:11,paddingHorizontal:14},stopLossAckText:{color:"#fff",fontSize:10,fontWeight:"900"},connectionModal:{width:"100%",maxWidth:760,maxHeight:"92%",backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},smallModal:{width:"100%",maxWidth:520,backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},modalHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:12},modalTitle:{color:"#fff",fontSize:17,fontWeight:"800"},modalNote:{color:"#BAC7D0",fontSize:10,lineHeight:15,backgroundColor:"#0C1721",padding:10,borderRadius:5,marginBottom:12},fieldLabel:{color:"#C6D3DC",fontSize:10,marginBottom:5,marginTop:8},modalInput:{height:42,borderWidth:1,borderColor:"#36536A",borderRadius:5,backgroundColor:"#08131D",color:"#fff",paddingHorizontal:10},mappingRow:{flexDirection:"row",gap:6,marginTop:10,flexWrap:"wrap"},mapChip:{color:"#C8D4DD",fontSize:9,backgroundColor:"#263A4C",paddingHorizontal:8,paddingVertical:6,borderRadius:4},modalActions:{flexDirection:"row",gap:7,marginTop:12,flexWrap:"wrap"},actionBtn:{height:38,paddingHorizontal:12,borderRadius:5,justifyContent:"center"},btnText:{color:"#fff",fontWeight:"900",fontSize:10},syncText:{color:"#AFC0CB",fontSize:9,marginTop:11},logBox:{height:130,backgroundColor:"#08131D",borderRadius:5,padding:9,marginTop:4},logText:{color:"#B8C8D2",fontSize:8,lineHeight:13},helpText:{color:"#D2DDE4",fontSize:11,lineHeight:18},
+  modalShade:{flex:1,backgroundColor:"rgba(0,0,0,.72)",alignItems:"center",justifyContent:"center",padding:16},stopLossShade:{flex:1,backgroundColor:"rgba(0,0,0,.62)",alignItems:"center",justifyContent:"center",padding:14,zIndex:20000},stopLossModal:{width:"88%",maxWidth:300,backgroundColor:"#101E2A",borderWidth:1,borderColor:"#315D79",borderRadius:9,padding:11,shadowColor:"#000",shadowOpacity:.5,shadowRadius:18,elevation:30},stopLossHead:{height:25,flexDirection:"row",alignItems:"center",justifyContent:"space-between",marginBottom:7},stopLossTitleWrap:{flexDirection:"row",alignItems:"center",gap:6},stopLossTitle:{color:"#F1F7FB",fontSize:13,fontWeight:"900"},stopLossClose:{width:24,height:24,alignItems:"center",justifyContent:"center"},stopLossRow:{height:31,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderTopWidth:1,borderTopColor:"#20384A"},stopLossLabel:{color:"#B8C9D4",fontSize:10,fontWeight:"800"},stopLossBalance:{color:"#F3F8FB",fontSize:13,fontWeight:"900"},stopLossPrincipalRow:{height:38,flexDirection:"row",alignItems:"center",gap:8},stopLossInput:{flex:1,height:30,borderWidth:1,borderColor:"#36536A",borderRadius:5,backgroundColor:"#08131D",color:"#fff",paddingHorizontal:8,fontSize:11,fontWeight:"800"},useBalanceBtn:{alignSelf:"flex-end",height:24,paddingHorizontal:8,borderRadius:4,backgroundColor:"#173B56",borderWidth:1,borderColor:"#315D79",alignItems:"center",justifyContent:"center",marginBottom:5},useBalanceBtnText:{color:"#BDE8FF",fontSize:8,fontWeight:"900"},stopLossPercentRow:{height:34,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderTopWidth:1,borderTopColor:"#20384A"},stopLossStepper:{flexDirection:"row",alignItems:"center",gap:7},stepBtn:{width:25,height:24,borderRadius:4,backgroundColor:"#173B56",alignItems:"center",justifyContent:"center"},stepBtnText:{color:"#fff",fontSize:16,fontWeight:"900",lineHeight:18},stopLossPercent:{minWidth:38,textAlign:"center",color:"#F5FAFD",fontSize:12,fontWeight:"900"},stopLossThresholdRow:{height:33,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderTopWidth:1,borderTopColor:"#20384A"},stopLossThreshold:{color:"#FFCB66",fontSize:13,fontWeight:"900"},stopLossEnableBtn:{height:32,borderRadius:5,backgroundColor:"#1E7AB5",alignItems:"center",justifyContent:"center",marginTop:5},stopLossEnableText:{color:"#fff",fontSize:10,fontWeight:"900"},stopLossAlertModal:{width:"82%",maxWidth:270,backgroundColor:"#101E2A",borderWidth:1,borderColor:"#6B5A32",borderRadius:10,paddingHorizontal:15,paddingVertical:14,alignItems:"center",shadowColor:"#000",shadowOpacity:.55,shadowRadius:18,elevation:31},stopLossAlertIcon:{width:38,height:38,borderRadius:19,backgroundColor:"rgba(255,203,102,.10)",alignItems:"center",justifyContent:"center",marginBottom:5},stopLossAlertTitle:{color:"#FFF3D2",fontSize:15,fontWeight:"900"},stopLossAlertText:{color:"#F1F6F9",fontSize:11,fontWeight:"900",marginTop:7,textAlign:"center"},stopLossAlertSub:{color:"#AFC0CB",fontSize:9.5,marginTop:4,textAlign:"center"},stopLossAckBtn:{height:31,minWidth:108,borderRadius:5,backgroundColor:"#1E7AB5",alignItems:"center",justifyContent:"center",marginTop:11,paddingHorizontal:14},stopLossAckText:{color:"#fff",fontSize:10,fontWeight:"900"},connectionModal:{width:"100%",maxWidth:760,maxHeight:"92%",backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},smallModal:{width:"100%",maxWidth:520,backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},modalHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:12},modalTitle:{color:"#fff",fontSize:17,fontWeight:"800"},modalNote:{color:"#BAC7D0",fontSize:10,lineHeight:15,backgroundColor:"#0C1721",padding:10,borderRadius:5,marginBottom:12},fieldLabel:{color:"#C6D3DC",fontSize:10,marginBottom:5,marginTop:8},modalInput:{height:42,borderWidth:1,borderColor:"#36536A",borderRadius:5,backgroundColor:"#08131D",color:"#fff",paddingHorizontal:10},connectionStatusRow:{flexDirection:"row",gap:8,marginBottom:4},connectionStatusCard:{flex:1,borderWidth:1,borderColor:"#36536A",borderRadius:6,backgroundColor:"#08131D",paddingHorizontal:10,paddingVertical:8},connectionStatusText:{fontSize:13,fontWeight:"900",marginTop:2},mappingRow:{flexDirection:"row",gap:6,marginTop:10,flexWrap:"wrap"},mapChip:{color:"#C8D4DD",fontSize:9,backgroundColor:"#263A4C",paddingHorizontal:8,paddingVertical:6,borderRadius:4},modalActions:{flexDirection:"row",gap:7,marginTop:12,flexWrap:"wrap"},actionBtn:{height:38,paddingHorizontal:12,borderRadius:5,justifyContent:"center"},btnText:{color:"#fff",fontWeight:"900",fontSize:10},syncText:{color:"#AFC0CB",fontSize:9,marginTop:11},logBox:{height:130,backgroundColor:"#08131D",borderRadius:5,padding:9,marginTop:4},logText:{color:"#B8C8D2",fontSize:8,lineHeight:13},helpText:{color:"#D2DDE4",fontSize:11,lineHeight:18},
   mtOverlay:{...StyleSheet.absoluteFillObject,zIndex:500,backgroundColor:"#05090E"},mtScreen:{flex:1,backgroundColor:"#05090E"},mtTop:{minHeight:58,paddingHorizontal:14,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#10202D",borderBottomWidth:1,borderBottomColor:"#28465A"},mtTitle:{color:"#fff",fontSize:15,fontWeight:"900"},iframeWrap:{flex:1},nativeMtFallback:{flex:1,alignItems:"center",justifyContent:"center"},toast:{position:"absolute",bottom:78,left:20,right:20,backgroundColor:"#203A4E",borderRadius:8,padding:9,zIndex:200},toastText:{color:"#fff",textAlign:"center",fontSize:10}
 });
 
