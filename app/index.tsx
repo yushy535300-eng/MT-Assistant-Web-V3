@@ -2171,8 +2171,8 @@ export default function HomeScreen(){
         if(cancelled)return;
         setDgConnected(status==="connected");
         // Do not hide the actual DG stage behind a generic "連線中" label.
-        // This makes it obvious whether the browser is on newappa0, validating,
-        // switching lines, or falling back to the cloud relay.
+        // Web now uses only the backend relay, so this shows relay handshake /
+        // validation / line-switch stages without attempting browser-direct WSS.
         setDgStatus(status==="connected"?"已連線":message||(status==="connecting"||status==="loading"?"連線中...":"未連線"));
         // Do not silently clear the DG URL on every handshake error. The old
         // behavior created an endless authorize/connect loop that looked like

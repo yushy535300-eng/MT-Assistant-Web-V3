@@ -428,7 +428,10 @@ class RawWsClient {
       this.onClose(why);
     };
     sock.on("error", err => reportClose(err.message || "socket error"));
-    sock.on("close", () => { clearTimeout(timeout); reportClose("closed"); });
+    sock.on("close", () => {
+      clearTimeout(timeout);
+      reportClose(this.handshakeDone ? "closed" : "DG WebSocket 握手提前關閉");
+    });
   }
   private frame(opcode: number, payload: Buffer) {
     const mask = randomBytes(4); let head: Buffer;
@@ -467,6 +470,9 @@ class RawWsClient {
 export class DgRelay {
   private token: string;
   private origin: string;
+  private originalOrigin: string;
+  private originCandidates: string[] = [];
+  private originCandidateIndex = 0;
   private wsUrl = DEFAULT_DG_WS;
   private wsCandidates: string[] = [DEFAULT_DG_WS];
   private wsCandidateIndex = 0;
@@ -485,10 +491,13 @@ export class DgRelay {
   private status: RelayStatus = "idle";
   private statusMessage = "待命";
   private initialVideoRequested = new Set<number>();
+  private firstTableLogged = false;
   constructor(public readonly sessionId: string, public readonly gameUrl: string) {
     this.token = extractToken(gameUrl);
     this.launchUrl = gameUrl;
     this.origin = (() => { try { return new URL(gameUrl).origin; } catch { return ""; } })();
+    this.originalOrigin = this.origin;
+    this.originCandidates = this.origin ? [this.origin] : [];
     try {
       const u = new URL(gameUrl);
       const m = u.pathname.match(/^(.*?\/ddnewpc)(?:\/|$)/i);
@@ -504,12 +513,16 @@ export class DgRelay {
       const launch = await resolveDgLaunch(this.gameUrl);
       this.launchUrl = launch.launchUrl;
       this.origin = launch.origin;
+      this.originCandidates = Array.from(new Set([launch.origin, this.originalOrigin].filter(Boolean)));
+      this.originCandidateIndex = 0;
       this.gameBasePath = launch.basePath;
       this.token = launch.token;
       this.jsonType = launch.jsonType;
-      this.event(`DG 啟動頁已確認：type=${this.jsonType}｜${new URL(this.launchUrl).hostname}`);
+      this.log(`啟動頁已確認：type=${this.jsonType}｜origin=${this.origin}｜host=${new URL(this.launchUrl).hostname}`);
     } catch (error: any) {
-      this.event(`DG 啟動頁解析未完成，依原始網址與 type=0 規則繼續：${error?.message || "unknown"}`);
+      this.originCandidates = this.originalOrigin ? [this.originalOrigin] : (this.origin ? [this.origin] : []);
+      this.originCandidateIndex = 0;
+      this.log(`啟動頁解析未完成，依原始網址與 type=0 規則繼續：${error?.message || "unknown"}`);
       this.jsonType = 0;
     }
 
@@ -535,7 +548,7 @@ export class DgRelay {
       this.wsFailuresThisCycle = 0;
       this.wsLastError = "";
       this.wsUrl = this.wsCandidates[0]!;
-      this.event(`DG WSS 已確認：type=${this.jsonType} → ${new URL(this.wsUrl).hostname}`);
+      this.log(`WSS 候選：type=${this.jsonType} → ${this.wsCandidates.map(x=>{try{return new URL(x).hostname}catch{return x}}).join(", ")}`);
     } catch (error: any) {
       // If settings cannot be loaded, still try the endpoints that have been
       // observed succeeding in real captures. This is transport failover only;
@@ -545,7 +558,7 @@ export class DgRelay {
       this.wsFailuresThisCycle = 0;
       this.wsLastError = "";
       this.wsUrl = this.wsCandidates[0] || HAR_VERIFIED_DG_WS;
-      this.event(`DG 設定讀取失敗，改試已驗證備援線：${error?.message || "unknown"}`);
+      this.log(`設定讀取失敗，改試備援線：${error?.message || "unknown"}`);
     }
     this.open();
   }
@@ -559,6 +572,10 @@ export class DgRelay {
   private broadcast(event: string, data: unknown) { for (const c of this.clients) this.sendTo(c, event, data); }
   private setStatus(status: RelayStatus, message: string) { this.status = status; this.statusMessage = message; this.broadcast("status", { status, message }); }
   private event(message: string) { this.broadcast("event", { message }); }
+  private log(message: string) {
+    console.log(`[DG relay][${this.sessionId.slice(0, 8)}] ${message}`);
+    this.event(`DG ${message}`);
+  }
   private tables() { return [...this.map.values()].sort(tableSort); }
   private emitTables() { this.broadcast("tables", this.tables()); }
   private authToken(cmd: number) { return encrypt3Des(JSON.stringify({ cmd, token: this.token, time: Date.now() })); }
@@ -566,13 +583,16 @@ export class DgRelay {
   private open() {
     if (this.stopped) return;
     let endpointName = this.wsUrl; try { endpointName = new URL(this.wsUrl).hostname; } catch {}
+    const activeOrigin = this.originCandidates[this.originCandidateIndex] || this.origin;
+    this.origin = activeOrigin;
     this.setStatus("connecting", `連線中 ${endpointName}...`);
+    this.log(`嘗試 WSS=${endpointName}｜Origin=${activeOrigin}`);
     const sign = encrypt3Des(this.token);
     const url = `${this.wsUrl.replace(/\/$/, "")}/?sign=${encodeURIComponent(sign)}`;
     this.ws = new RawWsClient(url, this.origin, data => this.handle(data), () => {
       this.wsLastError = "";
       this.setStatus("connecting", `已連上 ${endpointName}，正在驗證...`);
-      this.event("DG WebSocket 已建立，正在驗證");
+      this.log(`WebSocket 101：${endpointName}｜Origin=${activeOrigin}`);
       this.send(10086, { tableId: 1, type: 0, object: "PC" });
       if (this.authTimer) clearTimeout(this.authTimer);
       this.authTimer = setTimeout(() => {
@@ -585,9 +605,18 @@ export class DgRelay {
       if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
       if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
       const reason = String(why || "closed");
+      const wasConnected = this.status === "connected";
       this.wsLastError = reason;
+      this.log(`線路失敗：${endpointName}｜Origin=${activeOrigin}｜${reason}`);
+      if (wasConnected) {
+        this.wsFailuresThisCycle = 0;
+        this.setStatus("connecting", "DG 即時連線中斷，正在重新連線...");
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = setTimeout(() => this.open(), 1500);
+        return;
+      }
       this.wsFailuresThisCycle += 1;
-      const canFailover = /(?:HTTP\/1\.[01]\s+(?:400|401|403|404|429|500|502|503|504)|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|連線逾時|handshake|握手)/i.test(reason);
+      const canFailover = /(?:HTTP\/1\.[01]\s+(?:400|401|403|404|429|500|502|503|504)|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|連線逾時|handshake|握手|^closed$)/i.test(reason);
       if (canFailover && this.wsCandidates.length > 1 && this.wsFailuresThisCycle < this.wsCandidates.length) {
         this.wsCandidateIndex = (this.wsCandidateIndex + 1) % this.wsCandidates.length;
         this.wsUrl = this.wsCandidates[this.wsCandidateIndex]!;
@@ -603,10 +632,24 @@ export class DgRelay {
       // request a fresh DG launch token and start a clean connection cycle.
       if (this.wsFailuresThisCycle >= this.wsCandidates.length) {
         const last = this.wsLastError;
+        if (this.originCandidateIndex + 1 < this.originCandidates.length) {
+          this.originCandidateIndex += 1;
+          this.origin = this.originCandidates[this.originCandidateIndex]!;
+          this.wsFailuresThisCycle = 0;
+          this.wsCandidateIndex = 0;
+          this.wsUrl = this.wsCandidates[0]!;
+          this.setStatus("connecting", "DG Origin 切換後重新握手...");
+          this.log(`WSS 全線未通，改試 Origin=${this.origin}`);
+          if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = setTimeout(() => this.open(), 350);
+          return;
+        }
         this.setStatus("error", `DG 所有線路握手失敗：${last}`);
-        this.event(`DG 全線失敗，將重新取得授權：${last}`);
+        this.log(`所有 WSS / Origin 組合皆失敗：${last}`);
         this.wsFailuresThisCycle = 0;
         this.wsCandidateIndex = 0;
+        this.originCandidateIndex = 0;
+        this.origin = this.originCandidates[0] || this.origin;
         this.wsUrl = this.wsCandidates[0]!;
         return;
       }
@@ -641,16 +684,31 @@ export class DgRelay {
           this.reconnectTimer = setTimeout(() => this.open(), 350);
           return;
         }
+        if (this.originCandidateIndex + 1 < this.originCandidates.length) {
+          try { this.ws?.close(); } catch {}
+          this.originCandidateIndex += 1;
+          this.origin = this.originCandidates[this.originCandidateIndex]!;
+          this.wsFailuresThisCycle = 0;
+          this.wsCandidateIndex = 0;
+          this.wsUrl = this.wsCandidates[0] || HAR_VERIFIED_DG_WS;
+          this.setStatus("connecting", "DG 驗證未通過，切換 Origin 重試...");
+          this.log(`${reason}｜改試 Origin=${this.origin}`);
+          if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = setTimeout(() => this.open(), 350);
+          return;
+        }
         this.setStatus("error", reason);
-        this.event(`${reason}｜已嘗試全部候選線路`);
+        this.log(`${reason}｜已嘗試全部 WSS / Origin 組合`);
         this.wsFailuresThisCycle = 0;
         this.wsCandidateIndex = 0;
+        this.originCandidateIndex = 0;
+        this.origin = this.originCandidates[0] || this.origin;
         this.wsUrl = this.wsCandidates[0] || HAR_VERIFIED_DG_WS;
         return;
       }
       this.wsFailuresThisCycle = 0;
       this.wsLastError = "";
-      this.setStatus("connected", "已連線"); this.event("DG 驗證完成，正在同步真人桌");
+      this.setStatus("connected", "已連線"); this.log(`驗證完成｜WSS=${(()=>{try{return new URL(this.wsUrl).hostname}catch{return this.wsUrl}})()}｜Origin=${this.origin}`);
       this.send(45, { type: 1 }); this.send(2, { lobbyId: 5, type: 0 }); this.send(5011, { type: 0 });
       setTimeout(() => { if (!this.stopped) this.send(87, { type: 1 }); }, 80);
       setTimeout(() => { if (!this.stopped) this.send(24, { type: 2 }); }, 120);
@@ -690,7 +748,14 @@ export class DgRelay {
         };
         this.map.set(tableId, next); changed = true;
       }
-      if (changed) { this.emitTables(); if (cmd === 2 || cmd === 44) this.requestVideos(); }
+      if (changed) {
+        this.emitTables();
+        if (!this.firstTableLogged && this.map.size > 0) {
+          this.firstTableLogged = true;
+          this.log(`已同步真人桌：${this.map.size} 桌`);
+        }
+        if (cmd === 2 || cmd === 44) this.requestVideos();
+      }
     }
   }
   stop() {
@@ -698,7 +763,7 @@ export class DgRelay {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = null;
     if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
-    this.ws?.close(); this.ws = null; this.setStatus("closed", "已停止");
+    this.ws?.close(); this.ws = null; this.log("中繼已停止"); this.setStatus("closed", "已停止");
   }
 }
 

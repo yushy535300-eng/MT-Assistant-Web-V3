@@ -73,6 +73,7 @@ async function startServer() {
     // needs a public HTTPS vendor origin plus the one-time token; do not reject
     // a valid launch URL merely because its path is no longer /ddnewpc/direct1.
     if(parsed.protocol!=="https:"||looksLocal||!hasToken) return res.status(400).json({ok:false,error:"invalid_game_url"});
+    console.log(`[DG API] start｜host=${parsed.hostname}｜path=${parsed.pathname}｜session=${sessionId.slice(0,8)}`);
     try{await startDgRelay(sessionId,gameUrl);return res.json({ok:true});}
     catch(e:any){console.error("[DG relay] start failed",e);return res.status(502).json({ok:false,error:e?.message||"dg_start_failed"});}
   });
