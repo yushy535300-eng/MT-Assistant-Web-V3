@@ -497,6 +497,10 @@ export class DgRelay {
   private statusMessage = "待命";
   private initialVideoRequested = new Set<number>();
   private firstTableLogged = false;
+  // DG may push cmd=1004 (full road list) before the initial table snapshot.
+  // Keep that newest road list temporarily instead of dropping it; otherwise
+  // the UI can be exactly one hand behind DG at startup.
+  private pendingRoads = new Map<number, string[]>();
   constructor(public readonly sessionId: string, public readonly gameUrl: string) {
     this.token = extractToken(gameUrl);
     this.launchUrl = gameUrl;
@@ -775,7 +779,20 @@ export class DgRelay {
       const prev = this.map.get(bean.tableId); if (prev) { this.map.set(bean.tableId, { ...prev, streamUrl: bean.object, lastUpdated: Date.now() }); this.emitTables(); }
     }
     if (cmd === 1004 && bean.tableId && bean.list?.length) {
-      const prev = this.map.get(bean.tableId); if (prev) { const results = parseRoads(bean.list); const counts = countResults(results); this.map.set(bean.tableId, { ...prev, results, ...counts, lastUpdated: Date.now(), lastResultKey: `${prev.shoe}:${prev.round}:${results.length}:${results.at(-1) || ""}` }); this.emitTables(); }
+      const tableId = n(bean.tableId);
+      const fullRoads = [...bean.list];
+      const prev = this.map.get(tableId);
+      if (!prev) {
+        // Chromium can receive the road push before cmd=2/cmd=44 creates the table.
+        // Save it and merge it into the first snapshot instead of losing the newest hand.
+        this.pendingRoads.set(tableId, fullRoads);
+      } else {
+        const results = parseRoads(fullRoads);
+        const counts = countResults(results);
+        this.map.set(tableId, { ...prev, results, ...counts, lastUpdated: Date.now(), lastResultKey: `${prev.shoe}:${prev.round}:${results.length}:${results.at(-1) || ""}` });
+        this.pendingRoads.delete(tableId);
+        this.emitTables();
+      }
     }
     if (bean.table?.length) {
       let changed = false;
@@ -786,7 +803,13 @@ export class DgRelay {
         const gameId = raw.gameId != null ? n(raw.gameId) : undefined;
         if (!prev && gameId !== 1) continue;
         if (!prev && !fms) continue;
-        const roads = raw.roads?.length ? raw.roads : undefined;
+        const snapshotRoads = raw.roads?.length ? raw.roads : undefined;
+        const queuedRoads = !prev ? this.pendingRoads.get(tableId) : undefined;
+        // At initial connect, prefer cmd=1004 when it is at least as new as the
+        // snapshot. This prevents counts/珠盤/大路/下三路 from starting one hand behind.
+        const roads = queuedRoads && (!snapshotRoads || queuedRoads.length >= snapshotRoads.length)
+          ? queuedRoads
+          : snapshotRoads;
         const results = roads ? parseRoads(roads) : (prev?.results ?? []);
         const counts = countResults(results);
         const dealer = raw.dealer;
@@ -802,7 +825,9 @@ export class DgRelay {
           lastUpdated: Date.now(), lastResultKey: results.length ? `${shoeNum ?? prev?.shoe ?? "—"}:${roundNum ?? prev?.round ?? 0}:${results.length}:${results.at(-1)}` : prev?.lastResultKey,
           poker: raw.poker != null ? String(raw.poker) : prev?.poker,
         };
-        this.map.set(tableId, next); changed = true;
+        this.map.set(tableId, next);
+        if (!prev) this.pendingRoads.delete(tableId);
+        changed = true;
       }
       if (changed) {
         this.emitTables();

@@ -2137,46 +2137,49 @@ export default function HomeScreen(){
     appendEvent("TZ 已自動取得 MT Token，正在連線");
     startConnection(undefined,autoUrl);
   },[accessGranted]);
+  // Pre-warm DG in the background as soon as the TZ/OFA session is ready.
+  // MT remains the default screen, but by the time the user taps DG the costly
+  // authorization + Chromium startup is usually already complete.
   useEffect(()=>{
-    if(!accessGranted||activePlatform!=="DG"||dgGameUrl)return;
+    if(!accessGranted||dgGameUrl)return;
     const platformToken=platformTokenRef.current;
     if(!platformToken){setDgConnected(false);setDgStatus("DG 授權需要重新登入 TZ");return;}
     let cancelled=false;
-    setDgConnected(false);
-    setDgStatus("正在取得 DG 授權...");
-    appendEvent("切換 DG｜正在向 TZ 取得 DG 授權");
-    getDgLoginUrlFromPlatform(loginPlatform,platformToken).then(url=>{
+    const timer=setTimeout(()=>{
       if(cancelled)return;
-      setDgGameUrl(url);
-      appendEvent("TZ 已取得 DG Token，準備連線");
-    }).catch((error:any)=>{
-      if(cancelled)return;
-      setDgStatus(error?.message||"取得 DG 授權失敗");
-      appendEvent(`DG 授權失敗：${error?.message||"unknown"}`);
-    });
-    return()=>{cancelled=true};
-  },[accessGranted,activePlatform,dgGameUrl,loginPlatform]);
+      setDgConnected(false);
+      setDgStatus("背景預連線中...");
+      appendEvent("DG 背景預熱｜正在取得授權");
+      getDgLoginUrlFromPlatform(loginPlatform,platformToken).then(url=>{
+        if(cancelled)return;
+        setDgGameUrl(url);
+        appendEvent("DG 背景預熱｜已取得 Token");
+      }).catch((error:any)=>{
+        if(cancelled)return;
+        setDgStatus(error?.message||"取得 DG 授權失敗");
+        appendEvent(`DG 授權失敗：${error?.message||"unknown"}`);
+      });
+    },350);
+    return()=>{cancelled=true;clearTimeout(timer)};
+  },[accessGranted,dgGameUrl,loginPlatform]);
+
+  // Keep the DG relay alive for the whole authenticated session. Switching
+  // MT <-> DG no longer tears Chromium down and restarts it every time.
   useEffect(()=>{
-    if(!accessGranted||activePlatform!=="DG")return;
+    if(!accessGranted)return;
     if(!dgGameUrl){setDgConnected(false);return;}
     let cancelled=false;
     try{dgControllerRef.current?.close()}catch{}
     dgControllerRef.current=null;
     setDgConnected(false);
     setDgStatus("連線中...");
-    appendEvent("切換 DG｜正在自動連線");
+    appendEvent("DG 背景預熱｜正在建立即時通道");
     connectDgLive(dgGameUrl,accessSessionId,{
       onTables:(next:DgTableData[])=>{if(!cancelled)setDgTables(next as TableData[])},
       onStatus:(status,message)=>{
         if(cancelled)return;
         setDgConnected(status==="connected");
-        // Do not hide the actual DG stage behind a generic "連線中" label.
-        // Web now uses only the backend relay, so this shows relay handshake /
-        // validation / line-switch stages without attempting browser-direct WSS.
         setDgStatus(status==="connected"?"已連線":message||(status==="connecting"||status==="loading"?"連線中...":"未連線"));
-        // Do not silently clear the DG URL on every handshake error. The old
-        // behavior created an endless authorize/connect loop that looked like
-        // the UI was permanently stuck at "連線中". Surface the real error.
       },
       onEvent:(message)=>{if(!cancelled)appendEvent(message)},
     }).then(controller=>{
@@ -2193,7 +2196,7 @@ export default function HomeScreen(){
       try{dgControllerRef.current?.close()}catch{}
       dgControllerRef.current=null;
     };
-  },[accessGranted,accessSessionId,activePlatform,dgGameUrl]);
+  },[accessGranted,accessSessionId,dgGameUrl]);
 
   // Reuse the existing four-formula / parity floating tools with DG's live poker field.
   // This only updates when the actual dealt cards change, not on every countdown packet.
