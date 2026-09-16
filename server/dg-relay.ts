@@ -1,5 +1,6 @@
 import tls, { type TLSSocket } from "node:tls";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import { startDgChromiumTransport, type DgChromiumTransport } from "./dg-chromium";
 
 export type DgRoadResult = "莊" | "閒" | "和";
 export type DgTableSnapshot = {
@@ -482,6 +483,8 @@ export class DgRelay {
   private launchUrl: string;
   private jsonType = 0;
   private ws: RawWsClient | null = null;
+  private chromium: DgChromiumTransport | null = null;
+  private transportMode: "raw" | "browser" = "raw";
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -506,9 +509,52 @@ export class DgRelay {
     if (!this.token) throw new Error("DG 授權網址缺少 token");
   }
   async start() {
-    // Resolve direct1 -> the actual DG index page first. This is important:
-    // the index query's `type` is what the vendor bundle uses to select its
-    // regional WebSocket. Hard-coding TW/overseas produces the wrong endpoint.
+    // First choice: let a real headless Chromium page execute DG's own direct1
+    // bootstrap and create the vendor WebSocket. This keeps the browser TLS
+    // stack, redirect flow, Origin, sign generation and command order exactly
+    // where the DG bundle expects them. We only mirror incoming binary frames.
+    this.setStatus("connecting", "正在啟動 Chromium DG...");
+    try {
+      this.transportMode = "browser";
+      this.chromium = await startDgChromiumTransport({
+        sessionId: this.sessionId,
+        gameUrl: this.gameUrl,
+        onLog: message => this.log(`Chromium｜${message}`),
+        onMainUrl: url => {
+          try {
+            const parsed = new URL(url);
+            this.launchUrl = parsed.toString();
+            this.origin = parsed.origin;
+            const match = parsed.pathname.match(/^(.*?\/ddnewpc)(?:\/|$)/i);
+            if (match?.[1]) this.gameBasePath = match[1].replace(/\/$/, "");
+            const rawType = Number(parsed.searchParams.get("type"));
+            if (Number.isInteger(rawType) && rawType >= 0 && rawType <= 5) this.jsonType = rawType;
+          } catch {}
+        },
+        onHandshake: (url, status) => {
+          if (status !== 101) return;
+          this.wsUrl = url;
+          this.setStatus("connecting", "Chromium WebSocket 101，正在等待 DG 驗證...");
+        },
+        onBinary: data => this.handle(data),
+        onFailure: message => {
+          if (this.stopped) return;
+          this.setStatus("error", message);
+          this.log(`Chromium｜${message}`);
+        },
+      });
+      this.log("Chromium 模式已接管 DG；前端不直接連 vendor WSS");
+      return;
+    } catch (error: any) {
+      this.transportMode = "raw";
+      this.chromium = null;
+      this.log(`Chromium 啟動失敗，才改用 Node WSS 備援：${error?.message || "unknown"}`);
+      this.setStatus("connecting", "Chromium 無法啟動，改用備援中繼...");
+    }
+
+    // Fallback only: resolve direct1 -> actual DG index page and use the raw
+    // Node relay. This preserves the previous implementation if Chromium is
+    // unavailable on a particular deployment environment.
     try {
       const launch = await resolveDgLaunch(this.gameUrl);
       this.launchUrl = launch.launchUrl;
@@ -658,6 +704,7 @@ export class DgRelay {
     this.ws.connect();
   }
   private requestVideos() {
+    if (this.transportMode === "browser") return;
     const baccarat = this.tables().filter(t => /^BAC\d+/i.test(t.apiId) || /^TID\d+/i.test(t.apiId));
     baccarat.forEach((t, idx) => {
       const tableId = Number(t.tableBadge); if (!tableId || this.initialVideoRequested.has(tableId)) return;
@@ -672,6 +719,11 @@ export class DgRelay {
       if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
       if (n(bean.codeId) !== 0) {
         const reason = `DG 驗證失敗 (${bean.codeId})`;
+        if (this.transportMode === "browser") {
+          this.setStatus("error", reason);
+          this.log(`Chromium｜${reason}`);
+          return;
+        }
         this.wsFailuresThisCycle += 1;
         if (this.wsCandidates.length > 1 && this.wsFailuresThisCycle < this.wsCandidates.length) {
           try { this.ws?.close(); } catch {}
@@ -708,12 +760,14 @@ export class DgRelay {
       }
       this.wsFailuresThisCycle = 0;
       this.wsLastError = "";
-      this.setStatus("connected", "已連線"); this.log(`驗證完成｜WSS=${(()=>{try{return new URL(this.wsUrl).hostname}catch{return this.wsUrl}})()}｜Origin=${this.origin}`);
-      this.send(45, { type: 1 }); this.send(2, { lobbyId: 5, type: 0 }); this.send(5011, { type: 0 });
-      setTimeout(() => { if (!this.stopped) this.send(87, { type: 1 }); }, 80);
-      setTimeout(() => { if (!this.stopped) this.send(24, { type: 2 }); }, 120);
-      if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
-      this.keepaliveTimer = setInterval(() => { if (!this.stopped) this.send(99); }, 20000);
+      this.setStatus("connected", "已連線"); this.log(`驗證完成｜WSS=${(()=>{try{return new URL(this.wsUrl).hostname}catch{return this.wsUrl}})()}｜Origin=${this.origin}｜mode=${this.transportMode}`);
+      if (this.transportMode === "raw") {
+        this.send(45, { type: 1 }); this.send(2, { lobbyId: 5, type: 0 }); this.send(5011, { type: 0 });
+        setTimeout(() => { if (!this.stopped) this.send(87, { type: 1 }); }, 80);
+        setTimeout(() => { if (!this.stopped) this.send(24, { type: 2 }); }, 120);
+        if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
+        this.keepaliveTimer = setInterval(() => { if (!this.stopped) this.send(99); }, 20000);
+      }
     }
     if (cmd === 29 && bean.tableId && bean.object && /^https?:\/\//i.test(bean.object)) {
       const prev = this.map.get(bean.tableId); if (prev) { this.map.set(bean.tableId, { ...prev, streamUrl: bean.object, lastUpdated: Date.now() }); this.emitTables(); }
@@ -763,7 +817,10 @@ export class DgRelay {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = null;
     if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
-    this.ws?.close(); this.ws = null; this.log("中繼已停止"); this.setStatus("closed", "已停止");
+    this.ws?.close(); this.ws = null;
+    try { this.chromium?.stop(); } catch {}
+    this.chromium = null;
+    this.log("中繼已停止"); this.setStatus("closed", "已停止");
   }
 }
 

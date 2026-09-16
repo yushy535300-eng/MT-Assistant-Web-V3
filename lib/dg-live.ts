@@ -355,7 +355,7 @@ async function connectDgServerRelay(gameUrl: string, sessionId: string, callback
   }
 
   source = new EventSource(`/api/dg/stream?sessionId=${encodeURIComponent(sessionId)}`);
-  callbacks.onStatus?.("connecting", "DG 連線中...");
+  callbacks.onStatus?.("connecting", "DG Chromium 連線中...");
 
   source.addEventListener("status", (raw: Event) => {
     if (closed) return;
@@ -384,8 +384,8 @@ async function connectDgServerRelay(gameUrl: string, sessionId: string, callback
   };
   watchdog = setTimeout(() => {
     if (!closed && !connected) {
-      callbacks.onStatus?.("connecting", "DG 後端正在切換備援線路...");
-      callbacks.onEvent?.("DG 後端仍在嘗試 WSS / Origin 備援組合，瀏覽器不會再直接連 DG WSS。");
+      callbacks.onStatus?.("connecting", "DG Chromium 仍在等待 WebSocket 101...");
+      callbacks.onEvent?.("DG 後端已使用真正 Chromium 開啟 DG；若仍無 101，請查看 Render Log 的 [DG relay] Chromium 訊息。");
     }
   }, 25000);
 
@@ -413,6 +413,6 @@ async function connectDgServerRelay(gameUrl: string, sessionId: string, callback
 export async function connectDgLive(gameUrl: string, sessionId: string, callbacks: DgCallbacks): Promise<DgController> {
   if (typeof window === "undefined") throw new Error("DG 即時連線目前僅支援網站/App版");
   if (!sessionId) throw new Error("登入工作階段已失效");
-  callbacks.onEvent?.("DG 網頁版改走後端中繼，不再由瀏覽器直接連 DG WebSocket");
+  callbacks.onEvent?.("DG 網頁版改走 Render Chromium 中繼；前端不直接連 DG WebSocket");
   return connectDgServerRelay(gameUrl, sessionId, callbacks);
 }
