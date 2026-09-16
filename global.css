@@ -1,3 +1,20 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+
+/* Web dashboard idle/sleep hardening: keep the React mount surface measurable
+   and visible when Chromium/Safari resumes a throttled tab. */
+html, body, #root {
+  width: 100%;
+  min-width: 100%;
+  height: 100%;
+  min-height: 100%;
+  margin: 0;
+  background: #080E17;
+  visibility: visible;
+  opacity: 1;
+}
+#root {
+  isolation: isolate;
+}
