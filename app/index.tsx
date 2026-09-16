@@ -51,38 +51,6 @@ type BetSide = "莊" | "閒" | "和";
 type BetRecord = { side: BetSide; result: Result; amount: number; pnl: number; at: number };
 type PendingBet = { tableId: string; side: BetSide; amount: number; resultKey?: string } | null;
 
-
-function DgSameSessionView({sessionId}:{sessionId:string}){
-  if(Platform.OS!=="web")return <View style={{flex:1,alignItems:"center",justifyContent:"center",backgroundColor:"#000"}}><Text style={{color:"#fff"}}>DG 同工作階段畫面目前僅支援 Web。</Text></View>;
-  const postInput=(input:any)=>{void fetch("/api/dg/browser-input",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId,input}),keepalive:true}).catch(()=>{})};
-  const point=(e:any)=>{
-    const el=e.currentTarget as HTMLElement;
-    const r=el.getBoundingClientRect();
-    const targetAR=1280/720, boxAR=r.width/Math.max(1,r.height);
-    let left=0,top=0,w=r.width,h=r.height;
-    if(boxAR>targetAR){w=r.height*targetAR;left=(r.width-w)/2}else{h=r.width/targetAR;top=(r.height-h)/2}
-    const x=Math.max(0,Math.min(1279,((e.clientX-r.left-left)/Math.max(1,w))*1280));
-    const y=Math.max(0,Math.min(719,((e.clientY-r.top-top)/Math.max(1,h))*720));
-    return {x,y};
-  };
-  const button=(e:any)=>e.button===2?"right":e.button===1?"middle":"left";
-  const src=`/api/dg/browser-view?sessionId=${encodeURIComponent(sessionId)}&v=1`;
-  return createElement("div",{
-    tabIndex:0,
-    onContextMenu:(e:any)=>e.preventDefault(),
-    onPointerDown:(e:any)=>{e.currentTarget.focus?.();const p=point(e);postInput({kind:"pointer",action:"down",...p,button:button(e),buttons:e.buttons,clickCount:1});},
-    onPointerUp:(e:any)=>{const p=point(e);postInput({kind:"pointer",action:"up",...p,button:button(e),buttons:0,clickCount:1});},
-    onPointerMove:(e:any)=>{if(!e.buttons)return;const p=point(e);postInput({kind:"pointer",action:"move",...p,button:"none",buttons:e.buttons,clickCount:1});},
-    onWheel:(e:any)=>{e.preventDefault();const p=point(e);postInput({kind:"pointer",action:"wheel",...p,deltaX:e.deltaX,deltaY:e.deltaY});},
-    onKeyDown:(e:any)=>{if(e.key&&e.key.length===1)postInput({kind:"key",action:"text",text:e.key});else postInput({kind:"key",action:"down",key:e.key,code:e.code});},
-    onKeyUp:(e:any)=>{if(!(e.key&&e.key.length===1))postInput({kind:"key",action:"up",key:e.key,code:e.code});},
-    style:{width:"100%",height:"100%",background:"#000",display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",outline:"none",touchAction:"none",userSelect:"none",position:"relative"}
-  },
-    createElement("img",{src,draggable:false,alt:"DG same session",style:{width:"100%",height:"100%",objectFit:"contain",display:"block",pointerEvents:"none",background:"#000"}}),
-    createElement("div",{style:{position:"absolute",left:8,bottom:8,padding:"5px 8px",borderRadius:6,background:"rgba(0,0,0,.58)",color:"#d6b36a",fontSize:11,fontWeight:700,pointerEvents:"none"}},"DG SAME SESSION · 連線不中斷")
-  );
-}
-
 const baccaratTableIds = ["BAG01","BAG02","BAG03","BAG03A","BAG05","BAG06","BAG07","BAG08","BAG09","BAG10","BAG11","BAG12","BAG13","BAG13A","BAG15"];
 const dealerStreamUrls: Record<string,string> = {
   BAG01: "https://pull.bighit888.com/livestream/bag01-1.flv",
@@ -667,6 +635,52 @@ async function getDgLoginUrlFromPlatform(platform:"TZ"|"OFA",token:string){
   return getGameLoginUrlFromPlatform(platform,token,"DGLI");
 }
 
+async function platformWalletRequest(platform:"TZ"|"OFA",token:string,method:"GET"|"POST",body?:any){
+  if(Platform.OS!=="web") throw new Error("轉點目前僅支援網站版");
+  const base=platform==="OFA"?"https://www.ofa1188.net":"https://www.tz6868.cc";
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),15000);
+  const request=async(withAuth:boolean)=>{
+    const headers:any={"Accept":"application/json, text/plain, */*"};
+    if(method==="POST")headers["Content-Type"]="application/json";
+    if(withAuth&&token)headers.Authorization=`Bearer ${token}`;
+    return fetch(`${base}/api/v1/user/wallet`,{
+      method,mode:"cors",headers,
+      body:method==="POST"?JSON.stringify(body??{}):undefined,
+      signal:controller.signal,
+    });
+  };
+  try{
+    let response=await request(false);
+    let text=await response.text(); let data:any=null; try{data=text?JSON.parse(text):null}catch{}
+    const code=Number(data?.code);
+    if(token&&(response.status===401||response.status===403||code===401||code===403)){
+      response=await request(true); text=await response.text(); data=null; try{data=text?JSON.parse(text):null}catch{}
+    }
+    return {response,data};
+  }catch(error:any){
+    if(error?.name==="AbortError")throw new Error("轉點服務逾時，請稍後再試");
+    throw error;
+  }finally{clearTimeout(timeout)}
+}
+
+async function transferAllToMainWallet(platform:"TZ"|"OFA",token:string){
+  const result=await platformWalletRequest(platform,token,"POST",{s:"all",t:0});
+  const ok=result.response.ok&&Number(result.data?.code)===200;
+  if(ok)return {ok:true,empty:false,message:String(result.data?.message??"轉回成功")};
+
+  // TZ 在沒有可轉回點數時可能只回 422/9999「失敗」。
+  // 再讀一次遊戲錢包；如果所有遊戲錢包都是 0，就顯示成「目前無可轉回點數」。
+  try{
+    const wallet=await platformWalletRequest(platform,token,"GET");
+    const rows=Array.isArray(wallet.data?.data)?wallet.data.data:[];
+    const transferable=rows.filter((x:any)=>String(x?.game_code||"").trim()).reduce((sum:number,x:any)=>sum+(Number(x?.game_balance)||0),0);
+    if(transferable<=0.000001)return {ok:false,empty:true,message:"目前無可轉回點數"};
+  }catch{}
+  const message=String(result.data?.message??result.data?.msg??result.data?.error??`轉回失敗 (${result.response.status})`).replace(/^"|"$/g,"");
+  return {ok:false,empty:false,message:message||"轉回失敗"};
+}
+
 function getTzLoginDeviceId(){
   if(typeof window === "undefined") return "web";
   const key="mt_tz_device_id";
@@ -681,7 +695,7 @@ function getTzLoginDeviceId(){
   return id;
 }
 
-function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:string,mtGameUrl:string,platformToken:string,platform:"TZ"|"OFA")=>void;notice?:string}){
+function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:string,platformToken:string,platform:"TZ"|"OFA")=>void;notice?:string}){
   const {width}=useWindowDimensions();
   const desktop=width>=1000;
   const [username,setUsername]=useState("");
@@ -689,7 +703,6 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
   const [showPassword,setShowPassword]=useState(false);
   const [error,setError]=useState("");
   const playCount=useRef(0);
-  const pendingMtGameUrlRef=useRef("");
   const webVideoRef=useRef<any>(null);
   const player=useVideoPlayer({ uri: "/poker.mp4" },p=>{if(Platform.OS!=="web"){p.loop=false;p.muted=true;p.play()}});
   useEffect(()=>{if(Platform.OS==="web")return;const sub=player.addListener("playToEnd",()=>{playCount.current+=1;if(playCount.current<2){player.currentTime=0;player.play()}else player.pause()});return()=>sub.remove()},[player]);
@@ -735,12 +748,10 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
         setError(messages[reason]||"TZ 登入驗證失敗");
         return;
       }
-      // 登入畫面與原本流程保持一致：先準備 MT，進主頁後預設就是 MT。
-      // DG 授權延後到使用者在主頁切到 DG 時才自動取得，避免登入被 DG 網路狀態拖慢。
-      pendingMtGameUrlRef.current="";
-      try{pendingMtGameUrlRef.current=await getMtLoginUrlFromPlatform(platform,platformToken)}catch{}
+      // 登入 MT Assistant 只建立 TZ/OFA 授權工作階段。
+      // 不在登入時呼叫 MTLI/login 或 DGLI/login，避免平台的自動轉點被提前觸發。
       setError("");
-      onAuthenticated(access.sessionId,pendingMtGameUrlRef.current,platformToken,platform);
+      onAuthenticated(access.sessionId,platformToken,platform);
     }catch(error:any){
       setError(error?.message||"登入工作階段建立失敗，請重試");
     }
@@ -1063,8 +1074,14 @@ export default function HomeScreen(){
       setToken("");
       setMtUrl("");
       lockedMtUrlRef.current="";
-      pendingAutoMtUrlRef.current="";
-      autoMtConnectDoneRef.current=false;
+      setHasEnteredGame(false);
+      setDgWasOpened(false);
+      setGameViewUrl("");
+      setPlatformLaunching(false);
+      setWalletTransferOpen(false);
+      setWalletTransferBusy(false);
+      setDgNeedsRecovery(false);
+      dgHasConnectedRef.current=false;
       setFloatingOpen(false);
       setMtOpen(false);
       setInsideMt(false);
@@ -1085,6 +1102,13 @@ export default function HomeScreen(){
   const [radarOpen,setRadarOpen]=useState(false);
   const [radarDetailId,setRadarDetailId]=useState<string|null>(null);
   const [mtOpen,setMtOpen]=useState(false);
+  const [gameViewPlatform,setGameViewPlatform]=useState<"MT"|"DG">("MT");
+  const [gameViewUrl,setGameViewUrl]=useState("");
+  const [platformLaunching,setPlatformLaunching]=useState(false);
+  const [hasEnteredGame,setHasEnteredGame]=useState(false);
+  const [dgWasOpened,setDgWasOpened]=useState(false);
+  const [walletTransferOpen,setWalletTransferOpen]=useState(false);
+  const [walletTransferBusy,setWalletTransferBusy]=useState(false);
   const [floatingOpen,setFloatingOpen]=useState(false);
   const [roomDropdownOpen,setRoomDropdownOpen]=useState(false);
   const roomDropdownOpenRef=useRef(false);
@@ -1097,14 +1121,14 @@ export default function HomeScreen(){
   const [dgConnected,setDgConnected]=useState(false);
   const [dgStatus,setDgStatus]=useState("未連線");
   const [dgGameUrl,setDgGameUrl]=useState("");
+  const [dgNeedsRecovery,setDgNeedsRecovery]=useState(false);
+  const dgHasConnectedRef=useRef(false);
   const [dgTables,setDgTables]=useState<TableData[]>([]);
   const dgControllerRef=useRef<{close:()=>void}|null>(null);
   const platformTokenRef=useRef("");
   const [loginPlatform,setLoginPlatform]=useState<"TZ"|"OFA">("TZ");
   const [token,setToken]=useState("");
   const [mtUrl,setMtUrl]=useState("");
-  const pendingAutoMtUrlRef=useRef("");
-  const autoMtConnectDoneRef=useRef(false);
   // Authoritative MT launch URL for this TZ login session. UI fields are display-only.
   const lockedMtUrlRef=useRef("");
   const [wsUrl]=useState("wss://a1.ofalive99.net/game/ws");
@@ -2157,46 +2181,22 @@ export default function HomeScreen(){
       appendEvent("WebSocket 已中斷");
     };
   };
+  // After app login, only pre-warm the Chromium PROCESS.
+  // Do not call MTLI/login or DGLI/login here: entering a vendor game may trigger
+  // TZ/OFA automatic wallet transfer, which must happen only after the user taps
+  // MT平台 / DG平台.
   useEffect(()=>{
-    if(!accessGranted||autoMtConnectDoneRef.current)return;
-    const autoUrl=pendingAutoMtUrlRef.current;
-    if(!autoUrl)return;
-    autoMtConnectDoneRef.current=true;
-    pendingAutoMtUrlRef.current="";
-    lockedMtUrlRef.current=autoUrl;
-    setToken(autoUrl);
-    setMtUrl(autoUrl);
-    appendEvent("TZ 已自動取得 MT Token，正在連線");
-    startConnection(undefined,autoUrl);
-  },[accessGranted]);
-  // Pre-warm DG in the background as soon as the TZ/OFA session is ready.
-  // MT remains the default screen, but by the time the user taps DG the costly
-  // authorization + Chromium startup is usually already complete.
-  useEffect(()=>{
-    if(!accessGranted||dgGameUrl)return;
-    const platformToken=platformTokenRef.current;
-    if(!platformToken){setDgConnected(false);setDgStatus("DG 授權需要重新登入 TZ");return;}
-    let cancelled=false;
-    const timer=setTimeout(()=>{
-      if(cancelled)return;
-      setDgConnected(false);
-      setDgStatus("背景預連線中...");
-      appendEvent("DG 背景預熱｜正在取得授權");
-      getDgLoginUrlFromPlatform(loginPlatform,platformToken).then(url=>{
-        if(cancelled)return;
-        setDgGameUrl(url);
-        appendEvent("DG 背景預熱｜已取得 Token");
-      }).catch((error:any)=>{
-        if(cancelled)return;
-        setDgStatus(error?.message||"取得 DG 授權失敗");
-        appendEvent(`DG 授權失敗：${error?.message||"unknown"}`);
-      });
-    },350);
-    return()=>{cancelled=true;clearTimeout(timer)};
-  },[accessGranted,dgGameUrl,loginPlatform]);
+    if(!accessGranted||!accessSessionId)return;
+    void fetch("/api/dg/prewarm",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({sessionId:accessSessionId}),
+    }).catch(()=>undefined);
+  },[accessGranted,accessSessionId]);
 
-  // Keep the DG relay alive for the whole authenticated session. Switching
-  // MT <-> DG no longer tears Chromium down and restarts it every time.
+  // DG relay starts only after the user has actually entered DG once.
+  // The game URL is never fetched during assistant login, so TZ/OFA automatic
+  // wallet transfer cannot be triggered just by opening the road dashboard.
   useEffect(()=>{
     if(!accessGranted)return;
     if(!dgGameUrl){setDgConnected(false);return;}
@@ -2204,14 +2204,21 @@ export default function HomeScreen(){
     try{dgControllerRef.current?.close()}catch{}
     dgControllerRef.current=null;
     setDgConnected(false);
-    setDgStatus("連線中...");
-    appendEvent("DG 背景預熱｜正在建立即時通道");
+    setDgStatus("連線中");
     connectDgLive(dgGameUrl,accessSessionId,{
       onTables:(next:DgTableData[])=>{if(!cancelled)setDgTables(next as TableData[])},
       onStatus:(status,message)=>{
         if(cancelled)return;
-        setDgConnected(status==="connected");
-        setDgStatus(status==="connected"?"已連線":message||(status==="connecting"||status==="loading"?"連線中...":"未連線"));
+        const online=status==="connected";
+        setDgConnected(online);
+        setDgStatus(online?"已連線":"連線中");
+        if(online){
+          dgHasConnectedRef.current=true;
+          setDgNeedsRecovery(false);
+        }else if(status==="error"||status==="closed"){
+          setDgNeedsRecovery(true);
+          if(message)appendEvent(`DG 背景連線待恢復：${message}`);
+        }
       },
       onEvent:(message)=>{if(!cancelled)appendEvent(message)},
     }).then(controller=>{
@@ -2220,8 +2227,9 @@ export default function HomeScreen(){
     }).catch((error:any)=>{
       if(cancelled)return;
       setDgConnected(false);
-      setDgStatus(error?.message||"DG 連線失敗");
-      appendEvent(`DG 連線失敗：${error?.message||"unknown"}`);
+      setDgStatus("連線中");
+      setDgNeedsRecovery(true);
+      appendEvent(`DG 背景連線待恢復：${error?.message||"unknown"}`);
     });
     return()=>{
       cancelled=true;
@@ -2229,6 +2237,32 @@ export default function HomeScreen(){
       dgControllerRef.current=null;
     };
   },[accessGranted,accessSessionId,dgGameUrl]);
+
+  // If the real DG game page takes over the account session and the background
+  // relay is kicked, do not fight the live game with another login. Wait until
+  // the user returns to the road dashboard, then obtain a fresh DGLI URL and
+  // recover the relay automatically while keeping the last road snapshot visible.
+  useEffect(()=>{
+    if(!accessGranted||mtOpen||walletTransferBusy||!dgWasOpened||!dgNeedsRecovery)return;
+    const platformToken=platformTokenRef.current;
+    if(!platformToken)return;
+    let cancelled=false;
+    const timer=setTimeout(()=>{
+      if(cancelled)return;
+      setDgStatus("連線中");
+      getDgLoginUrlFromPlatform(loginPlatform,platformToken).then(url=>{
+        if(cancelled)return;
+        setDgNeedsRecovery(false);
+        setDgGameUrl(url);
+        appendEvent("DG 已自動重新授權，恢復牌路連線");
+      }).catch((error:any)=>{
+        if(cancelled)return;
+        setDgStatus("連線中");
+        appendEvent(`DG 自動恢復失敗：${error?.message||"unknown"}`);
+      });
+    },700);
+    return()=>{cancelled=true;clearTimeout(timer)};
+  },[accessGranted,mtOpen,walletTransferBusy,dgWasOpened,dgNeedsRecovery,loginPlatform]);
 
   // Reuse the existing four-formula / parity floating tools with DG's live poker field.
   // This only updates when the actual dealt cards change, not on every countdown packet.
@@ -2300,8 +2334,14 @@ export default function HomeScreen(){
     setToken("");
     setMtUrl("");
     lockedMtUrlRef.current="";
-    pendingAutoMtUrlRef.current="";
-    autoMtConnectDoneRef.current=false;
+    setHasEnteredGame(false);
+    setDgWasOpened(false);
+    setGameViewUrl("");
+    setPlatformLaunching(false);
+    setWalletTransferOpen(false);
+    setWalletTransferBusy(false);
+    setDgNeedsRecovery(false);
+    dgHasConnectedRef.current=false;
     // Revoke the server-side app session without awaiting it. The login screen is already active.
     if(sessionToLogout){void logoutAccess.mutateAsync({sessionId:sessionToLogout}).catch(()=>{});}
   };
@@ -2309,18 +2349,72 @@ export default function HomeScreen(){
     if(activePlatform==="DG"){if(dgConnected)appendEvent("DG 懸浮輔助已同步即時資料");else notify("DG 尚未連線");return;}
     const ws=socketRef.current;if(ws?.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));appendEvent("懸浮輔助已要求同步")}else notify("尚未連線")
   };
-  const openCurrentPlatform=(table?:TableData)=>{
+  const openCurrentPlatform=async(table?:TableData)=>{
     if(table)setAssistTableId(table.apiId??table.id);
-    if(activePlatform==="DG"){
-      if(!dgGameUrl||!dgConnected){notify("DG 尚未完成連線，請稍候");return;}
+    if(platformLaunching)return;
+    const platformToken=platformTokenRef.current;
+    if(!platformToken){notify("登入授權已失效，請重新登入");return;}
+    setPlatformLaunching(true);
+    try{
+      if(activePlatform==="MT"){
+        const url=await getMtLoginUrlFromPlatform(loginPlatform,platformToken);
+        // A fresh MTLI login can issue a new MT token. Replace the old main-data
+        // socket instead of authenticating twice with two tokens.
+        socketGenerationRef.current+=1;
+        const old=socketRef.current; socketRef.current=null;
+        try{old?.close()}catch{}
+        setSocket(null); setConnected(false);
+        lockedMtUrlRef.current=url;
+        setToken(url);
+        setMtUrl(url);
+        startConnection(undefined,url);
+        setGameViewPlatform("MT");
+        setGameViewUrl(url);
+      }else{
+        const url=await getDgLoginUrlFromPlatform(loginPlatform,platformToken);
+        setDgWasOpened(true);
+        setDgNeedsRecovery(false);
+        setDgStatus("連線中");
+        setDgGameUrl(url);
+        setGameViewPlatform("DG");
+        setGameViewUrl(url);
+      }
+      setHasEnteredGame(true);
       setMtOpen(true);
-      return;
-    }
-    const url=mtUrl.trim()||token.trim();
-    if(!url){notify("尚未取得 MT 平台授權");return;}
-    setMtOpen(true);
+    }catch(error:any){
+      notify(error?.message||`取得 ${activePlatform} 平台授權失敗`);
+    }finally{setPlatformLaunching(false)}
   };
-  const action=(kind:string,table:TableData)=>{if(kind==="平台")openCurrentPlatform(table);else if(kind==="分析")setAnalysisTable(table);else notify(`已關注百家樂 ${table.id}`)};
+  const confirmTransferAll=()=>{
+    if(!hasEnteredGame){notify("請先進入 MT 或 DG 平台");return;}
+    setWalletTransferOpen(true);
+  };
+  const executeTransferAll=async()=>{
+    if(walletTransferBusy)return;
+    const platformToken=platformTokenRef.current;
+    if(!platformToken){notify("登入授權已失效，請重新登入");return;}
+    setWalletTransferBusy(true);
+    try{
+      const result=await transferAllToMainWallet(loginPlatform,platformToken);
+      if(result.ok){
+        // Once points are returned to the main wallet, do not immediately perform
+        // a background DGLI re-login: on TZ that could auto-transfer the points
+        // straight back into DG. DG data will reconnect only after the next real
+        // DG平台 entry.
+        setDgNeedsRecovery(false);
+        try{dgControllerRef.current?.close()}catch{}
+        dgControllerRef.current=null;
+        setDgGameUrl("");
+        setDgConnected(false);
+        setDgStatus("連線中");
+        notify("轉回成功");setWalletTransferOpen(false);
+      }
+      else if(result.empty){notify("目前無可轉回點數");setWalletTransferOpen(false);}
+      else notify(result.message||"轉回失敗");
+    }catch(error:any){notify(error?.message||"轉回失敗");}
+    finally{setWalletTransferBusy(false)}
+  };
+  const action=(kind:string,table:TableData)=>{if(kind==="平台")void openCurrentPlatform(table);else if(kind==="分析")setAnalysisTable(table);else notify(`已關注百家樂 ${table.id}`)};
   const actionRef=useRef(action);
   actionRef.current=action;
   const stableTableAction=useMemo(()=>(kind:string,table:TableData)=>actionRef.current(kind,table),[]);
@@ -2547,28 +2641,35 @@ export default function HomeScreen(){
     </Animated.View>;
   };
 
-  if(!accessGranted)return <AccessScreen notice={accessNotice} onAuthenticated={(sessionId,mtGameUrl,platformToken,platform)=>{
+  if(!accessGranted)return <AccessScreen notice={accessNotice} onAuthenticated={(sessionId,platformToken,platform)=>{
     setAccessSessionId(sessionId);
     setAccessNotice("");
     setActivePlatform("MT");
-    autoMtConnectDoneRef.current=false;
-    pendingAutoMtUrlRef.current=mtGameUrl||"";
-    lockedMtUrlRef.current=mtGameUrl||"";
     platformTokenRef.current=platformToken;
     setLoginPlatform(platform);
+    lockedMtUrlRef.current="";
+    setToken("");
+    setMtUrl("");
     setDgGameUrl("");
+    setDgTables([]);
     setDgConnected(false);
-    setDgStatus("待命");
-    if(mtGameUrl){setToken(mtGameUrl);setMtUrl(mtGameUrl)}
+    setDgStatus("連線中");
+    setDgNeedsRecovery(false);
+    dgHasConnectedRef.current=false;
+    setHasEnteredGame(false);
+    setDgWasOpened(false);
+    setGameViewUrl("");
     setAccessGranted(true);
   }}/>;
 
   return <ScreenContainer edges={["top","left","right","bottom"]} containerClassName="bg-[#080E17]" className="bg-[#080E17]">
     <View style={[s.screen,activePlatform==="DG"&&s.screenDg,desktop&&Platform.OS==="web"?s.screenDesktopZoom:null]}>
       <View style={[s.topbar,!desktop?s.topbarMobile:null,activePlatform==="DG"&&s.topbarDg]}><View style={s.brandRow}><View style={[s.brandIcon,activePlatform==="DG"&&s.brandIconDg]}><MatrixMark size={29} brand={activePlatform}/></View><View><Text style={[s.kicker,activePlatform==="DG"&&s.kickerDg]}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={logoutSession}><MaterialIcons name="logout" size={16} color="#fff"/><Text style={s.headerBtnText}>登出</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setConnectionOpen(true)}><MaterialIcons name="settings" size={16} color="#fff"/><Text style={s.headerBtnText}>連線</Text></Pressable></View></View>
-      <ScrollView contentContainerStyle={s.content}><View style={[s.overview,!desktop&&s.overviewMobile,activePlatform==="DG"&&s.overviewDg]}><View style={!desktop?s.overviewTextMobile:undefined}><Text style={[s.overKicker,activePlatform==="DG"&&s.overKickerDg]}>REAL-TIME MONITORING</Text><Text style={s.overTitle}>LIVE TABLE MATRIX</Text><Text style={s.overSub}>{activePlatform==="DG"?"DG 真人桌況 · 黑金牌路 · 荷官同步":"即時桌況 · 牌路分析 · 荷官同步"}</Text></View><View style={[s.overStats,!desktop&&s.overStatsMobile]}><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>連線狀態</Text><Text style={[s.overValue,{color:activeConnected?"#4BD693":"#FF6973"}]}>{activeConnected?`${activePlatform} 已連線`:activePlatform==="DG"?`DG ${String(dgStatus||"連線中").replace(/^DG\s*/i,"")}`:`${activePlatform} 未連線`}</Text></View><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>平台 · 可用 {availableTableCount} 桌</Text><View style={s.platformSwitch}><Pressable onPress={()=>setActivePlatform("MT")} style={[s.platformTab,activePlatform==="MT"&&s.platformTabMtActive]}><Text style={[s.platformTabText,activePlatform==="MT"&&s.platformTabTextActive]}>MT</Text></Pressable><Pressable onPress={()=>setActivePlatform("DG")} style={[s.platformTab,activePlatform==="DG"&&s.platformTabDgActive]}><Text style={[s.platformTabText,activePlatform==="DG"&&s.platformTabTextDgActive]}>DG</Text></Pressable></View></View></View></View><View style={s.listHead}><Text style={s.listTitle}>所有房型</Text><Text style={s.listHint}>{activePlatform} · 歷史牌局 · 即時更新 · 荷官同步</Text></View><View style={[s.cardsGrid,desktop&&s.cardsGridDesktop,desktop&&s.cardsGridDesktopCentered]}>{tables.map(t=><View key={t.apiId} style={desktop?s.cardWrapDesktop:s.cardWrap}><MemoTableCard table={t} desktop={desktop} onAction={stableTableAction} connected={activeConnected} platform={activePlatform}/></View>)}</View></ScrollView>
+      <ScrollView contentContainerStyle={s.content}><View style={[s.overview,!desktop&&s.overviewMobile,activePlatform==="DG"&&s.overviewDg]}><View style={!desktop?s.overviewTextMobile:undefined}><Text style={[s.overKicker,activePlatform==="DG"&&s.overKickerDg]}>REAL-TIME MONITORING</Text><Text style={s.overTitle}>LIVE TABLE MATRIX</Text><Text style={s.overSub}>{activePlatform==="DG"?"DG 真人桌況 · 黑金牌路 · 荷官同步":"即時桌況 · 牌路分析 · 荷官同步"}</Text></View><View style={[s.overStats,!desktop&&s.overStatsMobile]}><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>連線狀態</Text><Text style={[s.overValue,{color:activeConnected?"#4BD693":"#FFB54D"}]}>{activeConnected?"已連線":"連線中"}</Text></View><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>平台 · 可用 {availableTableCount} 桌</Text><View style={s.platformSwitch}><Pressable onPress={()=>setActivePlatform("MT")} style={[s.platformTab,activePlatform==="MT"&&s.platformTabMtActive]}><Text style={[s.platformTabText,activePlatform==="MT"&&s.platformTabTextActive]}>MT</Text></Pressable><Pressable onPress={()=>setActivePlatform("DG")} style={[s.platformTab,activePlatform==="DG"&&s.platformTabDgActive]}><Text style={[s.platformTabText,activePlatform==="DG"&&s.platformTabTextDgActive]}>DG</Text></Pressable><Pressable disabled={!hasEnteredGame||walletTransferBusy} onPress={confirmTransferAll} style={[s.walletReturnBtn,(!hasEnteredGame||walletTransferBusy)&&s.walletReturnBtnDisabled]}><MaterialIcons name="account-balance-wallet" size={13} color={hasEnteredGame?"#FFF1C6":"#71808B"}/><Text style={[s.walletReturnText,!hasEnteredGame&&s.walletReturnTextDisabled]}>{walletTransferBusy?"轉回中":"一鍵轉回"}</Text></Pressable></View></View></View></View><View style={s.listHead}><Text style={s.listTitle}>所有房型</Text><Text style={s.listHint}>{activePlatform} · 歷史牌局 · 即時更新 · 荷官同步</Text></View><View style={[s.cardsGrid,desktop&&s.cardsGridDesktop,desktop&&s.cardsGridDesktopCentered]}>{tables.map(t=><View key={t.apiId} style={desktop?s.cardWrapDesktop:s.cardWrap}><MemoTableCard table={t} desktop={desktop} onAction={stableTableAction} connected={activeConnected} platform={activePlatform}/></View>)}</View></ScrollView>
 
       {toast?<View style={s.toast}><Text style={s.toastText}>{toast}</Text></View>:null}
+
+      <Modal visible={walletTransferOpen} transparent animationType="fade" onRequestClose={()=>!walletTransferBusy&&setWalletTransferOpen(false)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>一鍵轉回主錢包</Text><Pressable disabled={walletTransferBusy} onPress={()=>setWalletTransferOpen(false)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>將目前所有遊戲錢包可轉回點數全部收回主錢包。</Text><View style={[s.modalActions,{marginTop:14}]}><Pressable disabled={walletTransferBusy} style={[s.actionBtn,{backgroundColor:"#344553",opacity:walletTransferBusy?0.55:1}]} onPress={()=>setWalletTransferOpen(false)}><Text style={s.btnText}>取消</Text></Pressable><Pressable disabled={walletTransferBusy} style={[s.actionBtn,{backgroundColor:"#8B6828",opacity:walletTransferBusy?0.68:1}]} onPress={()=>void executeTransferAll()}><Text style={s.btnText}>{walletTransferBusy?"轉回中...":"確認轉回"}</Text></Pressable></View></View></View></Modal>
 
       <Modal visible={stopLossOpen} transparent animationType="fade" onRequestClose={()=>setStopLossOpen(false)}><View style={s.stopLossShade}><View style={s.stopLossModal}>
         <View style={s.stopLossHead}><View style={s.stopLossTitleWrap}><MaterialIcons name="health-and-safety" size={16} color="#7DD7FF"/><Text style={s.stopLossTitle}>止損設定</Text></View><Pressable style={s.stopLossClose} onPress={()=>setStopLossOpen(false)}><MaterialIcons name="close" size={18} color="#DDE8F0"/></Pressable></View>
@@ -2588,12 +2689,12 @@ export default function HomeScreen(){
         <Pressable style={s.stopLossAckBtn} onPress={()=>setStopLossAlertOpen(false)}><Text style={s.stopLossAckText}>我知道了</Text></Pressable>
       </View></View></Modal>
 
-      <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>主頁與 MT 連線設定</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>主頁牌路 WebSocket 與 MT 平台使用獨立工作階段。關閉此視窗不會中斷已建立的連線。</Text><Text style={s.fieldLabel}>主頁牌路 WebSocket（固定）</Text><TextInput value={wsUrl} editable={false} secureTextEntry selectTextOnFocus={false} style={s.modalInput}/><Text style={s.fieldLabel}>主頁牌路來源 / Token</Text><TextInput value={token} editable={false} secureTextEntry selectTextOnFocus={false} placeholder="已由 TZ 自動授權" placeholderTextColor="#63798B" style={s.modalInput}/><Text style={s.fieldLabel}>MT 平台獨立網址</Text><TextInput value={mtUrl} editable={false} secureTextEntry selectTextOnFocus={false} placeholder="已由 TZ 自動授權" placeholderTextColor="#63798B" style={s.modalInput}/><View style={s.mappingRow}><Text style={s.mapChip}>winner 1：閒</Text><Text style={s.mapChip}>winner 2：莊</Text><Text style={s.mapChip}>winner 3：和</Text></View><View style={s.modalActions}><Pressable disabled style={[s.actionBtn,{backgroundColor:"#1F6F9D",opacity:.48}]}><Text style={s.btnText}>驗證主頁牌路</Text></Pressable><Pressable disabled style={[s.actionBtn,{backgroundColor:"#238F58",opacity:.48}]}><Text style={s.btnText}>開始連線</Text></Pressable><Pressable disabled style={[s.actionBtn,{backgroundColor:"#A63E48",opacity:.48}]}><Text style={s.btnText}>中斷</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View><Text style={s.syncText}>同步階段：主頁已同步 {tables.filter(t=>t.live).length} 桌</Text><Text style={s.fieldLabel}>即時事件</Text><ScrollView style={s.logBox}>{events.map((x,i)=><Text key={i} style={s.logText}>{x}</Text>)}</ScrollView></View></View></Modal>
+      <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>主頁與 MT 連線設定</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>主頁牌路 WebSocket 與 MT 平台使用獨立工作階段。關閉此視窗不會中斷已建立的連線。</Text><Text style={s.fieldLabel}>主頁牌路 WebSocket（固定）</Text><TextInput value={wsUrl} editable={false} secureTextEntry selectTextOnFocus={false} style={s.modalInput}/><Text style={s.fieldLabel}>主頁牌路來源 / Token</Text><TextInput value={token} editable={false} secureTextEntry selectTextOnFocus={false} placeholder="進入 MT 平台後才取得" placeholderTextColor="#63798B" style={s.modalInput}/><Text style={s.fieldLabel}>MT 平台獨立網址</Text><TextInput value={mtUrl} editable={false} secureTextEntry selectTextOnFocus={false} placeholder="進入 MT 平台後才取得" placeholderTextColor="#63798B" style={s.modalInput}/><View style={s.mappingRow}><Text style={s.mapChip}>winner 1：閒</Text><Text style={s.mapChip}>winner 2：莊</Text><Text style={s.mapChip}>winner 3：和</Text></View><View style={s.modalActions}><Pressable disabled style={[s.actionBtn,{backgroundColor:"#1F6F9D",opacity:.48}]}><Text style={s.btnText}>驗證主頁牌路</Text></Pressable><Pressable disabled style={[s.actionBtn,{backgroundColor:"#238F58",opacity:.48}]}><Text style={s.btnText}>開始連線</Text></Pressable><Pressable disabled style={[s.actionBtn,{backgroundColor:"#A63E48",opacity:.48}]}><Text style={s.btnText}>中斷</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View><Text style={s.syncText}>同步階段：主頁已同步 {tables.filter(t=>t.live).length} 桌</Text><Text style={s.fieldLabel}>即時事件</Text><ScrollView style={s.logBox}>{events.map((x,i)=><Text key={i} style={s.logText}>{x}</Text>)}</ScrollView></View></View></Modal>
       <Modal visible={helpOpen} transparent animationType="fade" onRequestClose={()=>setHelpOpen(false)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>說明</Text><Pressable onPress={()=>setHelpOpen(false)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>主頁顯示 15 桌即時牌路。MT 懸浮輔助可左右滑動 3 頁：即時輔助、資金策略、輸贏統計。</Text></View></View></Modal>
       <Modal visible={!!radarDetailTable} transparent animationType="fade" onRequestClose={()=>setRadarDetailId(null)}><View style={s.modalShade}><View style={s.radarDetailModal}><View style={s.modalHead}><View><Text style={s.radarKicker}>MT MATRIX · LIVE ROAD SNAPSHOT</Text><Text style={s.radarDetailTitle}>{radarDetailId} · 第 {radarDetailTable?.round??0} 局</Text></View><Pressable onPress={()=>setRadarDetailId(null)} style={s.radarClose}><MaterialIcons name="close" size={20} color="#DCEEFF"/></Pressable></View>{radarDetailTable?<><View style={s.radarDetailStats}><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前推薦</Text><Text style={[s.radarDetailValue,{color:resultColor(radarDetailDecision.side)}]}>{radarDetailDecision.side}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>信心度</Text><View style={s.radarDetailConfidence}><View style={[s.signalDot,{backgroundColor:confidenceState(radarDetailConfidence).color,shadowColor:confidenceState(radarDetailConfidence).color}]}/><Text style={[s.radarDetailValue,{color:confidenceState(radarDetailConfidence).color,marginTop:0}]}>{confidenceState(radarDetailConfidence).label}</Text></View></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前牌型</Text><Text numberOfLines={1} style={s.radarDetailValue}>{detectPattern(radarDetailTable.results)}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>莊／閒／和</Text><Text style={s.radarDetailValue}>{radarDetailTable.banker}／{radarDetailTable.player}／{radarDetailTable.tie}</Text></View></View><View style={[s.radarRoadWrap,{height:desktop?190:150}]}><RoadGrid table={radarDetailTable} desktop={desktop} transparent/></View><Text style={s.radarDetailNote}>{analysisText(radarDetailTable)}</Text></>:null}</View></View></Modal>
 
       <Modal visible={!!analysisTable} transparent animationType="fade" onRequestClose={()=>setAnalysisTable(null)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>百家樂 {analysisTable?.id} 分析</Text><Pressable onPress={()=>setAnalysisTable(null)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>{analysisText(analysisTable??undefined)}</Text></View></View></Modal>
-      {mtOpen?<View style={s.mtOverlay}><View style={s.mtScreen}><View style={[s.mtTop,activePlatform==="DG"&&s.topbarDg]}><View style={s.brandRow}><View style={[s.brandIcon,activePlatform==="DG"&&s.brandIconDg]}><MatrixMark size={29} brand={activePlatform}/></View><View><Text style={[s.kicker,activePlatform==="DG"&&s.kickerDg]}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setMtOpen(false)}><MaterialIcons name="arrow-back" size={16} color="#fff"/><Text style={s.headerBtnText}>回牌路</Text></Pressable></View></View><View style={s.iframeWrap}>{Platform.OS==="web"?(activePlatform==="DG"?<DgSameSessionView sessionId={accessSessionId}/>:createElement("iframe" as any,{src:mtUrl.trim()||token.trim(),style:{width:"100%",height:"100%",border:"0",background:"#000"},allow:"clipboard-read; clipboard-write; fullscreen"})):<View style={s.nativeMtFallback}><Text style={s.helpText}>目前原生模式請使用外部瀏覽器開啟目前平台。</Text></View>}</View></View></View>:null}
+      {mtOpen?<View style={s.mtOverlay}><View style={s.mtScreen}><View style={[s.mtTop,gameViewPlatform==="DG"&&s.topbarDg]}><View style={s.brandRow}><View style={[s.brandIcon,gameViewPlatform==="DG"&&s.brandIconDg]}><MatrixMark size={29} brand={gameViewPlatform}/></View><View><Text style={[s.kicker,gameViewPlatform==="DG"&&s.kickerDg]}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>{gameViewPlatform} MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>{gameViewPlatform} MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setMtOpen(false)}><MaterialIcons name="arrow-back" size={16} color="#fff"/><Text style={s.headerBtnText}>回牌路</Text></Pressable></View></View><View style={s.iframeWrap}>{Platform.OS==="web"?createElement("iframe" as any,{src:gameViewUrl,style:{width:"100%",height:"100%",border:"0",background:"#000"},allow:"clipboard-read; clipboard-write; fullscreen"}):<View style={s.nativeMtFallback}><Text style={s.helpText}>目前原生模式請使用外部瀏覽器開啟目前平台。</Text></View>}</View></View></View>:null}
       {MultiTableRadar({insideMt:mtOpen})}
       {FloatingAssistant({insideMt:mtOpen})}
       {V38Calculator({insideMt:mtOpen})}
@@ -2607,7 +2708,7 @@ const s=StyleSheet.create({
   screen:{flex:1,backgroundColor:"#060D15"},screenDg:{backgroundColor:"#090806"},screenDesktopZoom:{zoom:1.18,width:"84.7458%",height:"84.7458%",marginLeft:"auto",marginRight:"auto"},row:{flexDirection:"row",alignItems:"center",gap:6},brandRow:{flexDirection:"row",alignItems:"center",gap:8},
   topbar:{minHeight:58,paddingHorizontal:14,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#31536B",backgroundColor:"#07111C"},topbarDg:{backgroundColor:"#110E08",borderBottomColor:"#8B6B2E"},topbarMobile:{minHeight:64,paddingHorizontal:10},brandMobileStack:{alignItems:"flex-start"},brandIcon:{width:34,height:34,borderRadius:8,borderWidth:1,borderColor:"#315D79",alignItems:"center",justifyContent:"center",backgroundColor:"#071521"},brandIconDg:{backgroundColor:"#171208",borderColor:"#9B7833"},brandTitleRow:{flexDirection:"row",alignItems:"center",gap:8},kicker:{color:"#7890A3",fontSize:8,letterSpacing:1.1},kickerDg:{color:"#C6A35A"},title:{color:"#F2F6F9",fontSize:16,fontWeight:"800"},
   lineBtn:{height:34,paddingHorizontal:9,borderRadius:7,backgroundColor:"#0C9B43",flexDirection:"row",alignItems:"center",gap:5},lineLogo:{width:23,height:23,borderRadius:11.5,backgroundColor:"#fff",alignItems:"center",justifyContent:"center"},lineLogoText:{fontSize:5.5,fontWeight:"900",color:"#0C9B43"},lineText:{color:"#fff",fontSize:10,fontWeight:"900"},headerBtn:{height:34,paddingHorizontal:9,borderRadius:7,backgroundColor:"#102A3D",flexDirection:"row",alignItems:"center",gap:5,borderWidth:1,borderColor:"#3D6682"},headerBtnText:{color:"#fff",fontSize:10,fontWeight:"800"},
-  content:{padding:10,paddingBottom:90},overview:{borderWidth:1,borderColor:"#315B76",borderRadius:8,padding:12,flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:10,backgroundColor:"#0B1A28",overflow:"hidden"},overviewDg:{backgroundColor:"#151109",borderColor:"#8B6B2E"},overviewMobile:{flexDirection:"column",alignItems:"stretch",gap:10},overviewTextMobile:{width:"100%"},overKicker:{color:"#62B6E8",fontSize:7,letterSpacing:1.4},overKickerDg:{color:"#D1AE61"},overTitle:{color:"#F4FAFF",fontSize:18,fontWeight:"900",marginTop:2},overSub:{color:"#7894A8",fontSize:9,marginTop:3},overStats:{flexDirection:"row",gap:8},overStatsMobile:{width:"100%",gap:6},overStat:{minWidth:112,borderWidth:1,borderColor:"#31536B",borderRadius:6,padding:9,backgroundColor:"#091722"},overStatDg:{borderColor:"#745925",backgroundColor:"#100D08"},overStatMobile:{flex:1,minWidth:0,padding:8},overValue:{color:"#fff",fontSize:13,fontWeight:"900",marginTop:4},platformSwitch:{flexDirection:"row",alignItems:"center",marginTop:5,padding:2,borderRadius:6,backgroundColor:"rgba(0,0,0,.26)",borderWidth:1,borderColor:"rgba(130,151,166,.22)"},platformTab:{minWidth:42,height:23,paddingHorizontal:10,borderRadius:4,alignItems:"center",justifyContent:"center"},platformTabMtActive:{backgroundColor:"#176FA7",borderWidth:1,borderColor:"#55B4E9"},platformTabDgActive:{backgroundColor:"#6F5420",borderWidth:1,borderColor:"#D3AD5C"},platformTabText:{color:"#7F909C",fontSize:9,fontWeight:"900",letterSpacing:.5},platformTabTextActive:{color:"#EAF8FF"},platformTabTextDgActive:{color:"#FFF2C9"},listHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:7},listTitle:{color:"#F2F6F9",fontSize:15,fontWeight:"900"},listHint:{color:"#73899A",fontSize:8},
+  content:{padding:10,paddingBottom:90},overview:{borderWidth:1,borderColor:"#315B76",borderRadius:8,padding:12,flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:10,backgroundColor:"#0B1A28",overflow:"hidden"},overviewDg:{backgroundColor:"#151109",borderColor:"#8B6B2E"},overviewMobile:{flexDirection:"column",alignItems:"stretch",gap:10},overviewTextMobile:{width:"100%"},overKicker:{color:"#62B6E8",fontSize:7,letterSpacing:1.4},overKickerDg:{color:"#D1AE61"},overTitle:{color:"#F4FAFF",fontSize:18,fontWeight:"900",marginTop:2},overSub:{color:"#7894A8",fontSize:9,marginTop:3},overStats:{flexDirection:"row",gap:8},overStatsMobile:{width:"100%",gap:6},overStat:{minWidth:112,borderWidth:1,borderColor:"#31536B",borderRadius:6,padding:9,backgroundColor:"#091722"},overStatDg:{borderColor:"#745925",backgroundColor:"#100D08"},overStatMobile:{flex:1,minWidth:0,padding:8},overValue:{color:"#fff",fontSize:13,fontWeight:"900",marginTop:4},platformSwitch:{flexDirection:"row",alignItems:"center",marginTop:5,padding:2,borderRadius:6,backgroundColor:"rgba(0,0,0,.26)",borderWidth:1,borderColor:"rgba(130,151,166,.22)"},platformTab:{minWidth:42,height:23,paddingHorizontal:10,borderRadius:4,alignItems:"center",justifyContent:"center"},platformTabMtActive:{backgroundColor:"#176FA7",borderWidth:1,borderColor:"#55B4E9"},platformTabDgActive:{backgroundColor:"#6F5420",borderWidth:1,borderColor:"#D3AD5C"},platformTabText:{color:"#7F909C",fontSize:9,fontWeight:"900",letterSpacing:.5},platformTabTextActive:{color:"#EAF8FF"},platformTabTextDgActive:{color:"#FFF2C9"},walletReturnBtn:{height:23,marginLeft:4,paddingHorizontal:8,borderRadius:4,borderWidth:1,borderColor:"#9B7530",backgroundColor:"#241A0A",flexDirection:"row",alignItems:"center",justifyContent:"center",gap:4},walletReturnBtnDisabled:{borderColor:"#3B4650",backgroundColor:"#151A1F",opacity:.62},walletReturnText:{color:"#FFF1C6",fontSize:8,fontWeight:"900"},walletReturnTextDisabled:{color:"#71808B"},listHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:7},listTitle:{color:"#F2F6F9",fontSize:15,fontWeight:"900"},listHint:{color:"#73899A",fontSize:8},
   cardsGrid:{width:"100%",alignSelf:"center"},cardsGridDesktop:{flexDirection:"row",flexWrap:"wrap",gap:10},cardsGridDesktopCentered:{maxWidth:1280},cardWrap:{width:"100%"},cardWrapDesktop:{width:"calc(50% - 5px)" as any,maxWidth:635},tableCard:{backgroundColor:"#08111A",borderWidth:1,borderColor:"#365B73",overflow:"hidden",marginBottom:10,shadowColor:"#000",shadowOpacity:0.28,shadowRadius:4},tableCardDesktop:{},tableCardDg:{backgroundColor:"#100D08",borderColor:"#8C6B2C",shadowColor:"#C49B48",shadowOpacity:.16},tableHead:{height:28,paddingHorizontal:5,backgroundColor:"#091621",flexDirection:"row",justifyContent:"space-between",alignItems:"center",borderBottomWidth:1,borderBottomColor:"#27485E"},tableHeadDg:{backgroundColor:"#171208",borderBottomColor:"#785B27"},game:{color:"#EAF6FF",fontSize:9,fontWeight:"700"},tableId:{color:"#F8FCFF",borderWidth:1,borderColor:"#6E91A8",paddingHorizontal:6,paddingVertical:1,fontSize:9,fontWeight:"900",backgroundColor:"#0E202E"},tableIdDg:{backgroundColor:"#241B0C",borderColor:"#C29A4D",color:"#FFF1C5"},headText:{color:"#B9CEDC",fontSize:8,fontWeight:"800"},statText:{fontSize:8,fontWeight:"900"},countWrap:{height:20,minWidth:28,borderWidth:1,borderColor:"#8D2030",borderRadius:4,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:2,paddingHorizontal:3},countdown:{color:"#FF5362",fontSize:8,fontWeight:"900"},miniBtn:{height:20,paddingHorizontal:6,borderRadius:4,alignItems:"center",justifyContent:"center",borderColor:"#3A6078",shadowColor:"#000",shadowOpacity:0.22,shadowRadius:2},miniBtnText:{color:"#fff",fontSize:7,fontWeight:"900"},
   tableBody:{flexDirection:"row",height:176,backgroundColor:"#fff",overflow:"hidden"},tableBodyDesktop:{height:190},tableBodyMobile:{height:164},tableBodyDg:{backgroundColor:"#F7F1E4"},dealer:{width:112,backgroundColor:"#F2F0EC",padding:4,justifyContent:"flex-end"},dealerDesktop:{width:"21.88%"},dealerMobile:{width:"21.88%",minWidth:76},dealerDg:{backgroundColor:"#EDE3CE"},photo:{position:"absolute",top:3,left:3,right:3,height:112,backgroundColor:"#DCE2E6",alignItems:"center",justifyContent:"center",overflow:"hidden"},photoDesktop:{height:"75%"},photoMobile:{height:"73%"},photoImage:{width:"100%",height:"100%",resizeMode:"cover"},liveMediaFill:{width:"100%",height:"100%",alignItems:"center",justifyContent:"center",overflow:"hidden"},crown:{fontSize:30,color:"#C5A24C"},dealerName:{color:"#FFFFFF",backgroundColor:"#6F2F82",alignSelf:"flex-start",paddingHorizontal:5,paddingVertical:2,fontSize:11,fontWeight:"900",lineHeight:14},dealerNameDg:{backgroundColor:"#6F5420",color:"#FFF4D2"},meta:{color:"#617889",fontSize:8.5,fontWeight:"700",lineHeight:11,marginTop:1},metaVideoRow:{height:12,flexDirection:"row",alignItems:"center",marginTop:1,overflow:"hidden"},metaVideoText:{flexShrink:1,marginTop:0,lineHeight:11},videoLabel:{color:"#7890A1",fontSize:7.5,fontWeight:"800",marginLeft:3,marginRight:2,lineHeight:10},videoSwitch:{width:18,height:9,borderRadius:5,backgroundColor:"#667B89",padding:1,justifyContent:"center"},videoSwitchOn:{backgroundColor:"#19B96C"},videoSwitchKnob:{width:7,height:7,borderRadius:3.5,backgroundColor:"#fff",alignSelf:"flex-start"},videoSwitchKnobOn:{alignSelf:"flex-end"},
   roadArea:{flex:1,flexDirection:"row",backgroundColor:"#fff",minWidth:0,overflow:"hidden"},roadAreaDesktop:{},roadAreaDg:{backgroundColor:"#FFF9ED"},beadPane:{width:"32%",height:"100%",flexShrink:0,borderRightWidth:1,borderColor:"#C9D2D9",overflow:"hidden",backgroundColor:"#FFFFFF"},beadPaneDesktop:{width:"32%"},beadPaneDg:{backgroundColor:"#FFF9ED",borderColor:"#CDBF9F"},beadGrid:{width:"100%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",backgroundColor:"#FFFFFF"},beadGridDg:{backgroundColor:"#FFF9ED"},beadCell:{width:"16.6666667%",height:"16.6666667%",flexGrow:0,flexShrink:0,borderRightWidth:1,borderBottomWidth:1,borderColor:"#D9DEE3",alignItems:"center",justifyContent:"center",backgroundColor:"#FFFFFF"},beadCellDesktop:{},roadCellDg:{backgroundColor:"#FFF9ED",borderColor:"#DDD0B3"},beadDot:{width:"72%",aspectRatio:1,borderRadius:999,borderWidth:1,alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:.10,shadowRadius:1,elevation:1},beadDotDesktop:{width:"70%"},beadDotText:{color:"#FFFFFF",fontSize:8,fontWeight:"900",lineHeight:10,textAlign:"center"},beadDotTextDesktop:{fontSize:9,lineHeight:11},roadStack:{flex:1,minWidth:0,height:"100%"},bigGrid:{width:"100%",height:"62%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch"},bigGridDesktop:{},bigCell:{width:"6.6666667%",height:"16.6666667%",borderRightWidth:1,borderBottomWidth:1,borderColor:"#DDE4E9",alignItems:"center",justifyContent:"center",overflow:"hidden"},bigCellDesktop:{},bigMark:{width:"72%",maxWidth:"78%",aspectRatio:1,borderRadius:999,borderWidth:1.35,backgroundColor:"transparent",alignItems:"center",justifyContent:"center"},bigMarkDesktop:{width:"70%",borderWidth:1.2},tieNumber:{color:"#20B66B",fontSize:7,fontWeight:"900",lineHeight:8},tieNumberDesktop:{fontSize:7,lineHeight:8},lowerArea:{width:"100%",height:"38%",flexDirection:"row",borderTopWidth:1,borderTopColor:"#CCD6DE"},lowerAreaDesktop:{},lowerAreaDg:{borderTopColor:"#CDBF9F",backgroundColor:"#FFF9ED"},lowerPane:{width:"33.333333%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",borderRightWidth:1,borderRightColor:"#DDE4E9"},lowerPaneDg:{borderRightColor:"#DDD0B3",backgroundColor:"#FFF9ED"},lowerCell:{width:"10%",height:"16.6666667%",alignItems:"center",justifyContent:"center",borderRightWidth:.5,borderBottomWidth:.5,borderColor:"#E4E8EB",overflow:"hidden"},lowerCellDesktop:{},lowerHollow:{width:"55%",aspectRatio:1,borderRadius:999,borderWidth:1.4,backgroundColor:"transparent"},lowerSolid:{width:"52%",aspectRatio:1,borderRadius:999},lowerSlash:{width:"58%",height:2,borderRadius:2,transform:[{rotate:"-45deg"}]},
