@@ -457,6 +457,10 @@ class RawWsClient {
       if (opcode === 2) this.onBinary(payload);
     }
   }
+  abort(reason: string) {
+    if (this.closed) return;
+    try { this.socket?.destroy(new Error(reason)); } catch { try { this.socket?.destroy(); } catch {} }
+  }
   close() { this.closed = true; try { this.socket?.end(this.frame(8, Buffer.alloc(0))); } catch {} try { this.socket?.destroy(); } catch {} this.socket = null; }
 }
 
@@ -475,6 +479,7 @@ export class DgRelay {
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  private authTimer: ReturnType<typeof setTimeout> | null = null;
   private clients = new Set<SseClient>();
   private map = new Map<number, DgTableSnapshot>();
   private status: RelayStatus = "idle";
@@ -566,10 +571,18 @@ export class DgRelay {
     const url = `${this.wsUrl.replace(/\/$/, "")}/?sign=${encodeURIComponent(sign)}`;
     this.ws = new RawWsClient(url, this.origin, data => this.handle(data), () => {
       this.wsLastError = "";
+      this.setStatus("connecting", `已連上 ${endpointName}，正在驗證...`);
       this.event("DG WebSocket 已建立，正在驗證");
       this.send(10086, { tableId: 1, type: 0, object: "PC" });
+      if (this.authTimer) clearTimeout(this.authTimer);
+      this.authTimer = setTimeout(() => {
+        if (this.stopped || this.status === "connected") return;
+        this.event(`DG 驗證回應逾時：${endpointName}`);
+        this.ws?.abort("DG 驗證回應逾時");
+      }, 6500);
     }, why => {
       if (this.stopped) return;
+      if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
       if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
       const reason = String(why || "closed");
       this.wsLastError = reason;
@@ -613,6 +626,7 @@ export class DgRelay {
     let bean: PublicBean; try { bean = parsePublicBean(data); } catch { return; }
     const cmd = n(bean.cmd);
     if (cmd === 10086) {
+      if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
       if (n(bean.codeId) !== 0) {
         const reason = `DG 驗證失敗 (${bean.codeId})`;
         this.wsFailuresThisCycle += 1;
@@ -682,6 +696,7 @@ export class DgRelay {
   stop() {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = null;
+    if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
     this.ws?.close(); this.ws = null; this.setStatus("closed", "已停止");
   }

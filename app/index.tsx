@@ -2170,8 +2170,13 @@ export default function HomeScreen(){
       onStatus:(status,message)=>{
         if(cancelled)return;
         setDgConnected(status==="connected");
-        setDgStatus(status==="connected"?"已連線":status==="connecting"||status==="loading"?"連線中...":message||"未連線");
-        if(status==="error"&&/驗證失敗|token|授權|握手失敗|\b401\b|\b403\b/i.test(message||"")) setDgGameUrl("");
+        // Do not hide the actual DG stage behind a generic "連線中" label.
+        // This makes it obvious whether the browser is on newappa0, validating,
+        // switching lines, or falling back to the cloud relay.
+        setDgStatus(status==="connected"?"已連線":message||(status==="connecting"||status==="loading"?"連線中...":"未連線"));
+        // Do not silently clear the DG URL on every handshake error. The old
+        // behavior created an endless authorize/connect loop that looked like
+        // the UI was permanently stuck at "連線中". Surface the real error.
       },
       onEvent:(message)=>{if(!cancelled)appendEvent(message)},
     }).then(controller=>{

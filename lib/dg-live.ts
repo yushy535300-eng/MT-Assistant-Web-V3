@@ -36,6 +36,7 @@ type DgCallbacks = {
 type DgController = { close: () => void };
 
 const DG_WS = "wss://appatw.kindlestone.com";
+const DG_WS_VERIFIED_LATEST = "wss://newappa0.ywjxi.com";
 const DG_KEY = "pV5mY8dR2qGxH1sK9tBzN6uC3fWjE0aL7rTnJ4cQvSgPZyFMiXoUbDlAhOeRwd36";
 let vendorPromise: Promise<void> | null = null;
 
@@ -182,7 +183,7 @@ function sortDgTables(tables: DgTableData[]) {
   });
 }
 
-async function connectDgBrowserDirect(gameUrl: string, callbacks: DgCallbacks): Promise<DgController> {
+async function connectDgBrowserDirect(gameUrl: string, callbacks: DgCallbacks, onInitialFailure?: (reason: string) => void): Promise<DgController> {
   callbacks.onStatus?.("loading", "正在載入 DG 通訊元件");
   await ensureVendor();
   const token = extractToken(gameUrl);
@@ -203,7 +204,7 @@ async function connectDgBrowserDirect(gameUrl: string, callbacks: DgCallbacks): 
 
   // Browser-local fallback: use the user's own network path. This is useful
   // when a cloud host such as Render is rejected by DG's edge (502/503).
-  let wsCandidates = [DG_WS];
+  let wsCandidates = [DG_WS_VERIFIED_LATEST, DG_WS];
   try {
     const launch = new URL(gameUrl);
     const match = launch.pathname.match(/^(.*?\/ddnewpc)(?:\/|$)/i);
@@ -212,7 +213,10 @@ async function connectDgBrowserDirect(gameUrl: string, callbacks: DgCallbacks): 
     if (cfg.ok) {
       const json: any = await cfg.json();
       const pc = json?.pc_h5 || {};
-      const raw = [pc.game_wss_tw, pc.game_wss_line2, pc.game_wss_line3, pc.game_wss_line4, pc.game_wss, pc.game_wss_cn, pc.game_wss_overseas, DG_WS];
+      // Latest successful HAR: line2 (newappa0.ywjxi.com) returned 101 while
+      // appatw failed in the same browser session. Prefer DG's rotating line
+      // endpoints first, then region/default endpoints.
+      const raw = [pc.game_wss_line2, pc.game_wss_line3, pc.game_wss_line4, DG_WS_VERIFIED_LATEST, pc.game_wss_tw, pc.game_wss, pc.game_wss_cn, pc.game_wss_overseas, DG_WS];
       const valid: string[] = [];
       for (const value of raw) {
         try {
@@ -232,7 +236,10 @@ async function connectDgBrowserDirect(gameUrl: string, callbacks: DgCallbacks): 
   let closedByUser = false;
   let initDone = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let authTimeout: ReturnType<typeof setTimeout> | null = null;
   let ws: WebSocket | null = null;
+  let lastInitialFailure = "";
+  let initialFailureReported = false;
   const map = new Map<number, DgTableData>();
   let lastEmitAt = 0;
 
@@ -254,7 +261,19 @@ async function connectDgBrowserDirect(gameUrl: string, callbacks: DgCallbacks): 
   const handlePacket = (decoded: any) => {
     const cmd = numberOf(decoded?.cmd);
     if (cmd === 10086 && !initDone) {
+      const code = numberOf(decoded?.codeId);
+      if (code !== 0) {
+        lastInitialFailure = `DG 驗證失敗 (${code})`;
+        callbacks.onEvent?.(lastInitialFailure);
+        if (authTimeout) clearTimeout(authTimeout);
+        authTimeout = null;
+        try { ws?.close(); } catch {}
+        return;
+      }
+      if (authTimeout) clearTimeout(authTimeout);
+      authTimeout = null;
       initDone = true;
+      failuresThisCycle = 0;
       callbacks.onStatus?.("connected", "DG 即時資料已連線");
       callbacks.onEvent?.("DG 驗證完成，正在同步真人桌");
       encodeAndSend(45, { type: 1 });
@@ -304,9 +323,16 @@ async function connectDgBrowserDirect(gameUrl: string, callbacks: DgCallbacks): 
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       clearTimeout(openTimeout);
-      callbacks.onStatus?.("connecting", "DG WebSocket 已建立，正在驗證");
-      callbacks.onEvent?.("DG WebSocket 已連線");
+      callbacks.onStatus?.("connecting", `已連上 ${endpointHost}，正在驗證...`);
+      callbacks.onEvent?.(`DG WebSocket 101：${endpointHost}`);
       encodeAndSend(10086, { tableId: 1, type: 0, object: "PC" });
+      if (authTimeout) clearTimeout(authTimeout);
+      authTimeout = setTimeout(() => {
+        if (closedByUser || initDone) return;
+        lastInitialFailure = `${endpointHost} 驗證回應逾時`;
+        callbacks.onEvent?.(lastInitialFailure);
+        try { ws?.close(); } catch {}
+      }, 6500);
     };
     ws.onmessage = async (event: MessageEvent) => {
       try {
@@ -320,20 +346,32 @@ async function connectDgBrowserDirect(gameUrl: string, callbacks: DgCallbacks): 
         callbacks.onEvent?.(`DG 封包解析略過：${error?.message || "unknown"}`);
       }
     };
-    ws.onerror = () => callbacks.onStatus?.("error", "DG WebSocket 連線錯誤");
+    ws.onerror = () => {
+      if (!initDone) lastInitialFailure = `${endpointHost} WebSocket 連線錯誤`;
+      callbacks.onEvent?.(`DG WebSocket 錯誤：${endpointHost}`);
+    };
     ws.onclose = () => {
       clearTimeout(openTimeout);
+      if (authTimeout) clearTimeout(authTimeout);
+      authTimeout = null;
       if (closedByUser) { callbacks.onStatus?.("closed", "DG 已停止"); return; }
       if (!initDone) {
         failuresThisCycle += 1;
+        const failedHost = endpointHost;
         wsIndex = (wsIndex + 1) % wsCandidates.length;
         if (failuresThisCycle >= wsCandidates.length) {
-          failuresThisCycle = 0;
-          callbacks.onStatus?.("error", "DG 本機直連所有線路失敗，5 秒後重試");
-          reconnectTimer = setTimeout(open, 5000);
+          const reason = lastInitialFailure || `${failedHost} 連線失敗`;
+          callbacks.onStatus?.("error", `本機 DG 線路未通：${reason}`);
+          callbacks.onEvent?.(`DG 本機直連已試完 ${wsCandidates.length} 條線路`);
+          if (!initialFailureReported) {
+            initialFailureReported = true;
+            onInitialFailure?.(reason);
+          }
         } else {
-          callbacks.onStatus?.("connecting", "本機線路失敗，切換下一條...");
-          reconnectTimer = setTimeout(open, 500);
+          const nextEndpoint = wsCandidates[wsIndex] || DG_WS_VERIFIED_LATEST;
+          let nextHost = nextEndpoint; try { nextHost = new URL(nextEndpoint).hostname; } catch {}
+          callbacks.onStatus?.("connecting", `${failedHost} 未通，改試 ${nextHost}...`);
+          reconnectTimer = setTimeout(open, 350);
         }
         return;
       }
@@ -349,6 +387,8 @@ async function connectDgBrowserDirect(gameUrl: string, callbacks: DgCallbacks): 
       closedByUser = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       reconnectTimer = null;
+      if (authTimeout) clearTimeout(authTimeout);
+      authTimeout = null;
       try { ws?.close(); } catch {}
       ws = null;
     },
@@ -503,7 +543,7 @@ function jsonOf<T>(event: MessageEvent, fallback: T): T {
  * browser cannot override the WebSocket Origin header, so that path can look
  * like an endless "connecting" state even though DG rejects it.
  */
-export async function connectDgLive(gameUrl: string, sessionId: string, callbacks: DgCallbacks): Promise<DgController> {
+async function connectDgServerRelay(gameUrl: string, sessionId: string, callbacks: DgCallbacks): Promise<DgController> {
   if (typeof window === "undefined" || typeof EventSource === "undefined") throw new Error("DG 即時連線目前僅支援網站/App版");
   if (!sessionId) throw new Error("登入工作階段已失效");
 
@@ -581,6 +621,54 @@ export async function connectDgLive(gameUrl: string, sessionId: string, callback
       closed = true;
       if (watchdog) clearTimeout(watchdog);
       stopRelay();
+    },
+  };
+}
+
+/**
+ * Public connection entry.
+ *
+ * Pure web now tries the user's own browser network first. The latest HAR
+ * proves the user's Chrome can reach newappa0.ywjxi.com with 101 Switching
+ * Protocols, while Render has previously received 503 from DG edges.
+ * If browser-direct cannot authenticate, fall back once to the server relay.
+ */
+export async function connectDgLive(gameUrl: string, sessionId: string, callbacks: DgCallbacks): Promise<DgController> {
+  if (typeof window === "undefined") throw new Error("DG 即時連線目前僅支援網站/App版");
+  if (!sessionId) throw new Error("登入工作階段已失效");
+
+  const nativeController = await connectDgNativeWebView(gameUrl, callbacks);
+  if (nativeController) return nativeController;
+
+  let closed = false;
+  let active: DgController | null = null;
+  let fallbackStarted = false;
+
+  const startRelayFallback = async (reason: string) => {
+    if (closed || fallbackStarted) return;
+    fallbackStarted = true;
+    callbacks.onEvent?.(`DG 本機直連未通：${reason}｜改試雲端中繼`);
+    callbacks.onStatus?.("loading", "本機線路未通，改試雲端中繼...");
+    try {
+      const relay = await connectDgServerRelay(gameUrl, sessionId, callbacks);
+      if (closed) relay.close();
+      else active = relay;
+    } catch (error: any) {
+      if (!closed) callbacks.onStatus?.("error", error?.message || "DG 雲端中繼啟動失敗");
+    }
+  };
+
+  callbacks.onStatus?.("loading", "使用目前瀏覽器網路連線 DG...");
+  active = await connectDgBrowserDirect(gameUrl, callbacks, (reason) => {
+    void startRelayFallback(reason);
+  });
+
+  return {
+    close: () => {
+      if (closed) return;
+      closed = true;
+      try { active?.close(); } catch {}
+      active = null;
     },
   };
 }
