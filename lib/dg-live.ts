@@ -82,10 +82,12 @@ function baccaratResultFromRoad(raw: string): DgRoadResult | null {
   const parts = String(raw || "").split("#");
   const code = Number(parts[1] ?? parts[0]);
   if (!Number.isFinite(code) || code <= 0) return null;
-  const base = code % 4;
-  if (base === 1) return "閒";
-  if (base === 2) return "莊";
-  if (base === 3) return "和";
+  // DG 原生百家樂路紙代碼不是 %4 分組。
+  // 原站 bundle 的判斷是：1~4=莊、5~8=閒、9~12=和；
+  // 同一勝負區間內的不同值用來夾帶對子等附加標記。
+  if (code >= 1 && code <= 4) return "莊";
+  if (code >= 5 && code <= 8) return "閒";
+  if (code >= 9 && code <= 12) return "和";
   return null;
 }
 
