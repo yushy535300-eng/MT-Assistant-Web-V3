@@ -1,0 +1,11 @@
+Idle black-screen hotfix
+
+Root cause fixed:
+- Previous idle recovery forced #root { display: block }.
+- React Native Web needs its root flex layout. After resume this could collapse the app to a thin strip and expose only the dark page background.
+
+Fix:
+- Never mutate #root display.
+- Keep html/body/root at 100% height.
+- Resume recovery only restores visibility/opacity and triggers layout without replacing RN Web display/flex rules.
+- Existing DG session recovery changes are preserved.

@@ -1105,6 +1105,7 @@ export default function HomeScreen(){
       setWalletTransferBusy(false);
       setDgNeedsRecovery(false);
       dgHasConnectedRef.current=false;
+      dgForegroundRecoveryAttemptRef.current=0;
       suppressDgRecoveryRef.current=false;
       roadConnectBusyRef.current=false;
       setFloatingOpen(false);
@@ -1147,7 +1148,9 @@ export default function HomeScreen(){
   const [dgStatus,setDgStatus]=useState("未連線");
   const [dgGameUrl,setDgGameUrl]=useState("");
   const [dgNeedsRecovery,setDgNeedsRecovery]=useState(false);
+  const [dgConnectEpoch,setDgConnectEpoch]=useState(0);
   const dgHasConnectedRef=useRef(false);
+  const dgForegroundRecoveryAttemptRef=useRef(0);
   const [dgTables,setDgTables]=useState<TableData[]>([]);
   const dgControllerRef=useRef<{close:()=>void}|null>(null);
   const platformTokenRef=useRef("");
@@ -2318,20 +2321,42 @@ export default function HomeScreen(){
       try{dgControllerRef.current?.close()}catch{}
       dgControllerRef.current=null;
     };
-  },[accessGranted,accessSessionId,dgGameUrl]);
+  },[accessGranted,accessSessionId,dgGameUrl,dgConnectEpoch]);
 
-  // 如果 DG 原生遊戲把背景 relay 踢掉，遊戲開著時不搶 session；
+  // 如果 DG 原生遊戲把背景 relay 踢掉：先用「同一個已取得的 DG token」
+  // 重掛一次背景 relay，不再呼叫 DGLI/login 取得第二組 token。這樣可避免
+  // 因為新遊戲登入把原本牌路工作階段直接作廢。若同 token 仍被平台限制，
+  // 遊戲開著時不無限互踢；回牌路後再走正式重新授權。
   // 回到牌路主頁後再自動重新授權並恢復。
   useEffect(()=>{
-    if(!accessGranted||mtOpen||walletTransferBusy||!dgNeedsRecovery||suppressDgRecoveryRef.current)return;
+    if(!accessGranted||walletTransferBusy||!dgNeedsRecovery||suppressDgRecoveryRef.current)return;
+    if(!dgGameUrl)return;
+    let cancelled=false;
+
+    // DG 真實遊戲開著時，先只重掛一次「同 token」relay。這個動作不會重新
+    // 呼叫 TZ 的 DGLI/login，因此不會再建立另一組遊戲授權。
+    if(mtOpen&&gameViewPlatform==="DG"){
+      if(dgForegroundRecoveryAttemptRef.current>=1)return;
+      const timer=setTimeout(()=>{
+        if(cancelled)return;
+        dgForegroundRecoveryAttemptRef.current+=1;
+        setDgNeedsRecovery(false);
+        setDgStatus("連線中");
+        setDgConnectEpoch(v=>v+1);
+        appendEvent("DG 遊戲中使用原工作階段恢復牌路連線");
+      },1200);
+      return()=>{cancelled=true;clearTimeout(timer)};
+    }
+
+    // 回到牌路主頁後，若同 token 仍無法恢復，才重新向 TZ 取得新的 DG 授權。
     const platformToken=platformTokenRef.current;
     if(!platformToken)return;
-    let cancelled=false;
     const timer=setTimeout(()=>{
       if(cancelled)return;
       setDgStatus("連線中");
       getDgLoginUrlFromPlatform(loginPlatform,platformToken).then(url=>{
         if(cancelled)return;
+        dgForegroundRecoveryAttemptRef.current=0;
         setDgNeedsRecovery(false);
         setDgGameUrl(url);
         appendEvent("DG 已自動重新授權，恢復牌路連線");
@@ -2342,7 +2367,88 @@ export default function HomeScreen(){
       });
     },700);
     return()=>{cancelled=true;clearTimeout(timer)};
-  },[accessGranted,mtOpen,walletTransferBusy,dgNeedsRecovery,loginPlatform]);
+  },[accessGranted,mtOpen,gameViewPlatform,walletTransferBusy,dgNeedsRecovery,loginPlatform,dgGameUrl]);
+
+  // Web idle / sleep recovery. Some browsers throttle or discard painting after a tab
+  // has been idle for a while. Keep the dashboard awake when possible, and when the
+  // page becomes visible again force a repaint plus lightweight reconnection checks.
+  useEffect(()=>{
+    if(Platform.OS!=="web"||typeof window==="undefined"||typeof document==="undefined")return;
+    let disposed=false;
+    let wakeLock:any=null;
+    let repaintTimer:ReturnType<typeof setTimeout>|null=null;
+
+    const requestWakeLock=async()=>{
+      if(disposed||!accessGranted||document.visibilityState!=="visible")return;
+      try{
+        const nav:any=navigator;
+        if(nav?.wakeLock?.request){
+          if(wakeLock&&!wakeLock.released)return;
+          wakeLock=await nav.wakeLock.request("screen");
+          wakeLock?.addEventListener?.("release",()=>{wakeLock=null},{once:true});
+        }
+      }catch{}
+    };
+
+    const forcePaint=()=>{
+      try{
+        const root=document.getElementById("root");
+        document.documentElement.style.visibility="visible";
+        document.body.style.visibility="visible";
+        document.body.style.opacity="1";
+        if(root){
+          root.style.visibility="visible";
+          root.style.opacity="1";
+          // Do not force display:block here. React Native Web relies on its root
+          // flex container; changing it to block collapses flex children and can
+          // leave only a thin strip visible after idle/resume.
+          root.style.width="100%";
+          root.style.height="100%";
+          root.style.minHeight="100%";
+          // Trigger a real layout/paint without rebuilding the React tree.
+          void root.getBoundingClientRect();
+        }
+      }catch{}
+    };
+
+    const recover=()=>{
+      if(disposed)return;
+      forcePaint();
+      if(repaintTimer)clearTimeout(repaintTimer);
+      repaintTimer=setTimeout(forcePaint,120);
+      void requestWakeLock();
+
+      if(!accessGranted)return;
+      // MT: keep using the existing authorized token; never create a second login here.
+      const current=socketRef.current;
+      if((!current||current.readyState===WebSocket.CLOSED||current.readyState===WebSocket.CLOSING)&&lockedMtUrlRef.current&&!reconnectingRef.current){
+        startConnection(undefined,lockedMtUrlRef.current);
+      }
+      // DG: only remount the same SSE / same-token relay when the browser resumes.
+      if(dgGameUrl&&!dgControllerRef.current){
+        setDgStatus("連線中");
+        setDgConnectEpoch(v=>v+1);
+      }
+    };
+
+    const onVisibility=()=>{if(document.visibilityState==="visible")recover()};
+    document.addEventListener("visibilitychange",onVisibility);
+    window.addEventListener("pageshow",recover);
+    window.addEventListener("focus",recover);
+    window.addEventListener("online",recover);
+    const timer=setInterval(()=>{if(document.visibilityState==="visible")forcePaint()},15000);
+    recover();
+    return()=>{
+      disposed=true;
+      document.removeEventListener("visibilitychange",onVisibility);
+      window.removeEventListener("pageshow",recover);
+      window.removeEventListener("focus",recover);
+      window.removeEventListener("online",recover);
+      clearInterval(timer);
+      if(repaintTimer)clearTimeout(repaintTimer);
+      try{wakeLock?.release?.()}catch{}
+    };
+  },[accessGranted,accessSessionId,dgGameUrl]);
 
   // Reuse the existing four-formula / parity floating tools with DG's live poker field.
   // This only updates when the actual dealt cards change, not on every countdown packet.
@@ -2423,6 +2529,7 @@ export default function HomeScreen(){
     setWalletTransferBusy(false);
     setDgNeedsRecovery(false);
     dgHasConnectedRef.current=false;
+    dgForegroundRecoveryAttemptRef.current=0;
     suppressDgRecoveryRef.current=false;
     roadConnectBusyRef.current=false;
     // Revoke the server-side app session without awaiting it. The login screen is already active.
@@ -2454,10 +2561,18 @@ export default function HomeScreen(){
         setGameViewPlatform("MT");
         setGameViewUrl(url);
       }else{
-        // DG 原生遊戲使用自己的新網址；背景牌路 relay 保留原本的工作階段，
-        // 不把遊戲 URL 塞回 dgGameUrl，避免主動把牌路連線切掉。
-        const url=await getDgLoginUrlFromPlatform(loginPlatform,platformToken);
+        // DG 平台直接沿用牌路主頁已經取得、正在使用的同一組 DG 授權網址。
+        // 不再按一次 DG平台就重新呼叫 DGLI/login，避免第二組 token 讓背景
+        // Chromium / WebSocket 被 DG 判定為舊 session 而斷線。只有主頁尚未
+        // 取得 DG 授權時，才補取一次並同時交給牌路 relay 使用。
+        let url=dgGameUrl;
+        if(!url){
+          url=await getDgLoginUrlFromPlatform(loginPlatform,platformToken);
+          setDgGameUrl(url);
+          setDgStatus("連線中");
+        }
         suppressDgRecoveryRef.current=false;
+        dgForegroundRecoveryAttemptRef.current=0;
         setDgWasOpened(true);
         setDgNeedsRecovery(false);
         setGameViewPlatform("DG");
@@ -2734,6 +2849,7 @@ export default function HomeScreen(){
     setDgStatus("連線中");
     setDgNeedsRecovery(false);
     dgHasConnectedRef.current=false;
+    dgForegroundRecoveryAttemptRef.current=0;
     suppressDgRecoveryRef.current=false;
     roadConnectBusyRef.current=false;
     setHasEnteredGame(false);
