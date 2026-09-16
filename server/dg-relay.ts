@@ -216,13 +216,17 @@ class RawWsClient {
     const u = new URL(this.url); const host = u.hostname; const port = Number(u.port || 443); const path = `${u.pathname || "/"}${u.search}`;
     const key = randomBytes(16).toString("base64");
     const expected = createHash("sha1").update(key + WS_GUID).digest("base64");
-    const sock = tls.connect({ host, port, servername: host, rejectUnauthorized: true }); this.socket = sock;
-    const timeout = setTimeout(() => { try { sock.destroy(new Error("DG WebSocket 連線逾時")); } catch {} }, 12000);
+    const sock = tls.connect({ host, port, servername: host, rejectUnauthorized: true, ALPNProtocols: ["http/1.1"] }); this.socket = sock;
+    sock.setKeepAlive(true, 15000);
+    const timeout = setTimeout(() => { try { sock.destroy(new Error("DG WebSocket 連線逾時")); } catch {} }, 9000);
     sock.once("secureConnect", () => {
       const req = [
         `GET ${path} HTTP/1.1`, `Host: ${host}${port === 443 ? "" : `:${port}`}`, "Upgrade: websocket", "Connection: Upgrade",
         `Sec-WebSocket-Key: ${key}`, "Sec-WebSocket-Version: 13", `Origin: ${this.origin}`,
-        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/135 Safari/537.36", "Accept-Language: zh-TW,zh;q=0.9", "Pragma: no-cache", "Cache-Control: no-cache", "", ""
+        "Cache-Control: no-cache", "Accept-Language: zh-TW,zh;q=0.9", "Pragma: no-cache",
+        "Accept-Encoding: gzip, deflate, br, zstd",
+        "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits",
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36", "", ""
       ].join("\r\n");
       sock.write(req);
     });
@@ -281,6 +285,8 @@ export class DgRelay {
   private wsUrl = DEFAULT_DG_WS;
   private wsCandidates: string[] = [DEFAULT_DG_WS];
   private wsCandidateIndex = 0;
+  private wsFailuresThisCycle = 0;
+  private wsLastError = "";
   private gameBasePath = "/ddnewpc";
   private ws: RawWsClient | null = null;
   private stopped = false;
@@ -308,10 +314,12 @@ export class DgRelay {
         const json: any = await cfg.json();
         const pc = json?.pc_h5 || {};
         const rawCandidates = [
-          // Render/雲端機房連台灣專線有時會被上游 503，先嘗試通用/海外線，再回退台灣線與備援線。
+          // Follow the same regional preference as the real DG browser session first.
+          // If the Taiwan edge is unavailable, rotate through DG's advertised backup lines.
           process.env.DG_WS_URL,
-          pc.game_wss_overseas, pc.game_wss, pc.game_wss_cn,
-          pc.game_wss_tw, pc.game_wss_line2, pc.game_wss_line3, pc.game_wss_line4,
+          pc.game_wss_tw,
+          pc.game_wss_line2, pc.game_wss_line3, pc.game_wss_line4,
+          pc.game_wss, pc.game_wss_cn, pc.game_wss_overseas,
           DEFAULT_DG_WS,
         ].map((v:any)=>String(v||"").trim()).filter(Boolean);
         const validated: string[] = [];
@@ -325,11 +333,15 @@ export class DgRelay {
         }
         this.wsCandidates = validated.length ? validated : [DEFAULT_DG_WS];
         this.wsCandidateIndex = 0;
+        this.wsFailuresThisCycle = 0;
+        this.wsLastError = "";
         this.wsUrl = this.wsCandidates[0]!;
       }
     } catch {
       this.wsCandidates = [DEFAULT_DG_WS];
       this.wsCandidateIndex = 0;
+      this.wsFailuresThisCycle = 0;
+      this.wsLastError = "";
       this.wsUrl = DEFAULT_DG_WS;
     }
     this.open();
@@ -355,24 +367,40 @@ export class DgRelay {
     const sign = encrypt3Des(this.token);
     const url = `${this.wsUrl.replace(/\/$/, "")}/?sign=${encodeURIComponent(sign)}`;
     this.ws = new RawWsClient(url, this.origin, data => this.handle(data), () => {
+      this.wsFailuresThisCycle = 0;
+      this.wsLastError = "";
       this.event("DG WebSocket 已建立，正在驗證");
       this.send(10086, { tableId: 1, type: 0, object: "PC" });
     }, why => {
       if (this.stopped) return;
       if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
-      const canFailover = /(?:HTTP\/1\.[01]\s+(?:502|503|504)|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|連線逾時)/i.test(String(why || ""));
-      if (canFailover && this.wsCandidates.length > 1) {
+      const reason = String(why || "closed");
+      this.wsLastError = reason;
+      this.wsFailuresThisCycle += 1;
+      const canFailover = /(?:HTTP\/1\.[01]\s+(?:400|401|403|404|429|500|502|503|504)|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|連線逾時|handshake|握手)/i.test(reason);
+      if (canFailover && this.wsCandidates.length > 1 && this.wsFailuresThisCycle < this.wsCandidates.length) {
         this.wsCandidateIndex = (this.wsCandidateIndex + 1) % this.wsCandidates.length;
         this.wsUrl = this.wsCandidates[this.wsCandidateIndex]!;
         let host = this.wsUrl; try { host = new URL(this.wsUrl).hostname; } catch {}
-        this.setStatus("connecting", `DG 主線暫時不可用，切換備援 ${host}...`);
+        this.setStatus("connecting", `目前線路失敗，切換 ${host}...`);
+        this.event(`DG 線路失敗：${reason}｜改試 ${host}`);
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = setTimeout(() => this.open(), 700);
+        this.reconnectTimer = setTimeout(() => this.open(), 450);
         return;
       }
-      this.setStatus("error", `已中斷，準備重連${why && why !== "closed" ? `：${why}` : ""}`);
-      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = setTimeout(() => this.open(), 2500);
+      // Important: do not spin forever in "connecting". After every advertised
+      // endpoint has been tried once, surface a real error so the browser can
+      // request a fresh DG launch token and start a clean connection cycle.
+      if (this.wsFailuresThisCycle >= this.wsCandidates.length) {
+        const last = this.wsLastError;
+        this.setStatus("error", `DG 所有線路握手失敗：${last}`);
+        this.event(`DG 全線失敗，將重新取得授權：${last}`);
+        this.wsFailuresThisCycle = 0;
+        this.wsCandidateIndex = 0;
+        this.wsUrl = this.wsCandidates[0]!;
+        return;
+      }
+      this.setStatus("error", `DG 連線失敗：${reason}`);
     });
     this.ws.connect();
   }
