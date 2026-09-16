@@ -83,8 +83,13 @@ async function startServer() {
     // needs a public HTTPS vendor origin plus the one-time token; do not reject
     // a valid launch URL merely because its path is no longer /ddnewpc/direct1.
     if(parsed.protocol!=="https:"||looksLocal||!hasToken) return res.status(400).json({ok:false,error:"invalid_game_url"});
-    console.log(`[DG API] start｜host=${parsed.hostname}｜path=${parsed.pathname}｜session=${sessionId.slice(0,8)}`);
-    try{await startDgRelay(sessionId,gameUrl);return res.json({ok:true});}
+    try{
+      const result=await startDgRelay(sessionId,gameUrl);
+      const status=result.relay.getStatus();
+      if(result.reused) console.log(`[DG API] reuse｜status=${status}｜session=${sessionId.slice(0,8)}`);
+      else console.log(`[DG API] start｜host=${parsed.hostname}｜path=${parsed.pathname}｜session=${sessionId.slice(0,8)}`);
+      return res.json({ok:true,reused:result.reused,status});
+    }
     catch(e:any){console.error("[DG relay] start failed",e);return res.status(502).json({ok:false,error:e?.message||"dg_start_failed"});}
   });
   app.get("/api/dg/stream",(req,res)=>{
@@ -103,7 +108,9 @@ async function startServer() {
   });
   app.post("/api/dg/stop",(req,res)=>{
     const sessionId=String(req.body?.sessionId||"");
-    if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false});
+    // Allow cleanup of an already-created relay even when the tracker session
+    // has just expired/logged out. The opaque session id is still required.
+    if(!hasActiveTrackerSession(sessionId) && !getDgRelay(sessionId)) return res.status(401).json({ok:false});
     stopDgRelay(sessionId); return res.json({ok:true});
   });
 

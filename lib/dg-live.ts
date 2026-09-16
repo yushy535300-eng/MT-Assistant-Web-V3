@@ -335,15 +335,12 @@ async function connectDgServerRelay(gameUrl: string, sessionId: string, callback
   let watchdog: ReturnType<typeof setTimeout> | null = null;
   let connected = false;
 
-  const stopRelay = () => {
+  const detachRelayStream = () => {
+    // Closing a React effect must only detach this browser's SSE listener.
+    // It must NOT stop the server relay: dgGameUrl/status changes can remount
+    // the effect while the same Chromium is still connecting or connected.
     try { source?.close(); } catch {}
     source = null;
-    void fetch("/api/dg/stop", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId }),
-      keepalive: true,
-    }).catch(() => undefined);
   };
 
   callbacks.onStatus?.("loading", "正在確認 DG 啟動網址");
@@ -399,7 +396,7 @@ async function connectDgServerRelay(gameUrl: string, sessionId: string, callback
       if (closed) return;
       closed = true;
       if (watchdog) clearTimeout(watchdog);
-      stopRelay();
+      detachRelayStream();
     },
   };
 }

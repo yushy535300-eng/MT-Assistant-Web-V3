@@ -486,9 +486,18 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
   watchdog = setTimeout(() => {
     if (stopped || got101) return;
     const message = `Chromium 20 秒內仍未取得 DG WebSocket 101｜wsCreated=${wsCreatedCount}｜handshake=${wsHandshakeCount}｜loadFailed=${failedRequestCount}`;
-    hooks.onLog(message);
+    // 20s is diagnostic only. Real captures can create the DG WSS just after
+    // this point; treating it as a hard failure caused the frontend recovery
+    // path to request a fresh token and stop the relay exactly as 101 arrived.
+    hooks.onLog(`${message}｜繼續等待，不重啟`);
     void dumpPageState('20s');
-    hooks.onFailure?.(message);
+    watchdog = setTimeout(() => {
+      if (stopped || got101) return;
+      const hard = `Chromium 45 秒內仍未取得 DG WebSocket 101｜wsCreated=${wsCreatedCount}｜handshake=${wsHandshakeCount}｜loadFailed=${failedRequestCount}`;
+      hooks.onLog(hard);
+      void dumpPageState('45s');
+      hooks.onFailure?.(hard);
+    }, 25000);
   }, 20000);
 
   launched.child.once('exit', (code, signal) => {

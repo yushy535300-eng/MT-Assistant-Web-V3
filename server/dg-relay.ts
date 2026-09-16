@@ -519,6 +519,10 @@ export class DgRelay {
     } catch {}
     if (!this.token) throw new Error("DG 授權網址缺少 token");
   }
+  getStatus(): RelayStatus { return this.status; }
+  isReusable(): boolean {
+    return !this.stopped && (this.status === "idle" || this.status === "connecting" || this.status === "connected");
+  }
   async start() {
     // First choice: let a real headless Chromium page execute DG's own direct1
     // bootstrap and create the vendor WebSocket. This keeps the browser TLS
@@ -857,9 +861,43 @@ export class DgRelay {
 }
 
 const relays = new Map<string, DgRelay>();
-export async function startDgRelay(sessionId: string, gameUrl: string) {
-  const old = relays.get(sessionId); if (old) old.stop();
-  const relay = new DgRelay(sessionId, gameUrl); relays.set(sessionId, relay); await relay.start(); return relay;
+const relayStarts = new Map<string, Promise<DgRelay>>();
+
+/**
+ * Start is intentionally idempotent per tracker session.
+ * React effects / recovery checks can race and call /api/dg/start more than once;
+ * a second start must NEVER stop a relay that is already connecting/connected.
+ * Manual reconnect first calls /api/dg/stop, which clears this slot explicitly.
+ */
+export async function startDgRelay(sessionId: string, gameUrl: string): Promise<{relay:DgRelay;reused:boolean}> {
+  const existing = relays.get(sessionId);
+  if (existing?.isReusable()) return { relay: existing, reused: true };
+
+  const inFlight = relayStarts.get(sessionId);
+  if (inFlight) return { relay: await inFlight, reused: true };
+
+  if (existing) {
+    existing.stop();
+    relays.delete(sessionId);
+  }
+
+  const relay = new DgRelay(sessionId, gameUrl);
+  relays.set(sessionId, relay);
+  let startPromise!: Promise<DgRelay>;
+  startPromise = relay.start().then(() => relay).catch((error) => {
+    if (relays.get(sessionId) === relay) relays.delete(sessionId);
+    try { relay.stop(); } catch {}
+    throw error;
+  }).finally(() => {
+    if (relayStarts.get(sessionId) === startPromise) relayStarts.delete(sessionId);
+  });
+  relayStarts.set(sessionId, startPromise);
+  return { relay: await startPromise, reused: false };
 }
 export function getDgRelay(sessionId: string) { return relays.get(sessionId) || null; }
-export function stopDgRelay(sessionId: string) { const r = relays.get(sessionId); if (r) r.stop(); relays.delete(sessionId); }
+export function stopDgRelay(sessionId: string) {
+  const r = relays.get(sessionId);
+  if (r) r.stop();
+  relays.delete(sessionId);
+  relayStarts.delete(sessionId);
+}

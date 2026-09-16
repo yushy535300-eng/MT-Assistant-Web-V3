@@ -822,10 +822,22 @@ function readonlyConnectionUrl(value:string){
   if(!value)return "自動取得中";
   try{
     const u=new URL(value);
-    if(u.searchParams.has("token"))u.searchParams.set("token","••••••••");
-    if(u.searchParams.has("sign"))u.searchParams.set("sign","••••••••");
-    return u.toString();
-  }catch{return value}
+    const queryKeys=[...u.searchParams.keys()];
+    const maskedQuery=queryKeys.length?`?${queryKeys.map(k=>`${encodeURIComponent(k)}=********`).join("&")}`:"";
+    const maskedPath=u.pathname&&u.pathname!=="/"?"/********":"/";
+    return `${u.protocol}//********${maskedPath}${maskedQuery}`;
+  }catch{return "********"}
+}
+async function stopDgRelayServer(sessionId:string){
+  if(!sessionId)return;
+  try{
+    await fetch("/api/dg/stop",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({sessionId}),
+      keepalive:true,
+    });
+  }catch{}
 }
 function resultKeyFromPayload(payload:any){const b=payload?.body??payload?.msg??payload?.data??{};return `${String(b?.shoe??"")}|${String(b?.round??"")}`}
 
@@ -1057,6 +1069,8 @@ export default function HomeScreen(){
   useEffect(()=>{
     if(!accessGranted||!accessSessionId)return;
     if(accessSessionCheck.data && !accessSessionCheck.data.valid){
+      const staleSessionId=accessSessionId;
+      void stopDgRelayServer(staleSessionId);
       setAccessGranted(false);
       setAccessSessionId("");
       const reason=(accessSessionCheck.data as any)?.reason;
@@ -2218,6 +2232,7 @@ export default function HomeScreen(){
       setConnected(false);
       try{dgControllerRef.current?.close()}catch{}
       dgControllerRef.current=null;
+      await stopDgRelayServer(accessSessionId);
       setDgConnected(false);
       setDgStatus("連線中");
     }else{
@@ -2367,6 +2382,7 @@ export default function HomeScreen(){
     // Logout is intentionally synchronous on the client: switch to AccessScreen first.
     // Server session revocation is fire-and-forget so it can never block the screen change.
     const sessionToLogout=accessSessionId;
+    void stopDgRelayServer(sessionToLogout);
     setAccessGranted(false);
     setAccessSessionId("");
     setAccessNotice("");
@@ -2753,7 +2769,7 @@ export default function HomeScreen(){
         <Pressable style={s.stopLossAckBtn} onPress={()=>setStopLossAlertOpen(false)}><Text style={s.stopLossAckText}>我知道了</Text></Pressable>
       </View></View></Modal>
 
-      <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>牌路連線中心</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>MT、DG 進入牌路主頁後會自動連線。下列網址只供顯示，使用者無法修改。</Text><View style={s.connectionStatusRow}><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>MT</Text><Text style={[s.connectionStatusText,{color:connected?"#4BD693":"#FFB54D"}]}>{connected?"已連線":"連線中"}</Text></View><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>DG</Text><Text style={[s.connectionStatusText,{color:dgConnected?"#4BD693":"#FFB54D"}]}>{dgConnected?"已連線":"連線中"}</Text></View></View><Text style={s.fieldLabel}>MT 即時牌路 WebSocket（固定）</Text><TextInput value={wsUrl} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>MT 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(mtUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>DG 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(dgGameUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><View style={s.modalActions}><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>void connectRoadDashboard(true)}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.btnText}>重新連線</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#344553"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View></View></View></Modal>
+      <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>牌路連線中心</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>MT、DG 進入牌路主頁後會自動連線。下列網址只供顯示，使用者無法修改。</Text><View style={s.connectionStatusRow}><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>MT</Text><Text style={[s.connectionStatusText,{color:connected?"#4BD693":"#FFB54D"}]}>{connected?"已連線":"連線中"}</Text></View><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>DG</Text><Text style={[s.connectionStatusText,{color:dgConnected?"#4BD693":"#FFB54D"}]}>{dgConnected?"已連線":"連線中"}</Text></View></View><Text style={s.fieldLabel}>MT 即時牌路 WebSocket（固定）</Text><TextInput value={readonlyConnectionUrl(wsUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>MT 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(mtUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>DG 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(dgGameUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><View style={s.modalActions}><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>void connectRoadDashboard(true)}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.btnText}>重新連線</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#344553"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View></View></View></Modal>
       <Modal visible={helpOpen} transparent animationType="fade" onRequestClose={()=>setHelpOpen(false)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>說明</Text><Pressable onPress={()=>setHelpOpen(false)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>主頁顯示 15 桌即時牌路。MT 懸浮輔助可左右滑動 3 頁：即時輔助、資金策略、輸贏統計。</Text></View></View></Modal>
       <Modal visible={!!radarDetailTable} transparent animationType="fade" onRequestClose={()=>setRadarDetailId(null)}><View style={s.modalShade}><View style={s.radarDetailModal}><View style={s.modalHead}><View><Text style={s.radarKicker}>MT MATRIX · LIVE ROAD SNAPSHOT</Text><Text style={s.radarDetailTitle}>{radarDetailId} · 第 {radarDetailTable?.round??0} 局</Text></View><Pressable onPress={()=>setRadarDetailId(null)} style={s.radarClose}><MaterialIcons name="close" size={20} color="#DCEEFF"/></Pressable></View>{radarDetailTable?<><View style={s.radarDetailStats}><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前推薦</Text><Text style={[s.radarDetailValue,{color:resultColor(radarDetailDecision.side)}]}>{radarDetailDecision.side}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>信心度</Text><View style={s.radarDetailConfidence}><View style={[s.signalDot,{backgroundColor:confidenceState(radarDetailConfidence).color,shadowColor:confidenceState(radarDetailConfidence).color}]}/><Text style={[s.radarDetailValue,{color:confidenceState(radarDetailConfidence).color,marginTop:0}]}>{confidenceState(radarDetailConfidence).label}</Text></View></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前牌型</Text><Text numberOfLines={1} style={s.radarDetailValue}>{detectPattern(radarDetailTable.results)}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>莊／閒／和</Text><Text style={s.radarDetailValue}>{radarDetailTable.banker}／{radarDetailTable.player}／{radarDetailTable.tie}</Text></View></View><View style={[s.radarRoadWrap,{height:desktop?190:150}]}><RoadGrid table={radarDetailTable} desktop={desktop} transparent/></View><Text style={s.radarDetailNote}>{analysisText(radarDetailTable)}</Text></>:null}</View></View></Modal>
 
