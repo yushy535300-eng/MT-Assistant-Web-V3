@@ -74,12 +74,3 @@ http://localhost:3000
 
 ## TZ 白名單資料庫（Render PostgreSQL）
 本版白名單已改為 PostgreSQL。Render 建立 PostgreSQL 後，把 Web Service 的 `DATABASE_URL` 設為該資料庫的 Internal Database URL（同區域優先），並設定 `TZ_WHITELIST_ENABLED=true`。第一次成功連線會自動建立白名單資料表並匯入第一批 98 個 TZ 帳號；之後新增、停用、刪除都直接寫入 PostgreSQL，不需要重新部署。
-
-
-## v17 更新（平台白名單＋止損提醒）
-- 白名單新增平台下拉選單：TZ / OFA；授權鍵改為「平台＋帳號」。
-- 維持不綁定裝置；既有白名單自動視為 TZ。
-- 懸浮輔助「今日輸贏」數值下方新增小型「止損設定」按鈕，不修改今日輸贏計算。
-- 止損設定為小型中央彈窗：目前 MT 餘額、本金、使用目前餘額、止損比例（預設20%）、警戒線。
-- 餘額沿用唯一 MT WebSocket，讀取 /api/v1/member/me/balance，不建立第二條 WebSocket。
-- 達警戒線時畫面正中央顯示小型提醒，只提醒、不退出、不阻止下注。

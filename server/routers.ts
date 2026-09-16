@@ -1,22 +1,25 @@
 import { z } from "zod";
 import { publicProcedure, router } from "./_core/trpc";
 import { randomUUID } from "node:crypto";
-import { authorizeWhitelist } from "./whitelist";
+import { authorizeWhitelist, getWhitelistPlatform } from "./whitelist";
 
 
 // TZ website authorization + single-login registry.
 // The browser talks to TZ directly so Render is not the source IP of the TZ login request.
 // Passwords are never sent to or stored by this server.
-const activeSessions = new Map<string, string>();
+const activeSessions = new Map<string, { sessionId:string; platform:string; username:string }>();
 
 export const appRouter = router({
   trackerAccess: router({
+    resolvePlatform: publicProcedure
+      .input(z.object({ username:z.string().min(1).max(128) }))
+      .mutation(async ({input}) => getWhitelistPlatform(input.username)),
     login: publicProcedure
       .input(z.object({
         username: z.string().min(1).max(128),
-        platform: z.enum(["TZ","OFA"]).optional(),
         tzToken: z.string().min(16).max(8192),
         deviceId: z.string().min(1).max(128).optional(),
+        platform: z.enum(["TZ","OFA"]).default("TZ"),
       }))
       .mutation(async ({ input }) => {
         // TZ already authenticated the credentials in the user's browser.
@@ -24,30 +27,27 @@ export const appRouter = router({
         const username = input.username.trim().toLowerCase();
         if (!username || !input.tzToken.trim()) return { success: false, sessionId: "", reason: "invalid_login" } as const;
 
-        const access = await authorizeWhitelist(username, input.platform || "TZ");
+        const platform=input.platform;
+        const access = await authorizeWhitelist(username, platform);
         if (!access.allowed) return { success: false, sessionId: "", reason: access.reason } as const;
 
         const sessionId = randomUUID();
-        activeSessions.set(`${input.platform || "TZ"}:${username}`, sessionId);
+        activeSessions.set(`${platform}:${username}`, {sessionId,platform,username});
         return { success: true, sessionId } as const;
       }),
     checkSession: publicProcedure
       .input(z.object({ sessionId: z.string().min(1).max(128) }))
       .query(async ({ input }) => {
-        let sessionKey = "";
-        for (const [name, sessionId] of activeSessions.entries()) {
-          if (sessionId === input.sessionId) { sessionKey = name; break; }
-        }
-        if (!sessionKey) return { valid: false, reason: "session_invalid" } as const;
+        let current:{sessionId:string;platform:string;username:string}|null=null;
+        for (const value of activeSessions.values()) { if(value.sessionId===input.sessionId){current=value;break;} }
+        if (!current) return { valid: false, reason: "session_invalid" } as const;
+        const {username,platform}=current;
 
         // Re-check the live whitelist on every session heartbeat. This makes admin
         // disable/delete/expiry changes affect users who are already online.
-        const split=sessionKey.indexOf(":");
-        const platform=split>0?sessionKey.slice(0,split):"TZ";
-        const username=split>0?sessionKey.slice(split+1):sessionKey;
         const access = await authorizeWhitelist(username, platform);
         if (!access.allowed) {
-          activeSessions.delete(sessionKey);
+          activeSessions.delete(`${platform}:${username}`);
           return { valid: false, reason: access.reason } as const;
         }
         return { valid: true, reason: "ok" } as const;
@@ -55,9 +55,9 @@ export const appRouter = router({
     logout: publicProcedure
       .input(z.object({ sessionId: z.string().min(1).max(128) }))
       .mutation(({ input }) => {
-        for (const [username, sessionId] of activeSessions.entries()) {
-          if (sessionId === input.sessionId) {
-            activeSessions.delete(username);
+        for (const [key, value] of activeSessions.entries()) {
+          if (value.sessionId === input.sessionId) {
+            activeSessions.delete(key);
               break;
           }
         }

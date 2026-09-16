@@ -34,7 +34,7 @@ export async function ensureWhitelistTables() {
   )`);
   await db.query(`ALTER TABLE tz_whitelist ADD COLUMN IF NOT EXISTS platform VARCHAR(16) NOT NULL DEFAULT 'TZ'`);
   await db.query(`DROP INDEX IF EXISTS tz_whitelist_username_ci`);
-  await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS tz_whitelist_platform_username_ci ON tz_whitelist (platform, LOWER(username))`);
+  await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS tz_whitelist_platform_username_ci ON tz_whitelist (UPPER(platform), LOWER(username))`);
   await db.query(`CREATE TABLE IF NOT EXISTS mt_app_meta (
     meta_key VARCHAR(128) PRIMARY KEY,
     meta_value VARCHAR(255) NULL,
@@ -47,8 +47,8 @@ export async function ensureWhitelistTables() {
     try {
       await client.query("BEGIN");
       for (const username of INITIAL_WHITELIST) {
-        await client.query(`INSERT INTO tz_whitelist (platform, username, enabled, expires_at, max_devices, note)
-          VALUES ('TZ',$1,TRUE,NULL,1,$2) ON CONFLICT DO NOTHING`, [username, "第一批白名單"]);
+        await client.query(`INSERT INTO tz_whitelist (username, enabled, expires_at, max_devices, note)
+          VALUES ($1,TRUE,NULL,1,$2) ON CONFLICT DO NOTHING`, [username, "第一批白名單"]);
       }
       await client.query(`INSERT INTO mt_app_meta (meta_key, meta_value) VALUES ($1,$2)
         ON CONFLICT (meta_key) DO UPDATE SET meta_value=EXCLUDED.meta_value, updated_at=NOW()`, ["tz_whitelist_initial_seed_pg_v1", String(INITIAL_WHITELIST.length)]);
@@ -69,13 +69,26 @@ export async function authorizeWhitelist(usernameRaw: string, platformRaw = "TZ"
   if (!db) return { allowed: false, reason: "database_unavailable" } as const;
   await ensureWhitelistTables();
   const username = usernameRaw.trim();
-  const platform = String(platformRaw || "TZ").trim().toUpperCase() === "OFA" ? "OFA" : "TZ";
-  const result = await db.query(`SELECT * FROM tz_whitelist WHERE platform=$1 AND LOWER(username)=LOWER($2) LIMIT 1`, [platform, username]);
+  const platform = String(platformRaw || "TZ").trim().toUpperCase();
+  const result = await db.query(`SELECT * FROM tz_whitelist WHERE UPPER(platform)=UPPER($1) AND LOWER(username)=LOWER($2) LIMIT 1`, [platform, username]);
   const row = result.rows[0];
   if (!row) return { allowed: false, reason: "not_whitelisted" } as const;
   if (!row.enabled) return { allowed: false, reason: "disabled" } as const;
   if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) return { allowed: false, reason: "expired" } as const;
   return { allowed: true, reason: "ok" } as const;
+}
+
+export async function getWhitelistPlatform(usernameRaw:string) {
+  if (!whitelistEnabled()) return { found:true, platform:"TZ", reason:"whitelist_disabled" } as const;
+  const db=getPool(); if(!db) return { found:false, platform:"", reason:"database_unavailable" } as const;
+  await ensureWhitelistTables();
+  const username=usernameRaw.trim();
+  const r=await db.query(`SELECT platform,enabled,expires_at FROM tz_whitelist WHERE LOWER(username)=LOWER($1) ORDER BY CASE WHEN UPPER(platform)='OFA' THEN 0 ELSE 1 END LIMIT 1`,[username]);
+  const row=r.rows[0];
+  if(!row) return { found:false, platform:"", reason:"not_whitelisted" } as const;
+  if(!row.enabled) return { found:false, platform:String(row.platform||"TZ").toUpperCase(), reason:"disabled" } as const;
+  if(row.expires_at && new Date(row.expires_at).getTime()<=Date.now()) return { found:false, platform:String(row.platform||"TZ").toUpperCase(), reason:"expired" } as const;
+  return { found:true, platform:String(row.platform||"TZ").toUpperCase(), reason:"ok" } as const;
 }
 
 export async function listWhitelist() {
@@ -87,14 +100,11 @@ export async function listWhitelist() {
 export async function upsertWhitelist(input:{username:string; platform?:string; days?:number|null; permanent?:boolean; note?:string}) {
   const db=getPool(); if(!db) throw new Error("DATABASE_URL 尚未設定"); await ensureWhitelistTables();
   const username=input.username.trim(); if(!username) throw new Error("請輸入平台帳號");
-  const platform=String(input.platform||"TZ").trim().toUpperCase()==="OFA"?"OFA":"TZ";
+  const platform=String(input.platform||"TZ").trim().toUpperCase();
+  if(!["TZ","OFA"].includes(platform)) throw new Error("不支援的平台");
   const expiresAt=input.permanent ? null : new Date(Date.now()+Math.max(1,Number(input.days)||30)*86400000);
-  const existing=await db.query(`SELECT id FROM tz_whitelist WHERE platform=$1 AND LOWER(username)=LOWER($2) LIMIT 1`,[platform,username]);
-  if(existing.rowCount){
-    await db.query(`UPDATE tz_whitelist SET username=$1,enabled=TRUE,expires_at=$2,note=$3,updated_at=NOW() WHERE id=$4`,[username,expiresAt,(input.note||"").slice(0,255),existing.rows[0].id]);
-  }else{
-    await db.query(`INSERT INTO tz_whitelist (platform,username,enabled,expires_at,max_devices,note,updated_at) VALUES ($1,$2,TRUE,$3,1,$4,NOW())`,[platform,username,expiresAt,(input.note||"").slice(0,255)]);
-  }
+  await db.query(`INSERT INTO tz_whitelist (username,platform,enabled,expires_at,max_devices,note,updated_at) VALUES ($1,$2,TRUE,$3,1,$4,NOW())
+    ON CONFLICT (UPPER(platform),LOWER(username)) DO UPDATE SET enabled=TRUE,expires_at=EXCLUDED.expires_at,note=EXCLUDED.note,updated_at=NOW()`, [username,platform,expiresAt,(input.note||"").slice(0,255)]);
 }
 export async function setWhitelistEnabled(id:number, enabled:boolean) { const db=getPool(); if(!db) throw new Error("DATABASE_URL 尚未設定"); await ensureWhitelistTables(); await db.query(`UPDATE tz_whitelist SET enabled=$1,updated_at=NOW() WHERE id=$2`,[enabled,id]); }
 export async function extendWhitelist(id:number, days:number) { const db=getPool(); if(!db) throw new Error("DATABASE_URL 尚未設定"); await ensureWhitelistTables(); await db.query(`UPDATE tz_whitelist SET expires_at=(CASE WHEN expires_at IS NULL OR expires_at < NOW() THEN NOW() ELSE expires_at END)+($1::text || ' days')::interval,enabled=TRUE,updated_at=NOW() WHERE id=$2`,[Math.max(1,days),id]); }
