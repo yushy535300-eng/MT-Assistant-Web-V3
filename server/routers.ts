@@ -14,6 +14,7 @@ export const appRouter = router({
     login: publicProcedure
       .input(z.object({
         username: z.string().min(1).max(128),
+        platform: z.enum(["TZ","OFA"]).optional(),
         tzToken: z.string().min(16).max(8192),
         deviceId: z.string().min(1).max(128).optional(),
       }))
@@ -23,27 +24,30 @@ export const appRouter = router({
         const username = input.username.trim().toLowerCase();
         if (!username || !input.tzToken.trim()) return { success: false, sessionId: "", reason: "invalid_login" } as const;
 
-        const access = await authorizeWhitelist(username);
+        const access = await authorizeWhitelist(username, input.platform || "TZ");
         if (!access.allowed) return { success: false, sessionId: "", reason: access.reason } as const;
 
         const sessionId = randomUUID();
-        activeSessions.set(username, sessionId);
+        activeSessions.set(`${input.platform || "TZ"}:${username}`, sessionId);
         return { success: true, sessionId } as const;
       }),
     checkSession: publicProcedure
       .input(z.object({ sessionId: z.string().min(1).max(128) }))
       .query(async ({ input }) => {
-        let username = "";
+        let sessionKey = "";
         for (const [name, sessionId] of activeSessions.entries()) {
-          if (sessionId === input.sessionId) { username = name; break; }
+          if (sessionId === input.sessionId) { sessionKey = name; break; }
         }
-        if (!username) return { valid: false, reason: "session_invalid" } as const;
+        if (!sessionKey) return { valid: false, reason: "session_invalid" } as const;
 
         // Re-check the live whitelist on every session heartbeat. This makes admin
         // disable/delete/expiry changes affect users who are already online.
-        const access = await authorizeWhitelist(username);
+        const split=sessionKey.indexOf(":");
+        const platform=split>0?sessionKey.slice(0,split):"TZ";
+        const username=split>0?sessionKey.slice(split+1):sessionKey;
+        const access = await authorizeWhitelist(username, platform);
         if (!access.allowed) {
-          activeSessions.delete(username);
+          activeSessions.delete(sessionKey);
           return { valid: false, reason: access.reason } as const;
         }
         return { valid: true, reason: "ok" } as const;
