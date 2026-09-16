@@ -98,6 +98,14 @@ const initialTables: TableData[] = baccaratTableIds.map((apiId) => ({
   roomId: "—", tableBadge: "—", shoe: "—", round: 0, banker: 0, player: 0, tie: 0,
   results: [], trend: "",
 }));
+const dgPlaceholderDefs = [
+  ["BAC001","RB01","60101"],["BAC002","RB02","60102"],["BAC003","RB03","60103"],["BAC004","RB04","60104"],["BAC005","RB05","60105"],
+  ["TID348","S01","50101"],["TID349","S02","50102"],["TID350","S03","50103"],["TID351","S05","50104"],["TID352","S06","50105"],
+  ["TID354","S07","50106"],["TID77842","S09","50107"],["TID77846","S10","50108"],
+] as const;
+const dgPlaceholderTables: TableData[] = dgPlaceholderDefs.map(([apiId,roomId,tableBadge])=>({
+  id:apiId,apiId,game:"百家樂",name:"—",players:"—",roomId,tableBadge,shoe:"—",round:0,banker:0,player:0,tie:0,results:[],trend:"",live:false,
+}));
 const lineContactUrl = "https://line.me/ti/p/k2pkYGXGL3";
 const threadsUrl = "https://www.threads.com/@uss0857?igshid=NTc4MTIwNjQ2YQ==";
 const tzRegisterUrl = "https://shy9453.tz6868.cc";
@@ -576,9 +584,13 @@ async function getGameLoginUrlFromPlatform(platform:"TZ"|"OFA",token:string,prov
       body:JSON.stringify({game_return_url:base,game_kind:"",game_type:"",game_device:"Desktop"}),signal:controller.signal});
   };
   try{
-    let response=await request(false); if((response.status===401||response.status===403)&&token)response=await request(true);
+    let response=await request(false);
     let data:any=null; try{data=await response.json()}catch{}
-    if(!response.ok||Number(data?.code)!==200)throw new Error(`取得 ${provider==="DGLI"?"DG":"MT"} 授權失敗`);
+    const firstCode=Number(data?.code);
+    if(token && (response.status===401||response.status===403||firstCode===401||firstCode===403)){
+      response=await request(true); data=null; try{data=await response.json()}catch{}
+    }
+    if(!response.ok||Number(data?.code)!==200)throw new Error(String(data?.message??data?.msg??`取得 ${provider==="DGLI"?"DG":"MT"} 授權失敗`));
     const gameUrl=String(data?.data?.game_url??data?.raw?.url??"").trim();
     if(!gameUrl||!/[?&]token=/i.test(gameUrl))throw new Error(`找不到 ${provider==="DGLI"?"DG":"MT"} Token`);
     return gameUrl;
@@ -606,7 +618,7 @@ function getTzLoginDeviceId(){
   return id;
 }
 
-function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:string,mtGameUrl?:string,dgGameUrl?:string)=>void;notice?:string}){
+function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:string,mtGameUrl:string,platformToken:string,platform:"TZ"|"OFA")=>void;notice?:string}){
   const {width}=useWindowDimensions();
   const desktop=width>=1000;
   const [username,setUsername]=useState("");
@@ -615,7 +627,6 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
   const [error,setError]=useState("");
   const playCount=useRef(0);
   const pendingMtGameUrlRef=useRef("");
-  const pendingDgGameUrlRef=useRef("");
   const webVideoRef=useRef<any>(null);
   const player=useVideoPlayer({ uri: "/poker.mp4" },p=>{if(Platform.OS!=="web"){p.loop=false;p.muted=true;p.play()}});
   useEffect(()=>{if(Platform.OS==="web")return;const sub=player.addListener("playToEnd",()=>{playCount.current+=1;if(playCount.current<2){player.currentTime=0;player.play()}else player.pause()});return()=>sub.remove()},[player]);
@@ -661,17 +672,12 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
         setError(messages[reason]||"TZ 登入驗證失敗");
         return;
       }
-      // 登入面板維持不變；白名單通過後在背景同時準備 MT / DG 真人入口。
+      // 登入畫面與原本流程保持一致：先準備 MT，進主頁後預設就是 MT。
+      // DG 授權延後到使用者在主頁切到 DG 時才自動取得，避免登入被 DG 網路狀態拖慢。
       pendingMtGameUrlRef.current="";
-      pendingDgGameUrlRef.current="";
-      const [mtResult,dgResult]=await Promise.allSettled([
-        getMtLoginUrlFromPlatform(platform,platformToken),
-        getDgLoginUrlFromPlatform(platform,platformToken),
-      ]);
-      if(mtResult.status==="fulfilled")pendingMtGameUrlRef.current=mtResult.value;
-      if(dgResult.status==="fulfilled")pendingDgGameUrlRef.current=dgResult.value;
+      try{pendingMtGameUrlRef.current=await getMtLoginUrlFromPlatform(platform,platformToken)}catch{}
       setError("");
-      onAuthenticated(access.sessionId,pendingMtGameUrlRef.current,pendingDgGameUrlRef.current);
+      onAuthenticated(access.sessionId,pendingMtGameUrlRef.current,platformToken,platform);
     }catch(error:any){
       setError(error?.message||"登入工作階段建立失敗，請重試");
     }
@@ -989,6 +995,7 @@ export default function HomeScreen(){
       setDgStatus("未連線");
       setDgGameUrl("");
       setDgTables([]);
+      platformTokenRef.current="";
       setActivePlatform("MT");
       setToken("");
       setMtUrl("");
@@ -1029,6 +1036,8 @@ export default function HomeScreen(){
   const [dgGameUrl,setDgGameUrl]=useState("");
   const [dgTables,setDgTables]=useState<TableData[]>([]);
   const dgControllerRef=useRef<{close:()=>void}|null>(null);
+  const platformTokenRef=useRef("");
+  const [loginPlatform,setLoginPlatform]=useState<"TZ"|"OFA">("TZ");
   const [token,setToken]=useState("");
   const [mtUrl,setMtUrl]=useState("");
   const pendingAutoMtUrlRef=useRef("");
@@ -1064,7 +1073,8 @@ export default function HomeScreen(){
       });
     }
   };
-  const tables:TableData[]=activePlatform==="DG"?dgTables:mtTables;
+  const tables:TableData[]=activePlatform==="DG"?(dgTables.length?dgTables:dgPlaceholderTables):mtTables;
+  const availableTableCount=activePlatform==="DG"?dgTables.length:mtTables.length;
   const activeConnected=activePlatform==="DG"?dgConnected:connected;
   const [events,setEvents]=useState<string[]>([]);
   const [toast,setToast]=useState("");
@@ -2097,20 +2107,40 @@ export default function HomeScreen(){
     startConnection(undefined,autoUrl);
   },[accessGranted]);
   useEffect(()=>{
+    if(!accessGranted||activePlatform!=="DG"||dgGameUrl)return;
+    const platformToken=platformTokenRef.current;
+    if(!platformToken){setDgConnected(false);setDgStatus("DG 授權需要重新登入 TZ");return;}
+    let cancelled=false;
+    setDgConnected(false);
+    setDgStatus("正在取得 DG 授權...");
+    appendEvent("切換 DG｜正在向 TZ 取得 DG 授權");
+    getDgLoginUrlFromPlatform(loginPlatform,platformToken).then(url=>{
+      if(cancelled)return;
+      setDgGameUrl(url);
+      appendEvent("TZ 已取得 DG Token，準備連線");
+    }).catch((error:any)=>{
+      if(cancelled)return;
+      setDgStatus(error?.message||"取得 DG 授權失敗");
+      appendEvent(`DG 授權失敗：${error?.message||"unknown"}`);
+    });
+    return()=>{cancelled=true};
+  },[accessGranted,activePlatform,dgGameUrl,loginPlatform]);
+  useEffect(()=>{
     if(!accessGranted||activePlatform!=="DG")return;
-    if(!dgGameUrl){setDgConnected(false);setDgStatus("尚未取得 DG 授權");return;}
+    if(!dgGameUrl){setDgConnected(false);return;}
     let cancelled=false;
     try{dgControllerRef.current?.close()}catch{}
     dgControllerRef.current=null;
     setDgConnected(false);
     setDgStatus("連線中...");
     appendEvent("切換 DG｜正在自動連線");
-    connectDgLive(dgGameUrl,{
+    connectDgLive(dgGameUrl,accessSessionId,{
       onTables:(next:DgTableData[])=>{if(!cancelled)setDgTables(next as TableData[])},
       onStatus:(status,message)=>{
         if(cancelled)return;
         setDgConnected(status==="connected");
         setDgStatus(status==="connected"?"已連線":status==="connecting"||status==="loading"?"連線中...":message||"未連線");
+        if(status==="error"&&/驗證失敗|token|授權|握手失敗|\b401\b|\b403\b/i.test(message||"")) setDgGameUrl("");
       },
       onEvent:(message)=>{if(!cancelled)appendEvent(message)},
     }).then(controller=>{
@@ -2127,7 +2157,7 @@ export default function HomeScreen(){
       try{dgControllerRef.current?.close()}catch{}
       dgControllerRef.current=null;
     };
-  },[accessGranted,activePlatform,dgGameUrl]);
+  },[accessGranted,accessSessionId,activePlatform,dgGameUrl]);
 
   // Reuse the existing four-formula / parity floating tools with DG's live poker field.
   // This only updates when the actual dealt cards change, not on every countdown packet.
@@ -2185,6 +2215,7 @@ export default function HomeScreen(){
     setDgStatus("未連線");
     setDgGameUrl("");
     setDgTables([]);
+    platformTokenRef.current="";
     setActivePlatform("MT");
     setConnectionOpen(false);
     setHelpOpen(false);
@@ -2440,16 +2471,18 @@ export default function HomeScreen(){
     </Animated.View>;
   };
 
-  if(!accessGranted)return <AccessScreen notice={accessNotice} onAuthenticated={(sessionId,mtGameUrl,dgUrl)=>{
+  if(!accessGranted)return <AccessScreen notice={accessNotice} onAuthenticated={(sessionId,mtGameUrl,platformToken,platform)=>{
     setAccessSessionId(sessionId);
     setAccessNotice("");
     setActivePlatform("MT");
     autoMtConnectDoneRef.current=false;
     pendingAutoMtUrlRef.current=mtGameUrl||"";
     lockedMtUrlRef.current=mtGameUrl||"";
-    setDgGameUrl(dgUrl||"");
+    platformTokenRef.current=platformToken;
+    setLoginPlatform(platform);
+    setDgGameUrl("");
     setDgConnected(false);
-    setDgStatus(dgUrl?"待命":"尚未取得 DG 授權");
+    setDgStatus("待命");
     if(mtGameUrl){setToken(mtGameUrl);setMtUrl(mtGameUrl)}
     setAccessGranted(true);
   }}/>;
@@ -2457,7 +2490,7 @@ export default function HomeScreen(){
   return <ScreenContainer edges={["top","left","right","bottom"]} containerClassName="bg-[#080E17]" className="bg-[#080E17]">
     <View style={[s.screen,activePlatform==="DG"&&s.screenDg,desktop&&Platform.OS==="web"?s.screenDesktopZoom:null]}>
       <View style={[s.topbar,!desktop?s.topbarMobile:null,activePlatform==="DG"&&s.topbarDg]}><View style={s.brandRow}><View style={[s.brandIcon,activePlatform==="DG"&&s.brandIconDg]}><MatrixMark size={29} brand={activePlatform}/></View><View><Text style={[s.kicker,activePlatform==="DG"&&s.kickerDg]}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={logoutSession}><MaterialIcons name="logout" size={16} color="#fff"/><Text style={s.headerBtnText}>登出</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setConnectionOpen(true)}><MaterialIcons name="settings" size={16} color="#fff"/><Text style={s.headerBtnText}>連線</Text></Pressable></View></View>
-      <ScrollView contentContainerStyle={s.content}><View style={[s.overview,!desktop&&s.overviewMobile,activePlatform==="DG"&&s.overviewDg]}><View style={!desktop?s.overviewTextMobile:undefined}><Text style={[s.overKicker,activePlatform==="DG"&&s.overKickerDg]}>REAL-TIME MONITORING</Text><Text style={s.overTitle}>LIVE TABLE MATRIX</Text><Text style={s.overSub}>{activePlatform==="DG"?"DG 真人桌況 · 黑金牌路 · 荷官同步":"即時桌況 · 牌路分析 · 荷官同步"}</Text></View><View style={[s.overStats,!desktop&&s.overStatsMobile]}><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>連線狀態</Text><Text style={[s.overValue,{color:activeConnected?"#4BD693":"#FF6973"}]}>{activePlatform} {activeConnected?"已連線":activePlatform==="DG"?dgStatus:"未連線"}</Text></View><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>平台 · 可用 {tables.length} 桌</Text><View style={s.platformSwitch}><Pressable onPress={()=>setActivePlatform("MT")} style={[s.platformTab,activePlatform==="MT"&&s.platformTabMtActive]}><Text style={[s.platformTabText,activePlatform==="MT"&&s.platformTabTextActive]}>MT</Text></Pressable><Pressable onPress={()=>setActivePlatform("DG")} style={[s.platformTab,activePlatform==="DG"&&s.platformTabDgActive]}><Text style={[s.platformTabText,activePlatform==="DG"&&s.platformTabTextDgActive]}>DG</Text></Pressable></View></View></View></View><View style={s.listHead}><Text style={s.listTitle}>所有房型</Text><Text style={s.listHint}>{activePlatform} · 歷史牌局 · 即時更新 · 荷官同步</Text></View><View style={[s.cardsGrid,desktop&&s.cardsGridDesktop,desktop&&s.cardsGridDesktopCentered]}>{tables.map(t=><View key={t.apiId} style={desktop?s.cardWrapDesktop:s.cardWrap}><MemoTableCard table={t} desktop={desktop} onAction={stableTableAction} connected={activeConnected} platform={activePlatform}/></View>)}</View></ScrollView>
+      <ScrollView contentContainerStyle={s.content}><View style={[s.overview,!desktop&&s.overviewMobile,activePlatform==="DG"&&s.overviewDg]}><View style={!desktop?s.overviewTextMobile:undefined}><Text style={[s.overKicker,activePlatform==="DG"&&s.overKickerDg]}>REAL-TIME MONITORING</Text><Text style={s.overTitle}>LIVE TABLE MATRIX</Text><Text style={s.overSub}>{activePlatform==="DG"?"DG 真人桌況 · 黑金牌路 · 荷官同步":"即時桌況 · 牌路分析 · 荷官同步"}</Text></View><View style={[s.overStats,!desktop&&s.overStatsMobile]}><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>連線狀態</Text><Text style={[s.overValue,{color:activeConnected?"#4BD693":"#FF6973"}]}>{activePlatform} {activeConnected?"已連線":activePlatform==="DG"?dgStatus:"未連線"}</Text></View><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>平台 · 可用 {availableTableCount} 桌</Text><View style={s.platformSwitch}><Pressable onPress={()=>setActivePlatform("MT")} style={[s.platformTab,activePlatform==="MT"&&s.platformTabMtActive]}><Text style={[s.platformTabText,activePlatform==="MT"&&s.platformTabTextActive]}>MT</Text></Pressable><Pressable onPress={()=>setActivePlatform("DG")} style={[s.platformTab,activePlatform==="DG"&&s.platformTabDgActive]}><Text style={[s.platformTabText,activePlatform==="DG"&&s.platformTabTextDgActive]}>DG</Text></Pressable></View></View></View></View><View style={s.listHead}><Text style={s.listTitle}>所有房型</Text><Text style={s.listHint}>{activePlatform} · 歷史牌局 · 即時更新 · 荷官同步</Text></View><View style={[s.cardsGrid,desktop&&s.cardsGridDesktop,desktop&&s.cardsGridDesktopCentered]}>{tables.map(t=><View key={t.apiId} style={desktop?s.cardWrapDesktop:s.cardWrap}><MemoTableCard table={t} desktop={desktop} onAction={stableTableAction} connected={activeConnected} platform={activePlatform}/></View>)}</View></ScrollView>
 
       {toast?<View style={s.toast}><Text style={s.toastText}>{toast}</Text></View>:null}
 

@@ -9,6 +9,12 @@ import { authorizeWhitelist, getWhitelistPlatform } from "./whitelist";
 // Passwords are never sent to or stored by this server.
 const activeSessions = new Map<string, { sessionId:string; platform:string; username:string }>();
 
+export function hasActiveTrackerSession(sessionId:string){
+  if(!sessionId)return false;
+  for(const value of activeSessions.values()) if(value.sessionId===sessionId) return true;
+  return false;
+}
+
 export const appRouter = router({
   trackerAccess: router({
     resolvePlatform: publicProcedure

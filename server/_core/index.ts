@@ -4,11 +4,12 @@ import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { appRouter } from "../routers";
+import { appRouter, hasActiveTrackerSession } from "../routers";
 import { createContext } from "./context";
 import { randomUUID } from "node:crypto";
 import { adminPage } from "../admin-page";
 import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
+import { startDgRelay, getDgRelay, stopDgRelay } from "../dg-relay";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -55,6 +56,39 @@ async function startServer() {
   app.post("/api/admin/whitelist/:id/toggle-form",requireAdmin,async(req,res)=>{try{await setWhitelistEnabled(Number(req.params.id),String(req.body?.enabled)==="1");adminRedirect(res,"授權狀態已更新") }catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
   app.post("/api/admin/whitelist/:id/extend-form",requireAdmin,async(req,res)=>{try{await extendWhitelist(Number(req.params.id),30);adminRedirect(res,"已延長 30 天")}catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
   app.post("/api/admin/whitelist/:id/delete-form",requireAdmin,async(req,res)=>{try{await deleteWhitelist(Number(req.params.id));adminRedirect(res,"帳號已刪除") }catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
+
+  // DG relay: the browser keeps its normal TZ/DG login flow, while the server
+  // owns the vendor WebSocket so the required DG Origin header can be preserved.
+  app.post("/api/dg/start", async (req,res)=>{
+    const sessionId=String(req.body?.sessionId||"");
+    const gameUrl=String(req.body?.gameUrl||"");
+    if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false,error:"session_invalid"});
+    let parsed:URL; try{parsed=new URL(gameUrl)}catch{return res.status(400).json({ok:false,error:"invalid_game_url"})}
+    const dgHost=/^new-dd-cn\./i.test(parsed.hostname);
+    const dgPath=/\/ddnewpc\//i.test(parsed.pathname);
+    if(parsed.protocol!=="https:"||!dgHost||!dgPath||!/[?&]token=/i.test(gameUrl)) return res.status(400).json({ok:false,error:"invalid_game_url"});
+    try{await startDgRelay(sessionId,gameUrl);return res.json({ok:true});}
+    catch(e:any){console.error("[DG relay] start failed",e);return res.status(502).json({ok:false,error:e?.message||"dg_start_failed"});}
+  });
+  app.get("/api/dg/stream",(req,res)=>{
+    const sessionId=String(req.query.sessionId||"");
+    if(!hasActiveTrackerSession(sessionId)) return res.status(401).end();
+    const relay=getDgRelay(sessionId); if(!relay) return res.status(404).end();
+    res.status(200);
+    res.setHeader("Content-Type","text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control","no-cache, no-transform");
+    res.setHeader("Connection","keep-alive");
+    res.setHeader("X-Accel-Buffering","no");
+    (res as any).flushHeaders?.();
+    const unsubscribe=relay.subscribe(res);
+    const keepalive=setInterval(()=>{try{res.write(": keepalive\n\n")}catch{}},15000);
+    req.on("close",()=>{clearInterval(keepalive);unsubscribe()});
+  });
+  app.post("/api/dg/stop",(req,res)=>{
+    const sessionId=String(req.body?.sessionId||"");
+    if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false});
+    stopDgRelay(sessionId); return res.json({ok:true});
+  });
 
   app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
 
