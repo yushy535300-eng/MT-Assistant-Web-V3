@@ -56,6 +56,12 @@ type SseClient = { write: (chunk: string) => unknown };
 const WS_KEY_TEXT = "63dwReOhAlDbUoXiMFyZPgSvQc4JnTr7La0EjWf3Cu6NzBt9Ks1HxGq2Rd8Ym5Vp".split("").reverse().join("");
 const WS_KEY_24 = Buffer.from(WS_KEY_TEXT.slice(0, 24), "utf8");
 const DEFAULT_DG_WS = "wss://appatw.kindlestone.com";
+// Verified in the user's latest HAR on 2026-09-17:
+// Origin https://new-dd-cn.20299999.com -> 101 Switching Protocols on newappa0.ywjxi.com.
+// Keep this as a transport fallback only; the runtime still prefers values
+// returned by DG's own game_settings.json.
+const HAR_VERIFIED_DG_WS = "wss://newappa0.ywjxi.com";
+const LEGACY_OVERSEAS_DG_WS = "wss://hwdata-new.taxyss.com";
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 function encrypt3Des(plain: string) {
@@ -173,6 +179,75 @@ function primaryWsForType(pc: any, jsonType: number) {
     case 0:
     default: return pc?.game_wss;
   }
+}
+
+function isAllowedDgWs(value: unknown) {
+  try {
+    const text = String(value || "").trim().replace(/\/$/, "");
+    if (!text) return "";
+    const parsed = new URL(text);
+    const allowed = parsed.protocol === "wss:" &&
+      /(?:^|\.)(?:kindlestone\.com|taxyss\.com|ywjxi\.com)$/i.test(parsed.hostname);
+    return allowed ? text : "";
+  } catch {
+    return "";
+  }
+}
+
+function collectConfiguredWs(pc: any, jsonType: number, origin: string) {
+  let originVerified: string | undefined;
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    if (host === "new-dd-cn.20299999.com") originVerified = HAR_VERIFIED_DG_WS;
+  } catch {}
+
+  const ordered: unknown[] = [
+    process.env.DG_WS_URL,
+    originVerified,
+    primaryWsForType(pc, jsonType),
+    pc?.game_wss,
+    pc?.game_wss_overseas,
+    pc?.game_wss_tw,
+    pc?.game_wss_my,
+    pc?.game_wss_th,
+    pc?.game_wss_vn,
+    pc?.game_wss_cn,
+    pc?.game_wss_line1,
+    pc?.game_wss_line2,
+    pc?.game_wss_line3,
+    pc?.game_wss_line4,
+  ];
+
+  const seenObjects = new Set<any>();
+  const walk = (value: any) => {
+    if (value == null) return;
+    if (typeof value === "string") {
+      if (/^wss:\/\//i.test(value.trim())) ordered.push(value);
+      return;
+    }
+    if (typeof value !== "object" || seenObjects.has(value)) return;
+    seenObjects.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item);
+    } else {
+      for (const item of Object.values(value)) walk(item);
+    }
+  };
+  walk(pc);
+
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    if (host === "new-dd-cn.20299999.com") ordered.push(HAR_VERIFIED_DG_WS);
+  } catch {}
+
+  ordered.push(HAR_VERIFIED_DG_WS, DEFAULT_DG_WS, LEGACY_OVERSEAS_DG_WS);
+
+  const out: string[] = [];
+  for (const value of ordered) {
+    const valid = isAllowedDgWs(value);
+    if (valid && !out.includes(valid)) out.push(valid);
+  }
+  return out;
 }
 
 function n(value: bigint | number | undefined | null) {
@@ -448,23 +523,7 @@ export class DgRelay {
       if (!cfg.ok) throw new Error(`game_settings ${cfg.status}`);
       const json: any = await cfg.json();
       const pc = json?.pc_h5 || {};
-      const primary = primaryWsForType(pc, this.jsonType);
-      const rawCandidates = [
-        process.env.DG_WS_URL,
-        primary,
-        pc.game_wss_line2,
-        pc.game_wss_line3,
-        pc.game_wss_line4,
-      ].map((v:any)=>String(v||"").trim()).filter(Boolean);
-      const validated: string[] = [];
-      for (const candidate of rawCandidates) {
-        try {
-          const parsed = new URL(candidate);
-          const allowed = parsed.protocol === "wss:" && /(?:^|\.)(?:kindlestone\.com|taxyss\.com|ywjxi\.com)$/i.test(parsed.hostname);
-          const normalized = candidate.replace(/\/$/, "");
-          if (allowed && !validated.includes(normalized)) validated.push(normalized);
-        } catch {}
-      }
+      const validated = collectConfiguredWs(pc, this.jsonType, this.origin);
       if (!validated.length) throw new Error(`DG type=${this.jsonType} 沒有可用 WSS`);
       this.wsCandidates = validated;
       this.wsCandidateIndex = 0;
@@ -473,14 +532,15 @@ export class DgRelay {
       this.wsUrl = this.wsCandidates[0]!;
       this.event(`DG WSS 已確認：type=${this.jsonType} → ${new URL(this.wsUrl).hostname}`);
     } catch (error: any) {
-      // Use the known TW endpoint only as a final transport fallback. Do not
-      // pretend it is the vendor-selected region when settings could not load.
-      this.wsCandidates = [DEFAULT_DG_WS];
+      // If settings cannot be loaded, still try the endpoints that have been
+      // observed succeeding in real captures. This is transport failover only;
+      // we do not label any of them as the user's region.
+      this.wsCandidates = collectConfiguredWs({}, this.jsonType, this.origin);
       this.wsCandidateIndex = 0;
       this.wsFailuresThisCycle = 0;
       this.wsLastError = "";
-      this.wsUrl = DEFAULT_DG_WS;
-      this.event(`DG 設定讀取失敗，使用最後備援：${error?.message || "unknown"}`);
+      this.wsUrl = this.wsCandidates[0] || HAR_VERIFIED_DG_WS;
+      this.event(`DG 設定讀取失敗，改試已驗證備援線：${error?.message || "unknown"}`);
     }
     this.open();
   }
@@ -505,7 +565,6 @@ export class DgRelay {
     const sign = encrypt3Des(this.token);
     const url = `${this.wsUrl.replace(/\/$/, "")}/?sign=${encodeURIComponent(sign)}`;
     this.ws = new RawWsClient(url, this.origin, data => this.handle(data), () => {
-      this.wsFailuresThisCycle = 0;
       this.wsLastError = "";
       this.event("DG WebSocket 已建立，正在驗證");
       this.send(10086, { tableId: 1, type: 0, object: "PC" });
@@ -554,7 +613,29 @@ export class DgRelay {
     let bean: PublicBean; try { bean = parsePublicBean(data); } catch { return; }
     const cmd = n(bean.cmd);
     if (cmd === 10086) {
-      if (n(bean.codeId) !== 0) { this.setStatus("error", `DG 驗證失敗 (${bean.codeId})`); return; }
+      if (n(bean.codeId) !== 0) {
+        const reason = `DG 驗證失敗 (${bean.codeId})`;
+        this.wsFailuresThisCycle += 1;
+        if (this.wsCandidates.length > 1 && this.wsFailuresThisCycle < this.wsCandidates.length) {
+          try { this.ws?.close(); } catch {}
+          this.wsCandidateIndex = (this.wsCandidateIndex + 1) % this.wsCandidates.length;
+          this.wsUrl = this.wsCandidates[this.wsCandidateIndex]!;
+          let host = this.wsUrl; try { host = new URL(this.wsUrl).hostname; } catch {}
+          this.setStatus("connecting", `驗證未通過，切換 ${host}...`);
+          this.event(`${reason}｜改試 ${host}`);
+          if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = setTimeout(() => this.open(), 350);
+          return;
+        }
+        this.setStatus("error", reason);
+        this.event(`${reason}｜已嘗試全部候選線路`);
+        this.wsFailuresThisCycle = 0;
+        this.wsCandidateIndex = 0;
+        this.wsUrl = this.wsCandidates[0] || HAR_VERIFIED_DG_WS;
+        return;
+      }
+      this.wsFailuresThisCycle = 0;
+      this.wsLastError = "";
       this.setStatus("connected", "已連線"); this.event("DG 驗證完成，正在同步真人桌");
       this.send(45, { type: 1 }); this.send(2, { lobbyId: 5, type: 0 }); this.send(5011, { type: 0 });
       setTimeout(() => { if (!this.stopped) this.send(87, { type: 1 }); }, 80);
