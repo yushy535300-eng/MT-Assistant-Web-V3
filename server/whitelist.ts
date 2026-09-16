@@ -33,7 +33,9 @@ export async function ensureWhitelistTables() {
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`);
   await db.query(`ALTER TABLE tz_whitelist ADD COLUMN IF NOT EXISTS platform VARCHAR(16) NOT NULL DEFAULT 'TZ'`);
+  // 舊版本曾用「帳號本身」作唯一鍵；雙平台後必須改成「平台 + 帳號」。
   await db.query(`DROP INDEX IF EXISTS tz_whitelist_username_ci`);
+  await db.query(`DROP INDEX IF EXISTS tz_whitelist_username_lower_idx`);
   await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS tz_whitelist_platform_username_ci ON tz_whitelist (UPPER(platform), LOWER(username))`);
   await db.query(`CREATE TABLE IF NOT EXISTS mt_app_meta (
     meta_key VARCHAR(128) PRIMARY KEY,
@@ -103,8 +105,38 @@ export async function upsertWhitelist(input:{username:string; platform?:string; 
   const platform=String(input.platform||"TZ").trim().toUpperCase();
   if(!["TZ","OFA"].includes(platform)) throw new Error("不支援的平台");
   const expiresAt=input.permanent ? null : new Date(Date.now()+Math.max(1,Number(input.days)||30)*86400000);
-  await db.query(`INSERT INTO tz_whitelist (username,platform,enabled,expires_at,max_devices,note,updated_at) VALUES ($1,$2,TRUE,$3,1,$4,NOW())
-    ON CONFLICT (UPPER(platform),LOWER(username)) DO UPDATE SET enabled=TRUE,expires_at=EXCLUDED.expires_at,note=EXCLUDED.note,updated_at=NOW()`, [username,platform,expiresAt,(input.note||"").slice(0,255)]);
+  const note=(input.note||"").slice(0,255);
+
+  // PostgreSQL 的 expression unique index（UPPER/LOWER）不能用先前那種
+  // ON CONFLICT (UPPER(...), LOWER(...)) 寫法可靠地做 conflict inference。
+  // 先用相同的大小寫不敏感條件查找，再 UPDATE / INSERT，避免新增授權時報：
+  // “there is no unique or exclusion constraint matching the ON CONFLICT specification”。
+  const existing=await db.query(
+    `SELECT id FROM tz_whitelist WHERE UPPER(platform)=UPPER($1) AND LOWER(username)=LOWER($2) LIMIT 1`,
+    [platform,username]
+  );
+  if(existing.rowCount){
+    await db.query(
+      `UPDATE tz_whitelist SET username=$1,platform=$2,enabled=TRUE,expires_at=$3,note=$4,updated_at=NOW() WHERE id=$5`,
+      [username,platform,expiresAt,note,existing.rows[0].id]
+    );
+    return;
+  }
+
+  try {
+    await db.query(
+      `INSERT INTO tz_whitelist (username,platform,enabled,expires_at,max_devices,note,updated_at) VALUES ($1,$2,TRUE,$3,1,$4,NOW())`,
+      [username,platform,expiresAt,note]
+    );
+  } catch (e:any) {
+    // 若剛好有兩個新增請求同時進來，unique index 仍會保護資料；
+    // 23505 時直接改為更新同一筆授權。
+    if(e?.code!=="23505") throw e;
+    await db.query(
+      `UPDATE tz_whitelist SET username=$1,enabled=TRUE,expires_at=$2,note=$3,updated_at=NOW() WHERE UPPER(platform)=UPPER($4) AND LOWER(username)=LOWER($1)`,
+      [username,expiresAt,note,platform]
+    );
+  }
 }
 export async function setWhitelistEnabled(id:number, enabled:boolean) { const db=getPool(); if(!db) throw new Error("DATABASE_URL 尚未設定"); await ensureWhitelistTables(); await db.query(`UPDATE tz_whitelist SET enabled=$1,updated_at=NOW() WHERE id=$2`,[enabled,id]); }
 export async function extendWhitelist(id:number, days:number) { const db=getPool(); if(!db) throw new Error("DATABASE_URL 尚未設定"); await ensureWhitelistTables(); await db.query(`UPDATE tz_whitelist SET expires_at=(CASE WHEN expires_at IS NULL OR expires_at < NOW() THEN NOW() ELSE expires_at END)+($1::text || ' days')::interval,enabled=TRUE,updated_at=NOW() WHERE id=$2`,[Math.max(1,days),id]); }
