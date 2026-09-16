@@ -92,7 +92,10 @@ function baccaratResultFromRoad(raw: string): DgRoadResult | null {
 }
 
 function parseRoads(roads: any[]): DgRoadResult[] {
-  return (Array.isArray(roads) ? roads : []).map(baccaratResultFromRoad).filter((x): x is DgRoadResult => !!x);
+  // DG sends its road list newest -> oldest. All road builders in this app
+  // consume chronological results (oldest -> newest), therefore normalize
+  // the source sequence here before bead / Big Road / derived-road rebuilds.
+  return [...(Array.isArray(roads) ? roads : [])].reverse().map(baccaratResultFromRoad).filter((x): x is DgRoadResult => !!x);
 }
 
 function countResults(results: DgRoadResult[]) {

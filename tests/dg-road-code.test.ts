@@ -14,3 +14,20 @@ describe("DG baccarat road winner codes", () => {
     for (const code of [9, 10, 11, 12]) expect(mapDgRoadCode(code)).toBe("和");
   });
 });
+
+
+function parseCapturedDgRoads(roads: string[]): Array<"莊" | "閒" | "和"> {
+  return [...roads].reverse().map((raw) => {
+    const code = Number(raw.split("#")[1] ?? raw.split("#")[0]);
+    return mapDgRoadCode(code);
+  }).filter((x): x is "莊" | "閒" | "和" => x !== null);
+}
+
+describe("DG road transport order", () => {
+  it("normalizes the captured newest-first DG list into chronological oldest-first play order", () => {
+    // Captured DG list: newest -> oldest = 9,1,5,5,3,1,5.
+    // DG screen chronology must therefore be: 閒,莊,莊,閒,閒,莊,和.
+    expect(parseCapturedDgRoads(["#9", "#1", "#5", "#5", "#3", "#1", "#5"]))
+      .toEqual(["閒", "莊", "莊", "閒", "閒", "莊", "和"]);
+  });
+});

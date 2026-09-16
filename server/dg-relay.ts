@@ -383,7 +383,12 @@ function roadResult(raw: string): DgRoadResult | null {
   if (code >= 9 && code <= 12) return "和";
   return null;
 }
-function parseRoads(roads: string[] | undefined) { return (roads || []).map(roadResult).filter((x): x is DgRoadResult => !!x); }
+function parseRoads(roads: string[] | undefined) {
+  // DG PublicBean.Table.roads / cmd=1004 list is newest -> oldest.
+  // The MT road engine expects chronological order (oldest -> newest), so
+  // reverse the raw DG array BEFORE mapping winners. Do not mirror the UI.
+  return [...(roads || [])].reverse().map(roadResult).filter((x): x is DgRoadResult => !!x);
+}
 function countResults(results: DgRoadResult[]) { let banker = 0, player = 0, tie = 0; for (const r of results) r === "莊" ? banker++ : r === "閒" ? player++ : tie++; return { banker, player, tie }; }
 function tableSort(a: DgTableSnapshot, b: DgTableSnapshot) { const an = Number(a.apiId.replace(/\D/g, "")), bn = Number(b.apiId.replace(/\D/g, "")); return an - bn || a.apiId.localeCompare(b.apiId); }
 
