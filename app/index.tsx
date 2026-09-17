@@ -35,7 +35,6 @@ import {
   buildRoadWindow,
   buildAskRoad,
 } from "@/lib/road-render";
-import { connectDgLive, type DgTableData } from "@/lib/dg-live";
 
 type Result = RoadResult;
 type TableData = {
@@ -43,7 +42,7 @@ type TableData = {
   countdown?: number; countdownUpdatedAt?: number; roomId?: string; tableBadge?: string;
   shoe: string; round: number; banker: number; player: number; tie: number;
   results: Result[]; trend: string; live?: boolean; dealerPhoto?: string; streamUrl?: string;
-  lastUpdated?: number; lastResultKey?: string; poker?: string;
+  lastUpdated?: number; lastResultKey?: string;
 };
 
 type StrategyName = "平注" | "馬丁" | "達朗貝爾" | "Fibonacci" | "Paroli" | "1-3-2-6" | "Labouchere" | "Oscar's Grind";
@@ -97,14 +96,6 @@ const initialTables: TableData[] = baccaratTableIds.map((apiId) => ({
   id: apiId.replace(/^BAG0?/, ""), apiId, game: "百家樂", name: "—", players: "—",
   roomId: "—", tableBadge: "—", shoe: "—", round: 0, banker: 0, player: 0, tie: 0,
   results: [], trend: "",
-}));
-const dgPlaceholderDefs = [
-  ["BAC001","RB01","60101"],["BAC002","RB02","60102"],["BAC003","RB03","60103"],["BAC004","RB04","60104"],["BAC005","RB05","60105"],
-  ["TID348","S01","50101"],["TID349","S02","50102"],["TID350","S03","50103"],["TID351","S05","50104"],["TID352","S06","50105"],
-  ["TID354","S07","50106"],["TID77842","S09","50107"],["TID77846","S10","50108"],
-] as const;
-const dgPlaceholderTables: TableData[] = dgPlaceholderDefs.map(([apiId,roomId,tableBadge])=>({
-  id:apiId,apiId,game:"百家樂",name:"—",players:"—",roomId,tableBadge,shoe:"—",round:0,banker:0,player:0,tie:0,results:[],trend:"",live:false,
 }));
 const lineContactUrl = "https://line.me/ti/p/k2pkYGXGL3";
 const threadsUrl = "https://www.threads.com/@uss0857?igshid=NTc4MTIwNjQ2YQ==";
@@ -372,8 +363,7 @@ function buildSlidingBeadGrid(results: Result[]): Array<Result | undefined> {
 // 牌路 UI：73.62×87.66 是 294.54×97.88 設計稿中的珠盤基準尺寸。
 // 實際畫面依桌卡等比例放大/縮小；禁止把珠盤固定成 73.62 CSS px 而縮成一條。
 // 空間不足時由外層 UI 撐開，禁止 flex/grid 拉伸珠盤單格。
-function RoadGrid({ table, desktop, platform="MT" }: { table: TableData; desktop: boolean; platform?: "MT"|"DG" }) {
-  const dg=platform==="DG";
+function RoadGrid({ table, desktop }: { table: TableData; desktop: boolean }) {
   const beads = useMemo(() => buildSlidingBeadGrid(table.results), [table.results]);
   const big = useMemo(() => buildRoadWindow(buildBigRoad(table.results), 15), [table.results]);
   const lower = useMemo(() => [
@@ -381,11 +371,11 @@ function RoadGrid({ table, desktop, platform="MT" }: { table: TableData; desktop
     buildRoadWindow(buildDerivedRoad(table.results, 2, true), 10),
     buildRoadWindow(buildDerivedRoad(table.results, 3, false), 10),
   ], [table.results]);
-  return <View style={[s.roadArea, desktop && s.roadAreaDesktop,dg&&s.roadAreaDg]}>
-    <View style={[s.beadPane, desktop && s.beadPaneDesktop,dg&&s.beadPaneDg]}><View style={[s.beadGrid,dg&&s.beadGridDg]}>{Array.from({length:36},(_,i)=><View key={i} style={[s.beadCell,desktop&&s.beadCellDesktop,dg&&s.roadCellDg]}>{beads[i]?<ResultDot result={beads[i]!} desktop={desktop}/>:null}</View>)}</View></View>
+  return <View style={[s.roadArea, desktop && s.roadAreaDesktop]}>
+    <View style={[s.beadPane, desktop && s.beadPaneDesktop]}><View style={s.beadGrid}>{Array.from({length:36},(_,i)=><View key={i} style={[s.beadCell,desktop&&s.beadCellDesktop]}>{beads[i]?<ResultDot result={beads[i]!} desktop={desktop}/>:null}</View>)}</View></View>
     <View style={s.roadStack}>
-      <View style={[s.bigGrid,desktop&&s.bigGridDesktop]}>{Array.from({length:90},(_,i)=>{ const row=Math.floor(i/15),col=i%15,m=big.find(x=>x.row===row&&x.col===col); return <View key={i} style={[s.bigCell,desktop&&s.bigCellDesktop,dg&&s.roadCellDg]}>{m?<View style={[s.bigMark,desktop&&s.bigMarkDesktop,{borderColor:m.result==="莊"?ROAD_SPEC.colors.hollowRed:m.result==="閒"?ROAD_SPEC.colors.hollowBlue:ROAD_SPEC.colors.tie}]}>{m.tieCount?<Text style={[s.tieNumber,desktop&&s.tieNumberDesktop]}>{m.tieCount}</Text>:null}</View>:null}</View> })}</View>
-      <View style={[s.lowerArea,desktop&&s.lowerAreaDesktop,dg&&s.lowerAreaDg]}>{lower.map((road,ri)=><View key={ri} style={[s.lowerPane,dg&&s.lowerPaneDg]}>{Array.from({length:60},(_,i)=>{ const row=Math.floor(i/10),col=i%10,m=road.find(x=>x.row===row&&x.col===col); if(!m)return <View key={i} style={[s.lowerCell,desktop&&s.lowerCellDesktop,dg&&s.roadCellDg]}/>; const color=derivedColor(ri,m.result); return <View key={i} style={[s.lowerCell,desktop&&s.lowerCellDesktop,dg&&s.roadCellDg]}>{ri===0?<View style={[s.lowerHollow,{borderColor:color}]}/>:ri===1?<View style={[s.lowerSolid,{backgroundColor:color}]}/>:<View style={[s.lowerSlash,{backgroundColor:color}]}/>}</View> })}</View>)}</View>
+      <View style={[s.bigGrid,desktop&&s.bigGridDesktop]}>{Array.from({length:90},(_,i)=>{ const row=Math.floor(i/15),col=i%15,m=big.find(x=>x.row===row&&x.col===col); return <View key={i} style={[s.bigCell,desktop&&s.bigCellDesktop]}>{m?<View style={[s.bigMark,desktop&&s.bigMarkDesktop,{borderColor:m.result==="莊"?ROAD_SPEC.colors.hollowRed:m.result==="閒"?ROAD_SPEC.colors.hollowBlue:ROAD_SPEC.colors.tie}]}>{m.tieCount?<Text style={[s.tieNumber,desktop&&s.tieNumberDesktop]}>{m.tieCount}</Text>:null}</View>:null}</View> })}</View>
+      <View style={[s.lowerArea,desktop&&s.lowerAreaDesktop]}>{lower.map((road,ri)=><View key={ri} style={s.lowerPane}>{Array.from({length:60},(_,i)=>{ const row=Math.floor(i/10),col=i%10,m=road.find(x=>x.row===row&&x.col===col); if(!m)return <View key={i} style={[s.lowerCell,desktop&&s.lowerCellDesktop]}/>; const color=derivedColor(ri,m.result); return <View key={i} style={[s.lowerCell,desktop&&s.lowerCellDesktop]}>{ri===0?<View style={[s.lowerHollow,{borderColor:color}]}/>:ri===1?<View style={[s.lowerSolid,{backgroundColor:color}]}/>:<View style={[s.lowerSlash,{backgroundColor:color}]}/>}</View> })}</View>)}</View>
     </View>
   </View>;
 }
@@ -455,8 +445,7 @@ function DealerLiveVideo({table,enabled,connected}:{table:TableData;enabled:bool
   </View>;
 }
 
-function TableCard({table,desktop,onAction,connected,platform="MT"}:{table:TableData;desktop:boolean;onAction:(kind:string,table:TableData)=>void;connected:boolean;platform?:"MT"|"DG"}){
-  const dg=platform==="DG";
+function TableCard({table,desktop,onAction,connected}:{table:TableData;desktop:boolean;onAction:(kind:string,table:TableData)=>void;connected:boolean}){
   const tableId=table.apiId??`BAG${table.id}`;
   const [videoEnabled,setVideoEnabled]=useState(()=>{
     if(Platform.OS!=="web"||typeof window==="undefined")return false;
@@ -467,22 +456,22 @@ function TableCard({table,desktop,onAction,connected,platform="MT"}:{table:Table
     if(Platform.OS==="web"&&typeof window!=="undefined"){try{window.localStorage.setItem(`mt.video.${tableId}`,next?"1":"0")}catch{}}
     return next;
   });
-  return <View style={[s.tableCard,desktop&&s.tableCardDesktop,dg&&s.tableCardDg]}>
-    <View style={[s.tableHead,dg&&s.tableHeadDg]}>
-      <View style={s.row}><Text style={s.game}>百家樂</Text><Text style={[s.tableId,dg&&s.tableIdDg]}>{table.id}</Text><MaterialIcons name="person" size={12} color="#fff"/><Text style={s.headText}>{table.players}</Text><CountdownBadge count={table.countdown} updatedAt={table.countdownUpdatedAt}/></View>
+  return <View style={[s.tableCard,desktop&&s.tableCardDesktop]}>
+    <View style={s.tableHead}>
+      <View style={s.row}><Text style={s.game}>百家樂</Text><Text style={s.tableId}>{table.id}</Text><MaterialIcons name="person" size={12} color="#fff"/><Text style={s.headText}>{table.players}</Text><CountdownBadge count={table.countdown} updatedAt={table.countdownUpdatedAt}/></View>
       <View style={s.row}><Text style={[s.statText,{color:"#F35762"}]}>莊 {table.banker}</Text><Text style={[s.statText,{color:"#4D96F3"}]}>閒 {table.player}</Text><Text style={[s.statText,{color:"#45C98A"}]}>和 {table.tie}</Text>
         <Pressable style={[s.miniBtn,{backgroundColor:"#7043C9"}]} onPress={()=>onAction("分析",table)}><Text style={s.miniBtnText}>分析</Text></Pressable>
         <Pressable style={[s.miniBtn,{backgroundColor:"#208C55"}]} onPress={()=>onAction("關注",table)}><Text style={s.miniBtnText}>關注</Text></Pressable>
-        <Pressable style={[s.miniBtn,{backgroundColor:dg?"#9A7332":"#1681C7"}]} onPress={()=>onAction("平台",table)}><Text style={s.miniBtnText}>{platform}平台</Text></Pressable>
+        <Pressable style={[s.miniBtn,{backgroundColor:"#1681C7"}]} onPress={()=>onAction("MT平台",table)}><Text style={s.miniBtnText}>MT平台</Text></Pressable>
       </View>
     </View>
-    <View style={[s.tableBody,desktop?s.tableBodyDesktop:s.tableBodyMobile,dg&&s.tableBodyDg]}>
-      <View style={[s.dealer,desktop?s.dealerDesktop:s.dealerMobile,dg&&s.dealerDg]}>
+    <View style={[s.tableBody,desktop?s.tableBodyDesktop:s.tableBodyMobile]}>
+      <View style={[s.dealer,desktop?s.dealerDesktop:s.dealerMobile]}>
         <View style={[s.photo,desktop?s.photoDesktop:s.photoMobile]}><DealerLiveVideo table={table} enabled={videoEnabled} connected={connected}/></View>
-        <Text style={[s.dealerName,dg&&s.dealerNameDg]}>{table.name||"—"}</Text><Text style={s.meta}>房間 {table.roomId||table.id}</Text>
+        <Text style={s.dealerName}>{table.name||"—"}</Text><Text style={s.meta}>房間 {table.roomId||table.id}</Text>
         <View style={s.metaVideoRow}><Text numberOfLines={1} style={[s.meta,s.metaVideoText]}>Shoe {table.shoe} · 第 {table.round} 把</Text><Text style={s.videoLabel}>視訊</Text><Pressable accessibilityRole="switch" accessibilityState={{checked:videoEnabled}} onPress={toggleVideo} hitSlop={5} style={[s.videoSwitch,videoEnabled&&s.videoSwitchOn]}><View style={[s.videoSwitchKnob,videoEnabled&&s.videoSwitchKnobOn]}/></Pressable></View>
       </View>
-      <RoadGrid table={table} desktop={desktop} platform={platform}/>
+      <RoadGrid table={table} desktop={desktop}/>
     </View>
   </View>;
 }
@@ -490,11 +479,11 @@ function TableCard({table,desktop,onAction,connected,platform="MT"}:{table:Table
 // Keep unchanged table cards out of the high-frequency WebSocket render path.
 // The connection still receives every packet; only cards whose TableData reference
 // actually changed are reconciled again.
-function MatrixMark({size=28,brand="MT"}:{size?:number;brand?:"MT"|"DG"}){
+function MatrixMark({size=28}:{size?:number}){
   return <View style={[s.matrixMark,{width:size,height:size,borderRadius:Math.max(7,size*.23)}]}>
     <View style={s.matrixMarkInner}>
-      <Text style={[s.matrixMarkText,brand==="DG"&&s.matrixMarkTextDg,{fontSize:Math.max(10,size*.34)}]}>{brand}</Text>
-      <View style={[s.matrixMarkAccent,brand==="DG"&&s.matrixMarkAccentDg]}/>
+      <Text style={[s.matrixMarkText,{fontSize:Math.max(10,size*.34)}]}>MT</Text>
+      <View style={s.matrixMarkAccent}/>
     </View>
   </View>
 }
@@ -509,7 +498,6 @@ const FloatingOrb = memo(function FloatingOrb({
   iconSize,
   connected,
   insideMt = false,
-  platform = "MT",
 }: {
   position: Animated.ValueXY;
   responder: ReturnType<typeof PanResponder.create>;
@@ -517,7 +505,6 @@ const FloatingOrb = memo(function FloatingOrb({
   iconSize: number;
   connected: boolean;
   insideMt?: boolean;
-  platform?: "MT"|"DG";
 }) {
   return (
     <Animated.View
@@ -529,7 +516,7 @@ const FloatingOrb = memo(function FloatingOrb({
       ]}
       {...responder.panHandlers}
     >
-      <MatrixMark size={Math.max(30,iconSize*1.35)} brand={platform}/>
+      <MatrixMark size={Math.max(30,iconSize*1.35)} />
       <View
         pointerEvents="none"
         style={[
@@ -548,137 +535,70 @@ const FloatingOrb = memo(function FloatingOrb({
   );
 });
 
-async function loginToPlatformFromBrowser(platform:"TZ"|"OFA",username:string,password:string,deviceId:string){
+async function loginToTzFromBrowser(username:string,password:string,deviceId:string){
   const controller=new AbortController();
   const timeout=setTimeout(()=>controller.abort(),15000);
-  const base=platform==="OFA"?"https://www.ofa1188.net":"https://www.tz6868.cc";
   try{
-    const response=await fetch(`${base}/api/v1/login`,{
-      method:"POST",mode:"cors",
-      headers:{"Content-Type":"application/json","Accept":"application/json, text/plain, */*"},
-      body:JSON.stringify({username,password,device_id:deviceId}),signal:controller.signal,
+    const response=await fetch("https://www.tz6868.cc/api/v1/login",{
+      method:"POST",
+      mode:"cors",
+      headers:{
+        "Content-Type":"application/json",
+        "Accept":"application/json, text/plain, */*",
+      },
+      body:JSON.stringify({username,password,device_id:deviceId}),
+      signal:controller.signal,
     });
-    const text=await response.text(); let data:any=null; try{data=text?JSON.parse(text):null}catch{}
+    const text=await response.text();
+    let data:any=null;
+    try{data=text?JSON.parse(text):null}catch{}
     const token=data?.data?.token??data?.token??data?.data?.access_token??data?.access_token;
     if(!response.ok||!token){
       const msg=String(data?.message??data?.msg??data?.error??"").trim();
-      if(response.status===401||response.status===422||/帳號|密碼|password|account|login/i.test(msg)) throw new Error(msg||"TZ 帳號或密碼不正確");
-      throw new Error(msg||`登入驗證失敗 (${response.status||"NETWORK"})`);
+      if(response.status===401||response.status===422||/帳號|密碼|password|account|login/i.test(msg)){
+        throw new Error(msg||"TZ 帳號或密碼不正確");
+      }
+      throw new Error(msg||`TZ 驗證失敗 (${response.status||"NETWORK"})`);
     }
     return String(token);
   }catch(error:any){
-    if(error?.name==="AbortError")throw new Error("登入驗證逾時，請稍後再試");
-    if(error instanceof TypeError)throw new Error("瀏覽器無法連到登入驗證服務，請確認網路後再試");
+    if(error?.name==="AbortError")throw new Error("TZ 驗證逾時，請稍後再試");
+    if(error instanceof TypeError)throw new Error("瀏覽器無法連到 TZ 驗證服務，請確認網路後再試");
     throw error;
-  }finally{clearTimeout(timeout)}
+  }finally{
+    clearTimeout(timeout);
+  }
 }
 
-async function getGameLoginUrlFromPlatform(platform:"TZ"|"OFA",token:string,provider:"MTLI"|"DGLI"){
-  if(Platform.OS!=="web") throw new Error("自動取得平台 Token 目前僅支援網站版");
-  const controller=new AbortController(); const timeout=setTimeout(()=>controller.abort(),15000);
-  const base=platform==="OFA"?"https://www.ofa1188.net":"https://www.tz6868.cc";
-  const request=async(withAuth:boolean)=>{
-    const headers:any={"Content-Type":"application/json","Accept":"application/json, text/plain, */*"};
-    if(withAuth&&token)headers.Authorization=`Bearer ${token}`;
-    return fetch(`${base}/api/v2/game/${provider}/login`,{method:"POST",mode:"cors",headers,
-      body:JSON.stringify({game_return_url:base,game_kind:"",game_type:"",game_device:"Desktop"}),signal:controller.signal});
-  };
-  try{
-    let response=await request(false);
-    let data:any=null; try{data=await response.json()}catch{}
-    const firstCode=Number(data?.code);
-    if(token && (response.status===401||response.status===403||firstCode===401||firstCode===403)){
-      response=await request(true); data=null; try{data=await response.json()}catch{}
-    }
-    if(!response.ok||Number(data?.code)!==200)throw new Error(String(data?.message??data?.msg??`取得 ${provider==="DGLI"?"DG":"MT"} 授權失敗`));
-
-    // Different TZ/OFA gateways do not always return game_url in exactly the
-    // same field/shape. Prefer a real absolute HTTPS URL that actually carries
-    // the one-time game token. This also avoids forwarding a relative
-    // /ddnewpc/direct1.html URL to the Node relay (which previously surfaced as
-    // DG invalid_game_url).
-    const rawCandidates:any[]=[
-      data?.data?.game_url,
-      data?.data?.url,
-      data?.raw?.url,
-      data?.raw?.game_url,
-      typeof data?.raw==="string"?data.raw:undefined,
-    ];
-    const cleaned=rawCandidates
-      .filter(v=>typeof v==="string"&&v.trim())
-      .map(v=>String(v).trim().replace(/\\\//g,"/").replace(/^['"]|['"]$/g,""));
-    let gameUrl="";
-    for(const candidate of cleaned){
-      try{
-        const u=new URL(candidate);
-        if(u.protocol==="https:"&&u.searchParams.get("token")){gameUrl=u.toString();break;}
-      }catch{}
-    }
-    // If one field is relative but another field gives us the vendor origin,
-    // resolve the relative path against that origin.
-    if(!gameUrl){
-      const absolute=cleaned.find(v=>{try{return new URL(v).protocol==="https:"}catch{return false}});
-      const relative=cleaned.find(v=>/[?&]token=/i.test(v));
-      if(absolute&&relative){
-        try{const u=new URL(relative,new URL(absolute).origin);if(u.searchParams.get("token"))gameUrl=u.toString()}catch{}
-      }
-    }
-    if(!gameUrl)throw new Error(`找不到 ${provider==="DGLI"?"DG":"MT"} Token`);
-    return gameUrl;
-  }finally{clearTimeout(timeout)}
-}
-
-async function getMtLoginUrlFromPlatform(platform:"TZ"|"OFA",token:string){
-  return getGameLoginUrlFromPlatform(platform,token,"MTLI");
-}
-async function getDgLoginUrlFromPlatform(platform:"TZ"|"OFA",token:string){
-  return getGameLoginUrlFromPlatform(platform,token,"DGLI");
-}
-
-async function platformWalletRequest(platform:"TZ"|"OFA",token:string,method:"GET"|"POST",body?:any){
-  if(Platform.OS!=="web") throw new Error("轉點目前僅支援網站版");
-  const base=platform==="OFA"?"https://www.ofa1188.net":"https://www.tz6868.cc";
+async function getMtLoginUrlFromTz(tzToken:string){
+  if(Platform.OS!=="web") throw new Error("自動取得 MT Token 目前僅支援網站版");
   const controller=new AbortController();
   const timeout=setTimeout(()=>controller.abort(),15000);
   const request=async(withAuth:boolean)=>{
-    const headers:any={"Accept":"application/json, text/plain, */*"};
-    if(method==="POST")headers["Content-Type"]="application/json";
-    if(withAuth&&token)headers.Authorization=`Bearer ${token}`;
-    return fetch(`${base}/api/v1/user/wallet`,{
-      method,mode:"cors",headers,
-      body:method==="POST"?JSON.stringify(body??{}):undefined,
-      signal:controller.signal,
+    const headers:any={"Content-Type":"application/json","Accept":"application/json, text/plain, */*"};
+    if(withAuth&&tzToken)headers.Authorization=`Bearer ${tzToken}`;
+    return fetch("https://www.tz6868.cc/api/v2/game/MTLI/login",{
+      method:"POST",mode:"cors",headers,
+      body:JSON.stringify({game_return_url:"https://www.tz6868.cc",game_kind:"",game_type:"",game_device:"Desktop"}),
+      signal:controller.signal
     });
   };
   try{
+    // 依 TZ 實際網頁流程：MTLI/login 本身未帶 Authorization；若站方規則變更再以 TZ token 重試。
     let response=await request(false);
-    let text=await response.text(); let data:any=null; try{data=text?JSON.parse(text):null}catch{}
-    const code=Number(data?.code);
-    if(token&&(response.status===401||response.status===403||code===401||code===403)){
-      response=await request(true); text=await response.text(); data=null; try{data=text?JSON.parse(text):null}catch{}
-    }
-    return {response,data};
+    if((response.status===401||response.status===403)&&tzToken)response=await request(true);
+    let data:any=null;
+    try{data=await response.json()}catch{}
+    if(!response.ok)throw new Error(`TZ 取得 MT 授權失敗 (${response.status})`);
+    if(Number(data?.code)!==200)throw new Error(data?.message||"TZ 取得 MT 授權失敗");
+    const gameUrl=String(data?.data?.game_url??data?.raw?.url??"").trim();
+    const mtToken=extractMtUrlToken(gameUrl);
+    if(!gameUrl||!mtToken)throw new Error("TZ 已回傳 MT 資料，但找不到 MT Token");
+    return gameUrl;
   }catch(error:any){
-    if(error?.name==="AbortError")throw new Error("轉點服務逾時，請稍後再試");
+    if(error?.name==="AbortError")throw new Error("取得 MT Token 逾時，仍可進入後手動連線");
     throw error;
   }finally{clearTimeout(timeout)}
-}
-
-async function transferAllToMainWallet(platform:"TZ"|"OFA",token:string){
-  const result=await platformWalletRequest(platform,token,"POST",{s:"all",t:0});
-  const ok=result.response.ok&&Number(result.data?.code)===200;
-  if(ok)return {ok:true,empty:false,message:String(result.data?.message??"轉回成功")};
-
-  // TZ 在沒有可轉回點數時可能只回 422/9999「失敗」。
-  // 再讀一次遊戲錢包；如果所有遊戲錢包都是 0，就顯示成「目前無可轉回點數」。
-  try{
-    const wallet=await platformWalletRequest(platform,token,"GET");
-    const rows=Array.isArray(wallet.data?.data)?wallet.data.data:[];
-    const transferable=rows.filter((x:any)=>String(x?.game_code||"").trim()).reduce((sum:number,x:any)=>sum+(Number(x?.game_balance)||0),0);
-    if(transferable<=0.000001)return {ok:false,empty:true,message:"目前無可轉回點數"};
-  }catch{}
-  const message=String(result.data?.message??result.data?.msg??result.data?.error??`轉回失敗 (${result.response.status})`).replace(/^"|"$/g,"");
-  return {ok:false,empty:false,message:message||"轉回失敗"};
 }
 
 function getTzLoginDeviceId(){
@@ -695,7 +615,7 @@ function getTzLoginDeviceId(){
   return id;
 }
 
-function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:string,platformToken:string,platform:"TZ"|"OFA")=>void;notice?:string}){
+function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:string,mtGameUrl?:string)=>void;notice?:string}){
   const {width}=useWindowDimensions();
   const desktop=width>=1000;
   const [username,setUsername]=useState("");
@@ -703,6 +623,7 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
   const [showPassword,setShowPassword]=useState(false);
   const [error,setError]=useState("");
   const playCount=useRef(0);
+  const pendingMtGameUrlRef=useRef("");
   const webVideoRef=useRef<any>(null);
   const player=useVideoPlayer({ uri: "/poker.mp4" },p=>{if(Platform.OS!=="web"){p.loop=false;p.muted=true;p.play()}});
   useEffect(()=>{if(Platform.OS==="web")return;const sub=player.addListener("playToEnd",()=>{playCount.current+=1;if(playCount.current<2){player.currentTime=0;player.play()}else player.pause()});return()=>sub.remove()},[player]);
@@ -727,31 +648,25 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
     return()=>{clearTimeout(t1);clearTimeout(t2)};
   },[]);
   const login=trpc.trackerAccess.login.useMutation();
-  const resolvePlatform=trpc.trackerAccess.resolvePlatform.useMutation();
   const submit=async()=>{
     if(!username.trim()||!password){setError("請輸入 TZ 帳號與密碼");return}
     setError("");
     try{
       const deviceId=getTzLoginDeviceId();
-      // 登入介面維持原本 TZ 帳號 / TZ 密碼；實際驗證平台由後台白名單決定。
-      const resolved:any=await resolvePlatform.mutateAsync({username:username.trim()});
-      if(!resolved?.found){
-        const messages:any={not_whitelisted:"此 TZ 帳號尚未取得使用權限，請聯繫 LINE 協助",disabled:"此 TZ 帳號授權已停用",expired:"此 TZ 帳號授權已到期",database_unavailable:"授權服務暫時無法使用"};
-        setError(messages[resolved?.reason]||"登入驗證失敗"); return;
-      }
-      const platform=(resolved.platform==="OFA"?"OFA":"TZ") as "TZ"|"OFA";
-      const platformToken=await loginToPlatformFromBrowser(platform,username.trim(),password,deviceId);
-      const access=await login.mutateAsync({username:username.trim(),tzToken:platformToken,deviceId,platform});
+      const tzToken=await loginToTzFromBrowser(username.trim(),password,deviceId);
+      // 先由自己的後端確認 TZ 白名單；未授權者不會進入 MT Assistant。
+      const access=await login.mutateAsync({username:username.trim(),tzToken,deviceId});
       if(!access.success){
         const reason=(access as any).reason;
         const messages:any={not_whitelisted:"此 TZ 帳號尚未取得使用權限，請聯繫 LINE 協助",disabled:"此 TZ 帳號授權已停用",expired:"此 TZ 帳號授權已到期",database_unavailable:"授權服務暫時無法使用"};
         setError(messages[reason]||"TZ 登入驗證失敗");
         return;
       }
-      // 登入 MT Assistant 只建立 TZ/OFA 授權工作階段。
-      // 不在登入時呼叫 MTLI/login 或 DGLI/login，避免平台的自動轉點被提前觸發。
+      // 白名單通過後才取得 MT 真人入口；取得失敗仍保留原手動連線備用。
+      pendingMtGameUrlRef.current="";
+      try{pendingMtGameUrlRef.current=await getMtLoginUrlFromTz(tzToken)}catch{}
       setError("");
-      onAuthenticated(access.sessionId,platformToken,platform);
+      onAuthenticated(access.sessionId,pendingMtGameUrlRef.current);
     }catch(error:any){
       setError(error?.message||"登入工作階段建立失敗，請重試");
     }
@@ -818,27 +733,6 @@ function eventName(payload:any){
 }
 function eventTables(payload:any):any[]|null{const c=[payload?.msg?.tables?.tables,payload?.msg?.tables,payload?.data?.tables?.tables,payload?.data?.tables,payload?.tables?.tables,payload?.tables];return c.find(Array.isArray)??null}
 function extractMtUrlToken(value:string){try{return new URL(value.trim()).searchParams.get("token")?.trim()??""}catch{return value.trim().replace(/^token=/i,"")}}
-function readonlyConnectionUrl(value:string){
-  if(!value)return "自動取得中";
-  try{
-    const u=new URL(value);
-    const queryKeys=[...u.searchParams.keys()];
-    const maskedQuery=queryKeys.length?`?${queryKeys.map(k=>`${encodeURIComponent(k)}=********`).join("&")}`:"";
-    const maskedPath=u.pathname&&u.pathname!=="/"?"/********":"/";
-    return `${u.protocol}//********${maskedPath}${maskedQuery}`;
-  }catch{return "********"}
-}
-async function stopDgRelayServer(sessionId:string){
-  if(!sessionId)return;
-  try{
-    await fetch("/api/dg/stop",{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({sessionId}),
-      keepalive:true,
-    });
-  }catch{}
-}
 function resultKeyFromPayload(payload:any){const b=payload?.body??payload?.msg??payload?.data??{};return `${String(b?.shoe??"")}|${String(b?.round??"")}`}
 
 function extractTableStreamUrl(source:any):string {
@@ -1026,23 +920,6 @@ function parseV38ShowPoker(payload:any):V38PokerState|null{
     playerPoint:calculatedPlayer,bankerPoint:calculatedBanker,complete:pointsAgree,settled:false,updatedAt:Date.now(),formulas,recommendation};
 }
 
-function parseDgV38Poker(table:DgTableData):V38PokerState|null{
-  if(!table?.poker)return null;
-  try{
-    const poker=JSON.parse(table.poker);
-    const playerIds=String(poker?.player??"").split("-").map(Number).filter(n=>Number.isFinite(n)&&n>0).slice(0,3);
-    const bankerIds=String(poker?.banker??"").split("-").map(Number).filter(n=>Number.isFinite(n)&&n>0).slice(0,3);
-    if(!playerIds.length&&!bankerIds.length)return null;
-    const player=playerIds.map(mtCardRank).filter((x):x is string=>!!x);
-    const banker=bankerIds.map(mtCardRank).filter((x):x is string=>!!x);
-    const playerPoint=baccaratPoint(player),bankerPoint=baccaratPoint(banker);
-    const result=[playerIds[0]??0,bankerIds[0]??0,playerIds[1]??0,bankerIds[1]??0,playerIds[2]??0,bankerIds[2]??0,0,0,playerPoint,bankerPoint];
-    const complete=player.length>=2&&banker.length>=2;
-    const {formulas,recommendation}=v38RawFormulas(banker,player);
-    return {tableId:table.apiId,shoe:table.shoe,round:table.round,result,player,banker,playerPoint,bankerPoint,complete,settled:false,updatedAt:Date.now(),formulas,recommendation};
-  }catch{return null}
-}
-
 export default function HomeScreen(){
   const {width,height}=useWindowDimensions();
   const desktop=width>=1000;
@@ -1069,8 +946,6 @@ export default function HomeScreen(){
   useEffect(()=>{
     if(!accessGranted||!accessSessionId)return;
     if(accessSessionCheck.data && !accessSessionCheck.data.valid){
-      const staleSessionId=accessSessionId;
-      void stopDgRelayServer(staleSessionId);
       setAccessGranted(false);
       setAccessSessionId("");
       const reason=(accessSessionCheck.data as any)?.reason;
@@ -1086,40 +961,14 @@ export default function HomeScreen(){
       socketRef.current=null;
       setSocket(null);
       setConnected(false);
-      try{dgControllerRef.current?.close()}catch{}
-      dgControllerRef.current=null;
-      setDgConnected(false);
-      setDgStatus("未連線");
-      setDgGameUrl("");
-      setDgTables([]);
-      platformTokenRef.current="";
-      setActivePlatform("MT");
       setToken("");
       setMtUrl("");
       lockedMtUrlRef.current="";
-      setHasEnteredGame(false);
-      setDgWasOpened(false);
-      setGameViewUrl("");
-      setPlatformLaunching(false);
-      setWalletTransferOpen(false);
-      setWalletTransferBusy(false);
-      setDgNeedsRecovery(false);
-      dgHasConnectedRef.current=false;
-      dgForegroundRecoveryAttemptRef.current=0;
-      dgBridgeActiveRef.current=false;
-      suppressDgRecoveryRef.current=false;
-      roadConnectBusyRef.current=false;
+      pendingAutoMtUrlRef.current="";
+      autoMtConnectDoneRef.current=false;
       setFloatingOpen(false);
       setMtOpen(false);
       setInsideMt(false);
-      currentBalanceRef.current=null;
-      setCurrentBalance(null);
-      setStopLossOpen(false);
-      setStopLossAlertOpen(false);
-      setStopLossEnabled(false);
-      setStopLossTriggered(false);
-      setStopLossPrincipal("");
-      setStopLossPercent(20);
     }
   },[accessGranted,accessSessionId,accessSessionCheck.data?.valid,(accessSessionCheck.data as any)?.reason]);
 
@@ -1129,13 +978,6 @@ export default function HomeScreen(){
   const [radarOpen,setRadarOpen]=useState(false);
   const [radarDetailId,setRadarDetailId]=useState<string|null>(null);
   const [mtOpen,setMtOpen]=useState(false);
-  const [gameViewPlatform,setGameViewPlatform]=useState<"MT"|"DG">("MT");
-  const [gameViewUrl,setGameViewUrl]=useState("");
-  const [platformLaunching,setPlatformLaunching]=useState(false);
-  const [hasEnteredGame,setHasEnteredGame]=useState(false);
-  const [dgWasOpened,setDgWasOpened]=useState(false);
-  const [walletTransferOpen,setWalletTransferOpen]=useState(false);
-  const [walletTransferBusy,setWalletTransferBusy]=useState(false);
   const [floatingOpen,setFloatingOpen]=useState(false);
   const [roomDropdownOpen,setRoomDropdownOpen]=useState(false);
   const roomDropdownOpenRef=useRef(false);
@@ -1144,23 +986,10 @@ export default function HomeScreen(){
   const [assistPage,setAssistPage]=useState(0);
   const [assistTableId,setAssistTableId]=useState("BAG01");
   const [connected,setConnected]=useState(false);
-  const [activePlatform,setActivePlatform]=useState<"MT"|"DG">("MT");
-  const [dgConnected,setDgConnected]=useState(false);
-  const [dgStatus,setDgStatus]=useState("未連線");
-  const [dgGameUrl,setDgGameUrl]=useState("");
-  const [dgNeedsRecovery,setDgNeedsRecovery]=useState(false);
-  const dgBridgeActiveRef=useRef(false);
-  const [dgConnectEpoch,setDgConnectEpoch]=useState(0);
-  const dgHasConnectedRef=useRef(false);
-  const dgForegroundRecoveryAttemptRef=useRef(0);
-  const [dgTables,setDgTables]=useState<TableData[]>([]);
-  const dgControllerRef=useRef<{close:()=>void}|null>(null);
-  const platformTokenRef=useRef("");
-  const roadConnectBusyRef=useRef(false);
-  const suppressDgRecoveryRef=useRef(false);
-  const [loginPlatform,setLoginPlatform]=useState<"TZ"|"OFA">("TZ");
   const [token,setToken]=useState("");
   const [mtUrl,setMtUrl]=useState("");
+  const pendingAutoMtUrlRef=useRef("");
+  const autoMtConnectDoneRef=useRef(false);
   // Authoritative MT launch URL for this TZ login session. UI fields are display-only.
   const lockedMtUrlRef=useRef("");
   const [wsUrl]=useState("wss://a1.ofalive99.net/game/ws");
@@ -1174,7 +1003,7 @@ export default function HomeScreen(){
   const reconnectTimerRef=useRef<ReturnType<typeof setTimeout>|null>(null);
   const roomDropdownScrollRef=useRef<ScrollView|null>(null);
   const roomDropdownOffsetRef=useRef(0);
-  const [mtTables,setMtTables]=useState<TableData[]>(initialTables);
+  const [tables,setTables]=useState<TableData[]>(initialTables);
   // WebSocket packets are processed immediately into this ref. React painting is
   // committed at most once per animation frame, so the socket frequency is NOT
   // reduced while drag gestures no longer fight dozens of synchronous renders.
@@ -1188,13 +1017,10 @@ export default function HomeScreen(){
     if(tablesFrameRef.current==null){
       tablesFrameRef.current=requestAnimationFrame(()=>{
         tablesFrameRef.current=null;
-        setMtTables(liveTablesRef.current);
+        setTables(liveTablesRef.current);
       });
     }
   };
-  const tables:TableData[]=activePlatform==="DG"?(dgTables.length?dgTables:dgPlaceholderTables):mtTables;
-  const availableTableCount=activePlatform==="DG"?dgTables.length:mtTables.length;
-  const activeConnected=activePlatform==="DG"?dgConnected:connected;
   const [events,setEvents]=useState<string[]>([]);
   const [toast,setToast]=useState("");
   const [bankroll,setBankroll]=useState(100000);
@@ -1208,16 +1034,6 @@ export default function HomeScreen(){
   useEffect(()=>{baseBetRef.current=baseBet},[baseBet]);
   const [todayPnl,setTodayPnl]=useState<number|null>(null);
   const todayPnlRef=useRef<number|null>(null);
-  // Independent stop-loss reminder. It reads the official MT balance from the existing
-  // authenticated game WebSocket and never changes the locked 今日輸贏 logic.
-  const [currentBalance,setCurrentBalance]=useState<number|null>(null);
-  const currentBalanceRef=useRef<number|null>(null);
-  const [stopLossOpen,setStopLossOpen]=useState(false);
-  const [stopLossPrincipal,setStopLossPrincipal]=useState("");
-  const [stopLossPercent,setStopLossPercent]=useState(20);
-  const [stopLossEnabled,setStopLossEnabled]=useState(false);
-  const [stopLossTriggered,setStopLossTriggered]=useState(false);
-  const [stopLossAlertOpen,setStopLossAlertOpen]=useState(false);
   const [labSequence,setLabSequence]=useState<number[]>([1,2,3,4]);
   const [pendingBet,setPendingBet]=useState<PendingBet>(null);
   const [records,setRecords]=useState<BetRecord[]>([]);
@@ -1255,43 +1071,6 @@ export default function HomeScreen(){
   const radarDraggingRef=useRef(false);
   const appendEvent=(x:string)=>setEvents(e=>[`[${new Date().toLocaleTimeString()}] ${x}`,...e].slice(0,40));
   const notify=(x:string)=>{setToast(x);setTimeout(()=>setToast(""),1800)};
-  const stopLossPrincipalValue=useMemo(()=>{
-    const value=Number(String(stopLossPrincipal||"").replace(/,/g,"").trim());
-    return Number.isFinite(value)&&value>0?value:0;
-  },[stopLossPrincipal]);
-  const stopLossThreshold=useMemo(()=>stopLossPrincipalValue>0?stopLossPrincipalValue*(1-stopLossPercent/100):0,[stopLossPrincipalValue,stopLossPercent]);
-  useEffect(()=>{
-    if(!stopLossEnabled||stopLossTriggered||currentBalance===null||stopLossThreshold<=0)return;
-    if(currentBalance<=stopLossThreshold){
-      setStopLossTriggered(true);
-      setStopLossAlertOpen(true);
-    }
-  },[currentBalance,stopLossEnabled,stopLossThreshold,stopLossTriggered]);
-  const openStopLossSettings=()=>{
-    if(!stopLossPrincipalValue&&currentBalance!==null&&Number.isFinite(currentBalance))setStopLossPrincipal(String(currentBalance));
-    setStopLossOpen(true);
-  };
-  const useCurrentBalanceAsPrincipal=()=>{
-    if(currentBalance===null||!Number.isFinite(currentBalance)){notify("尚未取得 MT 目前餘額");return;}
-    setStopLossPrincipal(String(currentBalance));
-  };
-  const enableStopLoss=()=>{
-    if(stopLossPrincipalValue<=0){notify("請先設定本金");return;}
-    setStopLossTriggered(false);
-    setStopLossEnabled(true);
-    setStopLossOpen(false);
-    notify(`止損提醒已開啟｜${stopLossPercent}%`);
-  };
-  const resetStopLossForLogout=()=>{
-    currentBalanceRef.current=null;
-    setCurrentBalance(null);
-    setStopLossOpen(false);
-    setStopLossAlertOpen(false);
-    setStopLossEnabled(false);
-    setStopLossTriggered(false);
-    setStopLossPrincipal("");
-    setStopLossPercent(20);
-  };
   const nextAmount=Math.max(0,Math.round(strategyAmount(strategy,baseBet,strategyLevel,labSequence)));
   // Floating assistant always reads the current live table object.
   // roomMenuTables is only a frozen dropdown snapshot and must never drive dealer display.
@@ -1896,7 +1675,8 @@ export default function HomeScreen(){
       awaitingFreshSnapshotRef.current=false;
       return;
     }
-    // 主頁登入後會自動建立主 WS；若主線仍 OPEN / CONNECTING，直接沿用，禁止重複建立。
+    // 只有使用者主動按「連線」才建立主 WS。
+    // 若主線仍 OPEN / CONNECTING，直接沿用，禁止重複建立。
     const activeSocket=socketRef.current;
     if(activeSocket && (activeSocket.readyState===WebSocket.OPEN || activeSocket.readyState===WebSocket.CONNECTING)){
       appendEvent("主連線仍有效，不重複連線");
@@ -1919,14 +1699,9 @@ export default function HomeScreen(){
     let authenticated=false,subscribed=false;
     const requestTables=(quiet=false)=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/tables",data:{gametype_id:3,game_id:1,room_id:1}}}));if(!quiet)appendEvent("已請求 15 桌歷史牌局")}};
     const requestSvg=()=>authenticated&&ws.readyState===WebSocket.OPEN&&ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));
-    const requestBalance=()=>{
-      if(!authenticated||ws.readyState!==WebSocket.OPEN)return;
-      try{ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/member/me/balance"}}))}catch{}
-    };
     // 投注報表與牌路共用唯一已驗證的遊戲 WebSocket。
     // 同一 token 不再建立第二條 authenticate 連線，避免 MT 被伺服器踢下線。
     let dealerRefreshTimer:ReturnType<typeof setInterval>|null=null;
-    let balanceRefreshTimer:ReturnType<typeof setInterval>|null=null;
     let betReportTimer:ReturnType<typeof setTimeout>|null=null;
     let dataSessionRefreshTimer:ReturnType<typeof setInterval>|null=null;
     let tablesRefreshTimer:ReturnType<typeof setTimeout>|null=null;
@@ -1947,13 +1722,8 @@ export default function HomeScreen(){
     const memberWinSeen=new Set<string>();
 
     const isCurrentSocket=()=>socketGenerationRef.current===generation && socketRef.current===ws;
-    const startBalanceRefresh=()=>{
-      if(balanceRefreshTimer)clearInterval(balanceRefreshTimer);
-      balanceRefreshTimer=setInterval(()=>{if(isCurrentSocket())requestBalance()},5000);
-    };
     const clearSocketTimers=()=>{
       if(dealerRefreshTimer)clearInterval(dealerRefreshTimer); dealerRefreshTimer=null;
-      if(balanceRefreshTimer)clearInterval(balanceRefreshTimer); balanceRefreshTimer=null;
       if(betReportTimer)clearTimeout(betReportTimer); betReportTimer=null;
       if(dataSessionRefreshTimer)clearInterval(dataSessionRefreshTimer); dataSessionRefreshTimer=null;
       if(tablesRefreshTimer)clearTimeout(tablesRefreshTimer); tablesRefreshTimer=null;
@@ -2068,7 +1838,6 @@ export default function HomeScreen(){
       setTimeout(()=>{if(isCurrentSocket()&&authenticated)requestSvg()},25);
       setTimeout(()=>{if(isCurrentSocket()&&authenticated)subscribe()},50);
       setTimeout(()=>{if(isCurrentSocket()&&authenticated&&!betReportInFlight)requestBetReport()},80);
-      setTimeout(()=>{if(isCurrentSocket()&&authenticated)requestBalance()},120);
       setTimeout(()=>{if(isCurrentSocket()&&authenticated&&!betReportInFlight)requestBetReport()},900);
     };
 
@@ -2096,14 +1865,6 @@ export default function HomeScreen(){
           setV38ByTable(v38ByTableRef.current);
         }
       }
-        if(name.includes("/api/v1/member/me/balance")){
-          const points=Number(p?.msg?.user?.points??p?.body?.user?.points??p?.data?.user?.points??p?.msg?.points??p?.body?.points??p?.data?.points);
-          if(Number.isFinite(points)){
-            currentBalanceRef.current=points;
-            setCurrentBalance(points);
-          }
-          return;
-        }
         if(isBetReportPayload(p)){
           betReportInFlight=false;
           const reportOrders=readBetReportOrders(p);
@@ -2163,9 +1924,7 @@ export default function HomeScreen(){
               appendEvent(`MT 即時結算 ${tableId||"—"} 第${round||"—"}局｜補抓官方報表`);
             }
             setTimeout(()=>{if(isCurrentSocket()&&!betReportInFlight)requestBetReport()},80);
-            setTimeout(()=>{if(isCurrentSocket())requestBalance()},120);
             setTimeout(()=>{if(isCurrentSocket()&&!betReportInFlight)requestBetReport()},650);
-            setTimeout(()=>{if(isCurrentSocket())requestBalance()},850);
           }
           return;
         }
@@ -2178,7 +1937,7 @@ export default function HomeScreen(){
             setV38ByTable(v38ByTableRef.current);
           }
           refreshBetReportAfterSettlement(winTableId,p);
-        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();requestBalance();startDealerRefresh();startBalanceRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200);subscribeTimer=setTimeout(()=>{subscribeTimer=null;if(isCurrentSocket())subscribe()},400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
+        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();startDealerRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200);subscribeTimer=setTimeout(()=>{subscribeTimer=null;if(isCurrentSocket())subscribe()},400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
       const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
       updateLiveTables(c=>{
         // The first complete snapshot after every connection/reconnection is the
@@ -2210,213 +1969,20 @@ export default function HomeScreen(){
       setSocket(null);
       setConnected(false);
       appendEvent("WebSocket 已中斷");
-      // 主頁牌路維持自動連線。若是正常掉線，沿用既有 MT token 自動恢復；
-      // stopConnection/logout 會先遞增 generation，因此不會誤觸這裡。
-      if(accessGranted&&lockedMtUrlRef.current){
-        if(reconnectTimerRef.current)clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current=setTimeout(()=>{
-          reconnectTimerRef.current=null;
-          startConnection(undefined,lockedMtUrlRef.current);
-        },1200);
-      }
     };
   };
-
-  const connectRoadDashboard=async(force=false)=>{
-    if(!accessGranted||!accessSessionId||roadConnectBusyRef.current)return;
-    const platformToken=platformTokenRef.current;
-    if(!platformToken)return;
-    roadConnectBusyRef.current=true;
-    suppressDgRecoveryRef.current=false;
-    if(force){
-      if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}
-      socketGenerationRef.current+=1;
-      const old=socketRef.current;socketRef.current=null;
-      try{old?.close()}catch{}
-      setSocket(null);
-      setConnected(false);
-      try{dgControllerRef.current?.close()}catch{}
-      dgControllerRef.current=null;
-      await stopDgRelayServer(accessSessionId);
-      setDgConnected(false);
-      setDgStatus("連線中");
-    }else{
-      if(!connected)setConnected(false);
-      if(!dgConnected)setDgStatus("連線中");
-    }
-    const needMt=force||!lockedMtUrlRef.current||!connected;
-    const needDg=force||!dgGameUrl||!dgConnected;
-    const [mtResult,dgResult]=await Promise.allSettled([
-      needMt?getMtLoginUrlFromPlatform(loginPlatform,platformToken):Promise.resolve(lockedMtUrlRef.current),
-      needDg?getDgLoginUrlFromPlatform(loginPlatform,platformToken):Promise.resolve(dgGameUrl),
-    ]);
-    if(platformTokenRef.current!==platformToken){roadConnectBusyRef.current=false;return;}
-    if(mtResult.status==="fulfilled"&&mtResult.value){
-      const url=mtResult.value;
-      lockedMtUrlRef.current=url;
-      setToken(url);
-      setMtUrl(url);
-      startConnection(undefined,url);
-    }else if(mtResult.status==="rejected"){
-      appendEvent(`MT 自動連線失敗：${String((mtResult.reason as any)?.message||mtResult.reason||"unknown")}`);
-    }
-    if(dgResult.status==="fulfilled"&&dgResult.value){
-      setDgGameUrl(dgResult.value);
-      setDgStatus("連線中");
-    }else if(dgResult.status==="rejected"){
-      setDgConnected(false);
-      setDgStatus("連線中");
-      appendEvent(`DG 自動連線失敗：${String((dgResult.reason as any)?.message||dgResult.reason||"unknown")}`);
-    }
-    roadConnectBusyRef.current=false;
-  };
-
-  // DG-only same-session web proxy. When the real DG game opens we stop only
-  // the competing Render Chromium transport, then load DG through our same-origin
-  // proxy. The foreground game's own WebSocket is tunneled once and mirrored into
-  // the existing DG relay, so the floating assistant keeps receiving the SAME data.
-  const enterDgSameSessionProxy=async(gameUrl:string)=>{
-    if(!accessSessionId||!gameUrl)return "";
-    try{
-      const r=await fetch("/api/dg/proxy/enter",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId:accessSessionId,gameUrl})});
-      let data:any=null;try{data=await r.json()}catch{}
-      if(!r.ok||!data?.ok||!data?.url)throw new Error(String(data?.error||"DG 單工作階段入口啟動失敗"));
-      dgBridgeActiveRef.current=true;
-      setDgConnected(false);
-      setDgStatus("連線中");
-      setDgNeedsRecovery(false);
-      return String(data.url);
-    }catch(error:any){
-      dgBridgeActiveRef.current=false;
-      throw new Error(error?.message||"DG 單工作階段入口啟動失敗");
-    }
-  };
-
-  const leaveDgSameSessionProxy=async()=>{
-    if(!dgBridgeActiveRef.current||!accessSessionId)return;
-    dgBridgeActiveRef.current=false;
-    setDgConnected(false);
-    setDgStatus("連線中");
-    try{await fetch("/api/dg/proxy/leave",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId:accessSessionId})})}catch{}
-  };
-
-  // 一進牌路主頁就自動連 MT / DG，跟舊版一樣。
-  // 這裡只負責牌路資料連線；MT平台 / DG平台按鈕仍然是另外的遊戲入口。
   useEffect(()=>{
-    if(!accessGranted||!accessSessionId)return;
-    void connectRoadDashboard(false);
-  },[accessGranted,accessSessionId,loginPlatform]);
-
-  // DG relay follows the automatically obtained background DG URL.
-  useEffect(()=>{
-    if(!accessGranted)return;
-    if(!dgGameUrl){setDgConnected(false);return;}
-    let cancelled=false;
-    try{dgControllerRef.current?.close()}catch{}
-    dgControllerRef.current=null;
-    setDgConnected(false);
-    setDgStatus("連線中");
-    connectDgLive(dgGameUrl,accessSessionId,{
-      onTables:(next:DgTableData[])=>{if(!cancelled)setDgTables(next as TableData[])},
-      onStatus:(status,message)=>{
-        if(cancelled)return;
-        const online=status==="connected";
-        setDgConnected(online);
-        setDgStatus(online?"已連線":"連線中");
-        if(online){
-          dgHasConnectedRef.current=true;
-          setDgNeedsRecovery(false);
-        }else if(status==="error"||status==="closed"){
-          setDgNeedsRecovery(true);
-          if(message)appendEvent(`DG 背景連線待恢復：${message}`);
-        }
-      },
-      onEvent:(message)=>{if(!cancelled)appendEvent(message)},
-    }).then(controller=>{
-      if(cancelled){controller.close();return;}
-      dgControllerRef.current=controller;
-    }).catch((error:any)=>{
-      if(cancelled)return;
-      setDgConnected(false);
-      setDgStatus("連線中");
-      setDgNeedsRecovery(true);
-      appendEvent(`DG 背景連線待恢復：${error?.message||"unknown"}`);
-    });
-    return()=>{
-      cancelled=true;
-      try{dgControllerRef.current?.close()}catch{}
-      dgControllerRef.current=null;
-    };
-  },[accessGranted,accessSessionId,dgGameUrl,dgConnectEpoch]);
-
-  // 如果 DG 原生遊戲把背景 relay 踢掉：先用「同一個已取得的 DG token」
-  // 重掛一次背景 relay，不再呼叫 DGLI/login 取得第二組 token。這樣可避免
-  // 因為新遊戲登入把原本牌路工作階段直接作廢。若同 token 仍被平台限制，
-  // 遊戲開著時不無限互踢；回牌路後再走正式重新授權。
-  // 回到牌路主頁後再自動重新授權並恢復。
-  useEffect(()=>{
-    if(!accessGranted||walletTransferBusy||!dgNeedsRecovery||suppressDgRecoveryRef.current||dgBridgeActiveRef.current)return;
-    if(!dgGameUrl)return;
-    let cancelled=false;
-
-    // DG 真實遊戲開著時，先只重掛一次「同 token」relay。這個動作不會重新
-    // 呼叫 TZ 的 DGLI/login，因此不會再建立另一組遊戲授權。
-    if(mtOpen&&gameViewPlatform==="DG"){
-      if(dgForegroundRecoveryAttemptRef.current>=1)return;
-      const timer=setTimeout(()=>{
-        if(cancelled)return;
-        dgForegroundRecoveryAttemptRef.current+=1;
-        setDgNeedsRecovery(false);
-        setDgStatus("連線中");
-        setDgConnectEpoch(v=>v+1);
-        appendEvent("DG 遊戲中使用原工作階段恢復牌路連線");
-      },1200);
-      return()=>{cancelled=true;clearTimeout(timer)};
-    }
-
-    // 回到牌路主頁後，若同 token 仍無法恢復，才重新向 TZ 取得新的 DG 授權。
-    const platformToken=platformTokenRef.current;
-    if(!platformToken)return;
-    const timer=setTimeout(()=>{
-      if(cancelled)return;
-      setDgStatus("連線中");
-      getDgLoginUrlFromPlatform(loginPlatform,platformToken).then(url=>{
-        if(cancelled)return;
-        dgForegroundRecoveryAttemptRef.current=0;
-        setDgNeedsRecovery(false);
-        setDgGameUrl(url);
-        appendEvent("DG 已自動重新授權，恢復牌路連線");
-      }).catch((error:any)=>{
-        if(cancelled)return;
-        setDgStatus("連線中");
-        appendEvent(`DG 自動恢復失敗：${error?.message||"unknown"}`);
-      });
-    },700);
-    return()=>{cancelled=true;clearTimeout(timer)};
-  },[accessGranted,mtOpen,gameViewPlatform,walletTransferBusy,dgNeedsRecovery,loginPlatform,dgGameUrl]);
-
-  // Reuse the existing four-formula / parity floating tools with DG's live poker field.
-  // This only updates when the actual dealt cards change, not on every countdown packet.
-  useEffect(()=>{
-    if(activePlatform!=="DG"||!dgTables.length)return;
-    let changed=false;
-    const nextMap={...v38ByTableRef.current};
-    for(const table of dgTables as DgTableData[]){
-      const parsed=parseDgV38Poker(table);
-      if(!parsed)continue;
-      const prev=nextMap[parsed.tableId];
-      const same=prev&&prev.shoe===parsed.shoe&&prev.round===parsed.round&&prev.result.join(",")===parsed.result.join(",");
-      if(same)continue;
-      nextMap[parsed.tableId]={...parsed,settled:prev?.shoe===parsed.shoe&&prev?.round===parsed.round?!!prev.settled:false};
-      changed=true;
-    }
-    if(changed){v38ByTableRef.current=nextMap;setV38ByTable(nextMap)}
-  },[activePlatform,dgTables]);
-
-  useEffect(()=>{
-    const exists=tables.some(t=>(t.apiId??`BAG${t.id}`)===assistTableId);
-    if(!exists&&tables.length)setAssistTableId(tables[0].apiId??tables[0].id);
-  },[activePlatform,tables.length]);
+    if(!accessGranted||autoMtConnectDoneRef.current)return;
+    const autoUrl=pendingAutoMtUrlRef.current;
+    if(!autoUrl)return;
+    autoMtConnectDoneRef.current=true;
+    pendingAutoMtUrlRef.current="";
+    lockedMtUrlRef.current=autoUrl;
+    setToken(autoUrl);
+    setMtUrl(autoUrl);
+    appendEvent("TZ 已自動取得 MT Token，正在連線");
+    startConnection(undefined,autoUrl);
+  },[accessGranted]);
   const stopConnection=()=>{
     if(reconnectTimerRef.current){clearTimeout(reconnectTimerRef.current);reconnectTimerRef.current=null}
     reconnectingRef.current=false;
@@ -2433,7 +1999,6 @@ export default function HomeScreen(){
     // Logout is intentionally synchronous on the client: switch to AccessScreen first.
     // Server session revocation is fire-and-forget so it can never block the screen change.
     const sessionToLogout=accessSessionId;
-    void stopDgRelayServer(sessionToLogout);
     setAccessGranted(false);
     setAccessSessionId("");
     setAccessNotice("");
@@ -2446,14 +2011,6 @@ export default function HomeScreen(){
     try{ws?.close()}catch{}
     setSocket(null);
     setConnected(false);
-    try{dgControllerRef.current?.close()}catch{}
-    dgControllerRef.current=null;
-    setDgConnected(false);
-    setDgStatus("未連線");
-    setDgGameUrl("");
-    setDgTables([]);
-    platformTokenRef.current="";
-    setActivePlatform("MT");
     setConnectionOpen(false);
     setHelpOpen(false);
     setRadarOpen(false);
@@ -2462,108 +2019,17 @@ export default function HomeScreen(){
     setFloatingOpen(false);
     setMtOpen(false);
     setInsideMt(false);
-    resetStopLossForLogout();
     setToken("");
     setMtUrl("");
     lockedMtUrlRef.current="";
-    setHasEnteredGame(false);
-    setDgWasOpened(false);
-    setGameViewUrl("");
-    setPlatformLaunching(false);
-    setWalletTransferOpen(false);
-    setWalletTransferBusy(false);
-    setDgNeedsRecovery(false);
-    dgHasConnectedRef.current=false;
-    dgForegroundRecoveryAttemptRef.current=0;
-    dgBridgeActiveRef.current=false;
-    suppressDgRecoveryRef.current=false;
-    roadConnectBusyRef.current=false;
+    pendingAutoMtUrlRef.current="";
+    autoMtConnectDoneRef.current=false;
     // Revoke the server-side app session without awaiting it. The login screen is already active.
     if(sessionToLogout){void logoutAccess.mutateAsync({sessionId:sessionToLogout}).catch(()=>{});}
   };
-  const syncAssist=()=>{
-    if(activePlatform==="DG"){if(dgConnected)appendEvent("DG 懸浮輔助已同步即時資料");else notify("DG 尚未連線");return;}
-    const ws=socketRef.current;if(ws?.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));appendEvent("懸浮輔助已要求同步")}else notify("尚未連線")
-  };
-  const openCurrentPlatform=async(table?:TableData)=>{
-    if(table)setAssistTableId(table.apiId??table.id);
-    if(platformLaunching)return;
-    const platformToken=platformTokenRef.current;
-    if(!platformToken){notify("登入授權已失效，請重新登入");return;}
-    setPlatformLaunching(true);
-    try{
-      if(activePlatform==="MT"){
-        const url=await getMtLoginUrlFromPlatform(loginPlatform,platformToken);
-        // A fresh MTLI login can issue a new MT token. Replace the old main-data
-        // socket instead of authenticating twice with two tokens.
-        socketGenerationRef.current+=1;
-        const old=socketRef.current; socketRef.current=null;
-        try{old?.close()}catch{}
-        setSocket(null); setConnected(false);
-        lockedMtUrlRef.current=url;
-        setToken(url);
-        setMtUrl(url);
-        startConnection(undefined,url);
-        setGameViewPlatform("MT");
-        setGameViewUrl(url);
-      }else{
-        // DG 平台直接沿用牌路主頁已經取得、正在使用的同一組 DG 授權網址。
-        // 不再按一次 DG平台就重新呼叫 DGLI/login，避免第二組 token 讓背景
-        // Chromium / WebSocket 被 DG 判定為舊 session 而斷線。只有主頁尚未
-        // 取得 DG 授權時，才補取一次並同時交給牌路 relay 使用。
-        let url=dgGameUrl;
-        if(!url){
-          url=await getDgLoginUrlFromPlatform(loginPlatform,platformToken);
-          setDgGameUrl(url);
-          setDgStatus("連線中");
-        }
-        suppressDgRecoveryRef.current=false;
-        dgForegroundRecoveryAttemptRef.current=0;
-        setDgWasOpened(true);
-        setDgNeedsRecovery(false);
-        // DG ONLY: switch the existing relay into foreground-proxy mode BEFORE
-        // opening the game. No second DG login/Chromium session is allowed here.
-        // The proxied DG page's one real WebSocket also feeds the floating assistant.
-        const proxyUrl=Platform.OS==="web"?await enterDgSameSessionProxy(url):url;
-        setGameViewPlatform("DG");
-        setGameViewUrl(proxyUrl||url);
-      }
-      setHasEnteredGame(true);
-      setMtOpen(true);
-    }catch(error:any){
-      notify(error?.message||`取得 ${activePlatform} 平台授權失敗`);
-    }finally{setPlatformLaunching(false)}
-  };
-  const closeGameView=()=>{
-    const wasDg=gameViewPlatform==="DG";
-    setMtOpen(false);
-    if(wasDg&&dgBridgeActiveRef.current) void leaveDgSameSessionProxy();
-  };
-
-  const confirmTransferAll=()=>{
-    if(!hasEnteredGame){notify("請先進入 MT 或 DG 平台");return;}
-    setWalletTransferOpen(true);
-  };
-  const executeTransferAll=async()=>{
-    if(walletTransferBusy)return;
-    const platformToken=platformTokenRef.current;
-    if(!platformToken){notify("登入授權已失效，請重新登入");return;}
-    setWalletTransferBusy(true);
-    try{
-      const result=await transferAllToMainWallet(loginPlatform,platformToken);
-      if(result.ok){
-        // 轉回後不要關掉目前正在收牌路的 relay；只禁止「重新登入 DG」的自動恢復，
-        // 避免剛轉回主錢包又因新的 DGLI/login 被平台自動轉回 DG。
-        suppressDgRecoveryRef.current=true;
-        setDgNeedsRecovery(false);
-        notify("轉回成功");setWalletTransferOpen(false);
-      }
-      else if(result.empty){notify("目前無可轉回點數");setWalletTransferOpen(false);}
-      else notify(result.message||"轉回失敗");
-    }catch(error:any){notify(error?.message||"轉回失敗");}
-    finally{setWalletTransferBusy(false)}
-  };
-  const action=(kind:string,table:TableData)=>{if(kind==="平台")void openCurrentPlatform(table);else if(kind==="分析")setAnalysisTable(table);else notify(`已關注百家樂 ${table.id}`)};
+  const syncAssist=()=>{const ws=socketRef.current;if(ws?.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));appendEvent("懸浮輔助已要求同步")}else notify("尚未連線")};
+  const openMtPlatform=(table?:TableData)=>{if(table)setAssistTableId(table.apiId??`BAG${table.id}`);if(!(mtUrl.trim()||token.trim())){notify("請先在連線設定填入 MT 平台網址");setConnectionOpen(true);return}setMtOpen(true)};
+  const action=(kind:string,table:TableData)=>{if(kind==="MT平台")openMtPlatform(table);else if(kind==="分析")setAnalysisTable(table);else notify(`已關注百家樂 ${table.id}`)};
   const actionRef=useRef(action);
   actionRef.current=action;
   const stableTableAction=useMemo(()=>(kind:string,table:TableData)=>actionRef.current(kind,table),[]);
@@ -2614,13 +2080,13 @@ export default function HomeScreen(){
     const page1=<View {...pageSwipe.panHandlers} style={s.assistPage}>
       <View style={s.decisionRow}><View style={s.decisionBox}><Text style={s.smallLabel}>最近</Text><View style={s.latestLine}><View style={[s.glowDot,{backgroundColor:glow,shadowColor:glow}]}/><Text style={[s.latestText,{color:glow}]}>{latest??"—"}</Text></View></View><View style={s.decisionBox}><Text style={s.smallLabel}>牌型</Text><Text style={s.detectText}>{detectPattern(assistTable?.results??[])}</Text></View><View style={s.decisionBox}><View style={s.recommendHeader}><View style={s.recommendTitleConfidence}><Text style={s.smallLabel}>推薦下注</Text><View style={[s.signalDotSmall,{backgroundColor:assistConfidenceState.color,shadowColor:assistConfidenceState.color}]}/><Text numberOfLines={1} style={[s.confidenceText,{color:assistConfidenceState.color,textShadowColor:assistConfidenceState.color}]}>{assistConfidenceState.label}</Text></View><Pressable onPress={()=>{setStrategyLevel(0);appendEvent(`${strategy}已手動重置至第 1 階`)}} style={s.martinResetMini}><Text style={s.martinResetMiniText}>重置</Text></Pressable></View><Text style={[s.recommendText,{color:resultColor(recommendation)}]}>{recommendation} {nextAmount.toLocaleString()}</Text><View style={s.recommendMetaRow}><Text style={[s.microText,s.recommendStrategyMeta]}>{strategy}｜第 {strategyLevel+1} 階｜下一注 {nextAmount.toLocaleString()}</Text></View></View></View>
       <View style={s.todayPnlBox}><Text style={s.smallLabel}>今日輸贏</Text><Text style={[s.todayPnlValue,{color:todayPnl===null?"#FFFFFF":todayPnl>0?"#4ED58B":todayPnl<0?"#FF6973":"#FFFFFF"}]}>{todayPnl===null?"—":`${todayPnl>0?"+":""}${todayPnl.toLocaleString()}`}</Text></View>
-      <View style={s.aiBox}><View style={s.aiHead}><Text style={s.aiTitle}>AI分析</Text><Pressable style={({pressed}:any)=>[s.stopLossMiniBtn,pressed&&s.stopLossMiniBtnPressed]} onPress={openStopLossSettings}><Text style={s.stopLossMiniBtnText}>止損設定</Text></Pressable></View><Text style={s.aiText}>{analysisText(assistTable)}</Text></View>
+      <View style={s.aiBox}><Text style={s.aiTitle}>AI分析</Text><Text style={s.aiText}>{analysisText(assistTable)}</Text></View>
     </View>;
     const page2=<View {...pageSwipe.panHandlers} style={s.assistPage}><View style={s.moneyGrid}><View style={s.fieldBox}><Text style={s.smallLabel}>目前本金</Text><TextInput keyboardType="numeric" value={String(bankroll)} onChangeText={v=>{const n=Math.max(0,Number(v)||0);setBankroll(n)}} style={s.moneyInput}/></View><View style={s.fieldBox}><Text style={s.smallLabel}>基本單注</Text><TextInput keyboardType="numeric" value={String(baseBet)} onChangeText={v=>setBaseBet(Math.max(0,Number(v)||0))} style={s.moneyInput}/></View><View style={s.fieldBox}><Text style={s.smallLabel}>下一注</Text><Text style={s.nextAmount}>{nextAmount.toLocaleString()}</Text></View></View><ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.strategyScroll} contentContainerStyle={s.strategyRow}>{strategies.map(x=><Pressable key={x} style={[s.strategyChip,strategy===x&&s.strategyChipActive]} onPress={()=>{setStrategy(x);setStrategyLevel(0)}}><Text style={[s.strategyChipText,strategy===x&&{color:"#fff"}]}>{x}</Text></Pressable>)}</ScrollView><View style={s.progressBox}><Text style={s.smallLabel}>策略進度</Text><Text style={s.progressText}>{strategy} · 第 {strategyLevel+1} 階　→　下一注 {nextAmount.toLocaleString()}</Text></View></View>;
     const page3=<View {...pageSwipe.panHandlers} style={s.assistPage}><View style={s.betButtons}><Pressable style={[s.betBtn,{backgroundColor:"#B8323B"}]} onPress={()=>placeManualBet("莊")}><Text style={s.betBtnText}>本局莊</Text></Pressable><Pressable style={[s.betBtn,{backgroundColor:"#1764C0"}]} onPress={()=>placeManualBet("閒")}><Text style={s.betBtnText}>本局閒</Text></Pressable><Pressable style={[s.betBtn,{backgroundColor:"#238A4B"}]} onPress={()=>placeManualBet("和")}><Text style={s.betBtnText}>和局</Text></Pressable></View><View style={s.statsGrid}><View><Text style={s.smallLabel}>目前本金</Text><Text style={s.statsValue}>{bankroll.toLocaleString()}</Text></View><View><Text style={s.smallLabel}>總損益</Text><Text style={[s.statsValue,{color:bankroll-initialBankroll>=0?"#4ED58B":"#FF6973"}]}>{(bankroll-initialBankroll>=0?"+":"")+(bankroll-initialBankroll).toLocaleString()}</Text></View><View><Text style={s.smallLabel}>勝 / 負</Text><Text style={s.statsValue}>{wins} / {losses}</Text></View><View><Text style={s.smallLabel}>勝率</Text><Text style={s.statsValue}>{decisions?((wins/decisions)*100).toFixed(1):"0.0"}%</Text></View></View><View style={s.recordBar}><Text style={s.microText}>{pendingBet?`等待開獎：${pendingBet.side} ${pendingBet.amount.toLocaleString()}`:`連${records[0]?.pnl>0?"勝":records[0]?.pnl<0?"敗":"續"} ${streak}　最大回撤 -${maxDrawdown.toLocaleString()}`}</Text><Pressable onPress={resetStats}><Text style={s.resetText}>重置統計</Text></Pressable></View><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.historyRow}>{records.slice(0,8).map((r,i)=><View key={i} style={s.historyChip}><Text style={{color:r.pnl>=0?"#53D990":"#FF7079",fontSize:9,fontWeight:"800"}}>{r.side} {r.pnl>=0?"+":""}{r.pnl.toLocaleString()}</Text></View>)}</ScrollView></View>;
     if(!floatingOpen)return null;
     return <Animated.View onLayout={(e:any)=>{const l=e.nativeEvent?.layout;if(l?.width&&l?.height){panelSizeRef.current={width:l.width,height:l.height}}}} style={[s.floatPanel,!desktop?s.floatPanelMobile:null,{width:panelBaseWidth},insideMt?s.floatPanelMt:null,Platform.OS==="web"?({overscrollBehavior:"contain",transformOrigin:"top left"} as any):null,{transform:!desktop?[...panelPosition.getTranslateTransform(),{scale:panelMobileScale}]:panelPosition.getTranslateTransform()}]}>
-      <View style={[s.floatHeader,Platform.OS==="web"?({touchAction:"none",userSelect:"none",WebkitUserSelect:"none"} as any):null]} {...panelDrag.panHandlers}><View style={s.floatHeadLeft}><MatrixMark size={25} brand={activePlatform}/><View><View style={s.floatBrandLine}><Text style={s.floatTitle}>MATRIX ASSIST</Text><Text style={s.floatStatus}>{activeConnected?`● ${activePlatform} LIVE`:`● ${activePlatform} OFFLINE`}</Text></View><ThreadsSignature/></View></View><View style={s.row}><Pressable onPress={syncAssist} style={s.iconTextBtn}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.iconText}>同步</Text></Pressable><Pressable onPress={()=>setV38Open(v=>!v)} style={[s.iconTextBtn,v38Open&&s.v38LaunchActive]}><MaterialIcons name="calculate" size={15} color="#fff"/><Text style={s.iconText}>算牌</Text></Pressable><Pressable onPress={()=>setTerminalParityOpen(v=>!v)} style={[s.iconTextBtn,terminalParityOpen&&s.v38LaunchActive]}><MaterialIcons name="functions" size={15} color="#fff"/><Text style={s.iconText}>奇偶</Text></Pressable><Pressable onPress={()=>setFloatingOpen(false)} style={s.iconBtn}><MaterialIcons name="close" size={18} color="#fff"/></Pressable></View></View>
+      <View style={[s.floatHeader,Platform.OS==="web"?({touchAction:"none",userSelect:"none",WebkitUserSelect:"none"} as any):null]} {...panelDrag.panHandlers}><View style={s.floatHeadLeft}><MatrixMark size={25}/><View><View style={s.floatBrandLine}><Text style={s.floatTitle}>MATRIX ASSIST</Text><Text style={s.floatStatus}>{connected?"● LIVE":"● OFFLINE"}</Text></View><ThreadsSignature/></View></View><View style={s.row}><Pressable onPress={syncAssist} style={s.iconTextBtn}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.iconText}>同步</Text></Pressable><Pressable onPress={()=>setV38Open(v=>!v)} style={[s.iconTextBtn,v38Open&&s.v38LaunchActive]}><MaterialIcons name="calculate" size={15} color="#fff"/><Text style={s.iconText}>算牌</Text></Pressable><Pressable onPress={()=>setTerminalParityOpen(v=>!v)} style={[s.iconTextBtn,terminalParityOpen&&s.v38LaunchActive]}><MaterialIcons name="functions" size={15} color="#fff"/><Text style={s.iconText}>奇偶</Text></Pressable><Pressable onPress={()=>setFloatingOpen(false)} style={s.iconBtn}><MaterialIcons name="close" size={18} color="#fff"/></Pressable></View></View>
       <View style={s.selectorWrap}>
         <Pressable style={s.selector} onPress={()=>{
           if(roomDropdownOpen){ roomDropdownOpenRef.current=false; setRoomDropdownOpen(false); }
@@ -2686,7 +2152,7 @@ export default function HomeScreen(){
     const ready=!!data?.complete;
     const side=ready?calc.side:"觀望" as V38Side;
     const sideColor=side==="莊"?"#EF4E57":side==="閒"?"#2879E5":"#A7B5BF";
-    const status=!activeConnected?"未連線":!data?"等待牌面":ready?"已完成":"發牌中";
+    const status=!connected?"未連線":!data?"等待牌面":ready?"已完成":"發牌中";
     const faceLine=dealt.length?dealt.join("  "):"—";
     const valueLine=calc.values.length?calc.values.join("  "):"—";
     const tens=ready?Math.floor(calc.total/10):0,ones=ready?calc.total%10:0;
@@ -2709,7 +2175,7 @@ export default function HomeScreen(){
     if(!v38Open)return null;
     const data=v38ByTable[assistTableId];
     const sideColor=(x:V38Side)=>x==="莊"?"#EF4E57":x==="閒"?"#2879E5":"#A7B5BF";
-    const status=!activeConnected?"未連線":!data?"等待牌面":data.settled?"已結算":data.complete?"牌面完成":"發牌中";
+    const status=!connected?"未連線":!data?"等待牌面":data.settled?"已結算":data.complete?"牌面完成":"發牌中";
     const cards=(xs?:string[])=>xs?.length?xs.join("  "):"—";
     const allCards=data?[...data.player,...data.banker]:[];
     const values=allCards.map(baccaratCardValue);
@@ -2790,95 +2256,61 @@ export default function HomeScreen(){
     </Animated.View>;
   };
 
-  if(!accessGranted)return <AccessScreen notice={accessNotice} onAuthenticated={(sessionId,platformToken,platform)=>{
+  if(!accessGranted)return <AccessScreen notice={accessNotice} onAuthenticated={(sessionId,mtGameUrl)=>{
     setAccessSessionId(sessionId);
     setAccessNotice("");
-    setActivePlatform("MT");
-    platformTokenRef.current=platformToken;
-    setLoginPlatform(platform);
-    lockedMtUrlRef.current="";
-    setToken("");
-    setMtUrl("");
-    setDgGameUrl("");
-    setDgTables([]);
-    setDgConnected(false);
-    setDgStatus("連線中");
-    setDgNeedsRecovery(false);
-    dgHasConnectedRef.current=false;
-    dgForegroundRecoveryAttemptRef.current=0;
-    suppressDgRecoveryRef.current=false;
-    roadConnectBusyRef.current=false;
-    setHasEnteredGame(false);
-    setDgWasOpened(false);
-    setGameViewUrl("");
+    autoMtConnectDoneRef.current=false;
+    pendingAutoMtUrlRef.current=mtGameUrl||"";
+    lockedMtUrlRef.current=mtGameUrl||"";
+    if(mtGameUrl){setToken(mtGameUrl);setMtUrl(mtGameUrl)}
     setAccessGranted(true);
   }}/>;
 
   return <ScreenContainer edges={["top","left","right","bottom"]} containerClassName="bg-[#080E17]" className="bg-[#080E17]">
-    <View style={[s.screen,activePlatform==="DG"&&s.screenDg,desktop&&Platform.OS==="web"?s.screenDesktopZoom:null]}>
-      <View style={[s.topbar,!desktop?s.topbarMobile:null,activePlatform==="DG"&&s.topbarDg]}><View style={s.brandRow}><View style={[s.brandIcon,activePlatform==="DG"&&s.brandIconDg]}><MatrixMark size={29} brand={activePlatform}/></View><View><Text style={[s.kicker,activePlatform==="DG"&&s.kickerDg]}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={logoutSession}><MaterialIcons name="logout" size={16} color="#fff"/><Text style={s.headerBtnText}>登出</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setConnectionOpen(true)}><MaterialIcons name="settings" size={16} color="#fff"/><Text style={s.headerBtnText}>連線</Text></Pressable></View></View>
-      <ScrollView contentContainerStyle={s.content}><View style={[s.overview,!desktop&&s.overviewMobile,activePlatform==="DG"&&s.overviewDg]}><View style={!desktop?s.overviewTextMobile:undefined}><Text style={[s.overKicker,activePlatform==="DG"&&s.overKickerDg]}>REAL-TIME MONITORING</Text><Text style={s.overTitle}>LIVE TABLE MATRIX</Text><Text style={s.overSub}>{activePlatform==="DG"?"DG 真人桌況 · 黑金牌路 · 荷官同步":"即時桌況 · 牌路分析 · 荷官同步"}</Text></View><View style={[s.overStats,!desktop&&s.overStatsMobile]}><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>連線狀態</Text><Text style={[s.overValue,{color:activeConnected?"#4BD693":"#FFB54D"}]}>{activeConnected?"已連線":"連線中"}</Text></View><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>平台 · 可用 {availableTableCount} 桌</Text><View style={s.platformSwitch}><Pressable onPress={()=>setActivePlatform("MT")} style={[s.platformTab,activePlatform==="MT"&&s.platformTabMtActive]}><Text style={[s.platformTabText,activePlatform==="MT"&&s.platformTabTextActive]}>MT</Text></Pressable><Pressable onPress={()=>setActivePlatform("DG")} style={[s.platformTab,activePlatform==="DG"&&s.platformTabDgActive]}><Text style={[s.platformTabText,activePlatform==="DG"&&s.platformTabTextDgActive]}>DG</Text></Pressable><Pressable disabled={!hasEnteredGame||walletTransferBusy} onPress={confirmTransferAll} style={[s.walletReturnBtn,(!hasEnteredGame||walletTransferBusy)&&s.walletReturnBtnDisabled]}><MaterialIcons name="account-balance-wallet" size={13} color={hasEnteredGame?"#FFF1C6":"#71808B"}/><Text style={[s.walletReturnText,!hasEnteredGame&&s.walletReturnTextDisabled]}>{walletTransferBusy?"轉回中":"一鍵轉回"}</Text></Pressable></View></View></View></View><View style={s.listHead}><Text style={s.listTitle}>所有房型</Text><Text style={s.listHint}>{activePlatform} · 歷史牌局 · 即時更新 · 荷官同步</Text></View><View style={[s.cardsGrid,desktop&&s.cardsGridDesktop,desktop&&s.cardsGridDesktopCentered]}>{tables.map(t=><View key={t.apiId} style={desktop?s.cardWrapDesktop:s.cardWrap}><MemoTableCard table={t} desktop={desktop} onAction={stableTableAction} connected={activeConnected} platform={activePlatform}/></View>)}</View></ScrollView>
+    <View style={[s.screen,desktop&&Platform.OS==="web"?s.screenDesktopZoom:null]}>
+      <View style={[s.topbar,!desktop?s.topbarMobile:null]}><View style={s.brandRow}><View style={s.brandIcon}><MatrixMark size={29}/></View><View><Text style={s.kicker}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>MT MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>MT MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={logoutSession}><MaterialIcons name="logout" size={16} color="#fff"/><Text style={s.headerBtnText}>登出</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setConnectionOpen(true)}><MaterialIcons name="settings" size={16} color="#fff"/><Text style={s.headerBtnText}>連線</Text></Pressable></View></View>
+      <ScrollView contentContainerStyle={s.content}><View style={[s.overview,!desktop&&s.overviewMobile]}><View style={!desktop?s.overviewTextMobile:undefined}><Text style={s.overKicker}>REAL-TIME MONITORING</Text><Text style={s.overTitle}>LIVE TABLE MATRIX</Text><Text style={s.overSub}>即時桌況 · 牌路分析 · 荷官同步</Text></View><View style={[s.overStats,!desktop&&s.overStatsMobile]}><View style={[s.overStat,!desktop&&s.overStatMobile]}><Text style={s.smallLabel}>連線狀態</Text><Text style={[s.overValue,{color:connected?"#4BD693":"#FF6973"}]}>{connected?"已連線":"未連線"}</Text></View><View style={[s.overStat,!desktop&&s.overStatMobile]}><Text style={s.smallLabel}>可用桌型</Text><Text style={s.overValue}>15 桌</Text></View></View></View><View style={s.listHead}><Text style={s.listTitle}>所有房型</Text><Text style={s.listHint}>歷史牌局 · 即時更新 · 荷官同步</Text></View><View style={[s.cardsGrid,desktop&&s.cardsGridDesktop,desktop&&s.cardsGridDesktopCentered]}>{tables.map(t=><View key={t.apiId} style={desktop?s.cardWrapDesktop:s.cardWrap}><MemoTableCard table={t} desktop={desktop} onAction={stableTableAction} connected={connected}/></View>)}</View></ScrollView>
 
       {toast?<View style={s.toast}><Text style={s.toastText}>{toast}</Text></View>:null}
 
-      <Modal visible={walletTransferOpen} transparent animationType="fade" onRequestClose={()=>!walletTransferBusy&&setWalletTransferOpen(false)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>一鍵轉回主錢包</Text><Pressable disabled={walletTransferBusy} onPress={()=>setWalletTransferOpen(false)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>將目前所有遊戲錢包可轉回點數全部收回主錢包。</Text><View style={[s.modalActions,{marginTop:14}]}><Pressable disabled={walletTransferBusy} style={[s.actionBtn,{backgroundColor:"#344553",opacity:walletTransferBusy?0.55:1}]} onPress={()=>setWalletTransferOpen(false)}><Text style={s.btnText}>取消</Text></Pressable><Pressable disabled={walletTransferBusy} style={[s.actionBtn,{backgroundColor:"#8B6828",opacity:walletTransferBusy?0.68:1}]} onPress={()=>void executeTransferAll()}><Text style={s.btnText}>{walletTransferBusy?"轉回中...":"確認轉回"}</Text></Pressable></View></View></View></Modal>
-
-      <Modal visible={stopLossOpen} transparent animationType="fade" onRequestClose={()=>setStopLossOpen(false)}><View style={s.stopLossShade}><View style={s.stopLossModal}>
-        <View style={s.stopLossHead}><View style={s.stopLossTitleWrap}><MaterialIcons name="health-and-safety" size={16} color="#7DD7FF"/><Text style={s.stopLossTitle}>止損設定</Text></View><Pressable style={s.stopLossClose} onPress={()=>setStopLossOpen(false)}><MaterialIcons name="close" size={18} color="#DDE8F0"/></Pressable></View>
-        <View style={s.stopLossRow}><Text style={s.stopLossLabel}>目前餘額</Text><Text style={s.stopLossBalance}>{currentBalance===null?"—":currentBalance.toLocaleString(undefined,{maximumFractionDigits:2})}</Text></View>
-        <View style={s.stopLossPrincipalRow}><Text style={s.stopLossLabel}>本金</Text><TextInput value={stopLossPrincipal} onChangeText={setStopLossPrincipal} keyboardType="decimal-pad" placeholder="輸入本金" placeholderTextColor="#6D8292" style={s.stopLossInput}/></View>
-        <Pressable style={({pressed}:any)=>[s.useBalanceBtn,pressed&&s.stopLossMiniBtnPressed]} onPress={useCurrentBalanceAsPrincipal}><Text style={s.useBalanceBtnText}>使用目前餘額</Text></Pressable>
-        <View style={s.stopLossPercentRow}><Text style={s.stopLossLabel}>止損比例</Text><View style={s.stopLossStepper}><Pressable style={s.stepBtn} onPress={()=>setStopLossPercent(v=>Math.max(5,v-5))}><Text style={s.stepBtnText}>−</Text></Pressable><Text style={s.stopLossPercent}>{stopLossPercent}%</Text><Pressable style={s.stepBtn} onPress={()=>setStopLossPercent(v=>Math.min(90,v+5))}><Text style={s.stepBtnText}>＋</Text></Pressable></View></View>
-        <View style={s.stopLossThresholdRow}><Text style={s.stopLossLabel}>警戒線</Text><Text style={s.stopLossThreshold}>{stopLossThreshold>0?stopLossThreshold.toLocaleString(undefined,{maximumFractionDigits:2}):"—"}</Text></View>
-        <Pressable style={({pressed}:any)=>[s.stopLossEnableBtn,pressed&&{opacity:.78}]} onPress={enableStopLoss}><Text style={s.stopLossEnableText}>{stopLossEnabled?"更新提醒":"開啟提醒"}</Text></Pressable>
-      </View></View></Modal>
-
-      <Modal visible={stopLossAlertOpen} transparent animationType="fade" onRequestClose={()=>setStopLossAlertOpen(false)}><View style={s.stopLossShade}><View style={s.stopLossAlertModal}>
-        <View style={s.stopLossAlertIcon}><MaterialIcons name="warning-amber" size={24} color="#FFCB66"/></View>
-        <Text style={s.stopLossAlertTitle}>止損提醒</Text>
-        <Text style={s.stopLossAlertText}>已達設定的止損警戒線</Text>
-        <Text style={s.stopLossAlertSub}>建議適度休息，理性遊戲。</Text>
-        <Pressable style={s.stopLossAckBtn} onPress={()=>setStopLossAlertOpen(false)}><Text style={s.stopLossAckText}>我知道了</Text></Pressable>
-      </View></View></Modal>
-
-      <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>牌路連線中心</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>MT、DG 進入牌路主頁後會自動連線。下列網址只供顯示，使用者無法修改。DG 單工作階段：內建</Text><View style={s.connectionStatusRow}><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>MT</Text><Text style={[s.connectionStatusText,{color:connected?"#4BD693":"#FFB54D"}]}>{connected?"已連線":"連線中"}</Text></View><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>DG</Text><Text style={[s.connectionStatusText,{color:dgConnected?"#4BD693":"#FFB54D"}]}>{dgConnected?"已連線":"連線中"}</Text></View></View><Text style={s.fieldLabel}>MT 即時牌路 WebSocket（固定）</Text><TextInput value={readonlyConnectionUrl(wsUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>MT 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(mtUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>DG 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(dgGameUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><View style={s.modalActions}><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>void connectRoadDashboard(true)}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.btnText}>重新連線</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#344553"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View></View></View></Modal>
+      <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>主頁與 MT 連線設定</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>主頁牌路 WebSocket 與 MT 平台使用獨立工作階段。關閉此視窗不會中斷已建立的連線。</Text><Text style={s.fieldLabel}>主頁牌路 WebSocket（固定）</Text><TextInput value={wsUrl} editable={false} secureTextEntry selectTextOnFocus={false} style={s.modalInput}/><Text style={s.fieldLabel}>主頁牌路來源 / Token</Text><TextInput value={token} editable={false} secureTextEntry selectTextOnFocus={false} placeholder="已由 TZ 自動授權" placeholderTextColor="#63798B" style={s.modalInput}/><Text style={s.fieldLabel}>MT 平台獨立網址</Text><TextInput value={mtUrl} editable={false} secureTextEntry selectTextOnFocus={false} placeholder="已由 TZ 自動授權" placeholderTextColor="#63798B" style={s.modalInput}/><View style={s.mappingRow}><Text style={s.mapChip}>winner 1：閒</Text><Text style={s.mapChip}>winner 2：莊</Text><Text style={s.mapChip}>winner 3：和</Text></View><View style={s.modalActions}><Pressable disabled style={[s.actionBtn,{backgroundColor:"#1F6F9D",opacity:.48}]}><Text style={s.btnText}>驗證主頁牌路</Text></Pressable><Pressable disabled style={[s.actionBtn,{backgroundColor:"#238F58",opacity:.48}]}><Text style={s.btnText}>開始連線</Text></Pressable><Pressable disabled style={[s.actionBtn,{backgroundColor:"#A63E48",opacity:.48}]}><Text style={s.btnText}>中斷</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View><Text style={s.syncText}>同步階段：主頁已同步 {tables.filter(t=>t.live).length} 桌</Text><Text style={s.fieldLabel}>即時事件</Text><ScrollView style={s.logBox}>{events.map((x,i)=><Text key={i} style={s.logText}>{x}</Text>)}</ScrollView></View></View></Modal>
       <Modal visible={helpOpen} transparent animationType="fade" onRequestClose={()=>setHelpOpen(false)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>說明</Text><Pressable onPress={()=>setHelpOpen(false)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>主頁顯示 15 桌即時牌路。MT 懸浮輔助可左右滑動 3 頁：即時輔助、資金策略、輸贏統計。</Text></View></View></Modal>
       <Modal visible={!!radarDetailTable} transparent animationType="fade" onRequestClose={()=>setRadarDetailId(null)}><View style={s.modalShade}><View style={s.radarDetailModal}><View style={s.modalHead}><View><Text style={s.radarKicker}>MT MATRIX · LIVE ROAD SNAPSHOT</Text><Text style={s.radarDetailTitle}>{radarDetailId} · 第 {radarDetailTable?.round??0} 局</Text></View><Pressable onPress={()=>setRadarDetailId(null)} style={s.radarClose}><MaterialIcons name="close" size={20} color="#DCEEFF"/></Pressable></View>{radarDetailTable?<><View style={s.radarDetailStats}><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前推薦</Text><Text style={[s.radarDetailValue,{color:resultColor(radarDetailDecision.side)}]}>{radarDetailDecision.side}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>信心度</Text><View style={s.radarDetailConfidence}><View style={[s.signalDot,{backgroundColor:confidenceState(radarDetailConfidence).color,shadowColor:confidenceState(radarDetailConfidence).color}]}/><Text style={[s.radarDetailValue,{color:confidenceState(radarDetailConfidence).color,marginTop:0}]}>{confidenceState(radarDetailConfidence).label}</Text></View></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前牌型</Text><Text numberOfLines={1} style={s.radarDetailValue}>{detectPattern(radarDetailTable.results)}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>莊／閒／和</Text><Text style={s.radarDetailValue}>{radarDetailTable.banker}／{radarDetailTable.player}／{radarDetailTable.tie}</Text></View></View><View style={[s.radarRoadWrap,{height:desktop?190:150}]}><RoadGrid table={radarDetailTable} desktop={desktop} transparent/></View><Text style={s.radarDetailNote}>{analysisText(radarDetailTable)}</Text></>:null}</View></View></Modal>
 
       <Modal visible={!!analysisTable} transparent animationType="fade" onRequestClose={()=>setAnalysisTable(null)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>百家樂 {analysisTable?.id} 分析</Text><Pressable onPress={()=>setAnalysisTable(null)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>{analysisText(analysisTable??undefined)}</Text></View></View></Modal>
-      {mtOpen?<View style={s.mtOverlay}><View style={s.mtScreen}><View style={[s.mtTop,gameViewPlatform==="DG"&&s.topbarDg]}><View style={s.brandRow}><View style={[s.brandIcon,gameViewPlatform==="DG"&&s.brandIconDg]}><MatrixMark size={29} brand={gameViewPlatform}/></View><View><Text style={[s.kicker,gameViewPlatform==="DG"&&s.kickerDg]}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>{gameViewPlatform} MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>{gameViewPlatform} MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={closeGameView}><MaterialIcons name="arrow-back" size={16} color="#fff"/><Text style={s.headerBtnText}>回牌路</Text></Pressable></View></View><View style={s.iframeWrap}>{Platform.OS==="web"?createElement("iframe" as any,{src:gameViewUrl,style:{width:"100%",height:"100%",border:"0",background:"#000"},allow:"clipboard-read; clipboard-write; fullscreen"}):<View style={s.nativeMtFallback}><Text style={s.helpText}>目前原生模式請使用外部瀏覽器開啟目前平台。</Text></View>}</View></View></View>:null}
+      {mtOpen?<View style={s.mtOverlay}><View style={s.mtScreen}><View style={s.mtTop}><View style={s.brandRow}><View style={s.brandIcon}><MatrixMark size={29}/></View><View><Text style={s.kicker}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>MT MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>MT MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setMtOpen(false)}><MaterialIcons name="arrow-back" size={16} color="#fff"/><Text style={s.headerBtnText}>回牌路</Text></Pressable></View></View><View style={s.iframeWrap}>{Platform.OS==="web"?createElement("iframe" as any,{src:mtUrl.trim()||token.trim(),style:{width:"100%",height:"100%",border:"0",background:"#000"},allow:"clipboard-read; clipboard-write; fullscreen"}):<View style={s.nativeMtFallback}><Text style={s.helpText}>目前原生模式請使用外部瀏覽器開啟 MT 平台。</Text></View>}</View></View></View>:null}
       {MultiTableRadar({insideMt:mtOpen})}
       {FloatingAssistant({insideMt:mtOpen})}
       {V38Calculator({insideMt:mtOpen})}
       {TerminalParityModel({insideMt:mtOpen})}
-      <FloatingOrb position={orbPosition} responder={orbResponder} size={orbSize} iconSize={orbIconSize} connected={activeConnected} insideMt={mtOpen} platform={activePlatform}/>
+      <FloatingOrb position={orbPosition} responder={orbResponder} size={orbSize} iconSize={orbIconSize} connected={connected} insideMt={mtOpen}/>
     </View>
   </ScreenContainer>;
 }
 
 const s=StyleSheet.create({
-  screen:{flex:1,backgroundColor:"#060D15"},screenDg:{backgroundColor:"#090806"},screenDesktopZoom:{zoom:1.18,width:"84.7458%",height:"84.7458%",marginLeft:"auto",marginRight:"auto"},row:{flexDirection:"row",alignItems:"center",gap:6},brandRow:{flexDirection:"row",alignItems:"center",gap:8},
-  topbar:{minHeight:58,paddingHorizontal:14,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#31536B",backgroundColor:"#07111C"},topbarDg:{backgroundColor:"#110E08",borderBottomColor:"#8B6B2E"},topbarMobile:{minHeight:64,paddingHorizontal:10},brandMobileStack:{alignItems:"flex-start"},brandIcon:{width:34,height:34,borderRadius:8,borderWidth:1,borderColor:"#315D79",alignItems:"center",justifyContent:"center",backgroundColor:"#071521"},brandIconDg:{backgroundColor:"#171208",borderColor:"#9B7833"},brandTitleRow:{flexDirection:"row",alignItems:"center",gap:8},kicker:{color:"#7890A3",fontSize:8,letterSpacing:1.1},kickerDg:{color:"#C6A35A"},title:{color:"#F2F6F9",fontSize:16,fontWeight:"800"},
+  screen:{flex:1,backgroundColor:"#060D15"},screenDesktopZoom:{zoom:1.18,width:"84.7458%",height:"84.7458%",marginLeft:"auto",marginRight:"auto"},row:{flexDirection:"row",alignItems:"center",gap:6},brandRow:{flexDirection:"row",alignItems:"center",gap:8},
+  topbar:{minHeight:58,paddingHorizontal:14,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#31536B",backgroundColor:"#07111C"},topbarMobile:{minHeight:64,paddingHorizontal:10},brandMobileStack:{alignItems:"flex-start"},brandIcon:{width:34,height:34,borderRadius:8,borderWidth:1,borderColor:"#315D79",alignItems:"center",justifyContent:"center",backgroundColor:"#071521"},brandTitleRow:{flexDirection:"row",alignItems:"center",gap:8},kicker:{color:"#7890A3",fontSize:8,letterSpacing:1.1},title:{color:"#F2F6F9",fontSize:16,fontWeight:"800"},
   lineBtn:{height:34,paddingHorizontal:9,borderRadius:7,backgroundColor:"#0C9B43",flexDirection:"row",alignItems:"center",gap:5},lineLogo:{width:23,height:23,borderRadius:11.5,backgroundColor:"#fff",alignItems:"center",justifyContent:"center"},lineLogoText:{fontSize:5.5,fontWeight:"900",color:"#0C9B43"},lineText:{color:"#fff",fontSize:10,fontWeight:"900"},headerBtn:{height:34,paddingHorizontal:9,borderRadius:7,backgroundColor:"#102A3D",flexDirection:"row",alignItems:"center",gap:5,borderWidth:1,borderColor:"#3D6682"},headerBtnText:{color:"#fff",fontSize:10,fontWeight:"800"},
-  content:{padding:10,paddingBottom:90},overview:{borderWidth:1,borderColor:"#315B76",borderRadius:8,padding:12,flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:10,backgroundColor:"#0B1A28",overflow:"hidden"},overviewDg:{backgroundColor:"#151109",borderColor:"#8B6B2E"},overviewMobile:{flexDirection:"column",alignItems:"stretch",gap:10},overviewTextMobile:{width:"100%"},overKicker:{color:"#62B6E8",fontSize:7,letterSpacing:1.4},overKickerDg:{color:"#D1AE61"},overTitle:{color:"#F4FAFF",fontSize:18,fontWeight:"900",marginTop:2},overSub:{color:"#7894A8",fontSize:9,marginTop:3},overStats:{flexDirection:"row",gap:8},overStatsMobile:{width:"100%",gap:6},overStat:{minWidth:112,borderWidth:1,borderColor:"#31536B",borderRadius:6,padding:9,backgroundColor:"#091722"},overStatDg:{borderColor:"#745925",backgroundColor:"#100D08"},overStatMobile:{flex:1,minWidth:0,padding:8},overValue:{color:"#fff",fontSize:13,fontWeight:"900",marginTop:4},platformSwitch:{flexDirection:"row",alignItems:"center",marginTop:5,padding:2,borderRadius:6,backgroundColor:"rgba(0,0,0,.26)",borderWidth:1,borderColor:"rgba(130,151,166,.22)"},platformTab:{minWidth:42,height:23,paddingHorizontal:10,borderRadius:4,alignItems:"center",justifyContent:"center"},platformTabMtActive:{backgroundColor:"#176FA7",borderWidth:1,borderColor:"#55B4E9"},platformTabDgActive:{backgroundColor:"#6F5420",borderWidth:1,borderColor:"#D3AD5C"},platformTabText:{color:"#7F909C",fontSize:9,fontWeight:"900",letterSpacing:.5},platformTabTextActive:{color:"#EAF8FF"},platformTabTextDgActive:{color:"#FFF2C9"},walletReturnBtn:{height:23,marginLeft:4,paddingHorizontal:8,borderRadius:4,borderWidth:1,borderColor:"#9B7530",backgroundColor:"#241A0A",flexDirection:"row",alignItems:"center",justifyContent:"center",gap:4},walletReturnBtnDisabled:{borderColor:"#3B4650",backgroundColor:"#151A1F",opacity:.62},walletReturnText:{color:"#FFF1C6",fontSize:8,fontWeight:"900"},walletReturnTextDisabled:{color:"#71808B"},listHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:7},listTitle:{color:"#F2F6F9",fontSize:15,fontWeight:"900"},listHint:{color:"#73899A",fontSize:8},
-  cardsGrid:{width:"100%",alignSelf:"center"},cardsGridDesktop:{flexDirection:"row",flexWrap:"wrap",gap:10},cardsGridDesktopCentered:{maxWidth:1280},cardWrap:{width:"100%"},cardWrapDesktop:{width:"calc(50% - 5px)" as any,maxWidth:635},tableCard:{backgroundColor:"#08111A",borderWidth:1,borderColor:"#365B73",overflow:"hidden",marginBottom:10,shadowColor:"#000",shadowOpacity:0.28,shadowRadius:4},tableCardDesktop:{},tableCardDg:{backgroundColor:"#100D08",borderColor:"#8C6B2C",shadowColor:"#C49B48",shadowOpacity:.16},tableHead:{height:28,paddingHorizontal:5,backgroundColor:"#091621",flexDirection:"row",justifyContent:"space-between",alignItems:"center",borderBottomWidth:1,borderBottomColor:"#27485E"},tableHeadDg:{backgroundColor:"#171208",borderBottomColor:"#785B27"},game:{color:"#EAF6FF",fontSize:9,fontWeight:"700"},tableId:{color:"#F8FCFF",borderWidth:1,borderColor:"#6E91A8",paddingHorizontal:6,paddingVertical:1,fontSize:9,fontWeight:"900",backgroundColor:"#0E202E"},tableIdDg:{backgroundColor:"#241B0C",borderColor:"#C29A4D",color:"#FFF1C5"},headText:{color:"#B9CEDC",fontSize:8,fontWeight:"800"},statText:{fontSize:8,fontWeight:"900"},countWrap:{height:20,minWidth:28,borderWidth:1,borderColor:"#8D2030",borderRadius:4,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:2,paddingHorizontal:3},countdown:{color:"#FF5362",fontSize:8,fontWeight:"900"},miniBtn:{height:20,paddingHorizontal:6,borderRadius:4,alignItems:"center",justifyContent:"center",borderColor:"#3A6078",shadowColor:"#000",shadowOpacity:0.22,shadowRadius:2},miniBtnText:{color:"#fff",fontSize:7,fontWeight:"900"},
-  tableBody:{flexDirection:"row",height:176,backgroundColor:"#fff",overflow:"hidden"},tableBodyDesktop:{height:190},tableBodyMobile:{height:164},tableBodyDg:{backgroundColor:"#F7F1E4"},dealer:{width:112,backgroundColor:"#F2F0EC",padding:4,justifyContent:"flex-end"},dealerDesktop:{width:"21.88%"},dealerMobile:{width:"21.88%",minWidth:76},dealerDg:{backgroundColor:"#EDE3CE"},photo:{position:"absolute",top:3,left:3,right:3,height:112,backgroundColor:"#DCE2E6",alignItems:"center",justifyContent:"center",overflow:"hidden"},photoDesktop:{height:"75%"},photoMobile:{height:"73%"},photoImage:{width:"100%",height:"100%",resizeMode:"cover"},liveMediaFill:{width:"100%",height:"100%",alignItems:"center",justifyContent:"center",overflow:"hidden"},crown:{fontSize:30,color:"#C5A24C"},dealerName:{color:"#FFFFFF",backgroundColor:"#6F2F82",alignSelf:"flex-start",paddingHorizontal:5,paddingVertical:2,fontSize:11,fontWeight:"900",lineHeight:14},dealerNameDg:{backgroundColor:"#6F5420",color:"#FFF4D2"},meta:{color:"#617889",fontSize:8.5,fontWeight:"700",lineHeight:11,marginTop:1},metaVideoRow:{height:12,flexDirection:"row",alignItems:"center",marginTop:1,overflow:"hidden"},metaVideoText:{flexShrink:1,marginTop:0,lineHeight:11},videoLabel:{color:"#7890A1",fontSize:7.5,fontWeight:"800",marginLeft:3,marginRight:2,lineHeight:10},videoSwitch:{width:18,height:9,borderRadius:5,backgroundColor:"#667B89",padding:1,justifyContent:"center"},videoSwitchOn:{backgroundColor:"#19B96C"},videoSwitchKnob:{width:7,height:7,borderRadius:3.5,backgroundColor:"#fff",alignSelf:"flex-start"},videoSwitchKnobOn:{alignSelf:"flex-end"},
-  roadArea:{flex:1,flexDirection:"row",backgroundColor:"#fff",minWidth:0,overflow:"hidden"},roadAreaDesktop:{},roadAreaDg:{backgroundColor:"#FFF9ED"},beadPane:{width:"32%",height:"100%",flexShrink:0,borderRightWidth:1,borderColor:"#C9D2D9",overflow:"hidden",backgroundColor:"#FFFFFF"},beadPaneDesktop:{width:"32%"},beadPaneDg:{backgroundColor:"#FFF9ED",borderColor:"#CDBF9F"},beadGrid:{width:"100%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",backgroundColor:"#FFFFFF"},beadGridDg:{backgroundColor:"#FFF9ED"},beadCell:{width:"16.6666667%",height:"16.6666667%",flexGrow:0,flexShrink:0,borderRightWidth:1,borderBottomWidth:1,borderColor:"#D9DEE3",alignItems:"center",justifyContent:"center",backgroundColor:"#FFFFFF"},beadCellDesktop:{},roadCellDg:{backgroundColor:"#FFF9ED",borderColor:"#DDD0B3"},beadDot:{width:"72%",aspectRatio:1,borderRadius:999,borderWidth:1,alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:.10,shadowRadius:1,elevation:1},beadDotDesktop:{width:"70%"},beadDotText:{color:"#FFFFFF",fontSize:8,fontWeight:"900",lineHeight:10,textAlign:"center"},beadDotTextDesktop:{fontSize:9,lineHeight:11},roadStack:{flex:1,minWidth:0,height:"100%"},bigGrid:{width:"100%",height:"62%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch"},bigGridDesktop:{},bigCell:{width:"6.6666667%",height:"16.6666667%",borderRightWidth:1,borderBottomWidth:1,borderColor:"#DDE4E9",alignItems:"center",justifyContent:"center",overflow:"hidden"},bigCellDesktop:{},bigMark:{width:"72%",maxWidth:"78%",aspectRatio:1,borderRadius:999,borderWidth:1.35,backgroundColor:"transparent",alignItems:"center",justifyContent:"center"},bigMarkDesktop:{width:"70%",borderWidth:1.2},tieNumber:{color:"#20B66B",fontSize:7,fontWeight:"900",lineHeight:8},tieNumberDesktop:{fontSize:7,lineHeight:8},lowerArea:{width:"100%",height:"38%",flexDirection:"row",borderTopWidth:1,borderTopColor:"#CCD6DE"},lowerAreaDesktop:{},lowerAreaDg:{borderTopColor:"#CDBF9F",backgroundColor:"#FFF9ED"},lowerPane:{width:"33.333333%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",borderRightWidth:1,borderRightColor:"#DDE4E9"},lowerPaneDg:{borderRightColor:"#DDD0B3",backgroundColor:"#FFF9ED"},lowerCell:{width:"10%",height:"16.6666667%",alignItems:"center",justifyContent:"center",borderRightWidth:.5,borderBottomWidth:.5,borderColor:"#E4E8EB",overflow:"hidden"},lowerCellDesktop:{},lowerHollow:{width:"55%",aspectRatio:1,borderRadius:999,borderWidth:1.4,backgroundColor:"transparent"},lowerSolid:{width:"52%",aspectRatio:1,borderRadius:999},lowerSlash:{width:"58%",height:2,borderRadius:2,transform:[{rotate:"-45deg"}]},
+  content:{padding:10,paddingBottom:90},overview:{borderWidth:1,borderColor:"#315B76",borderRadius:8,padding:12,flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:10,backgroundColor:"#0B1A28",overflow:"hidden"},overviewMobile:{flexDirection:"column",alignItems:"stretch",gap:10},overviewTextMobile:{width:"100%"},overKicker:{color:"#62B6E8",fontSize:7,letterSpacing:1.4},overTitle:{color:"#F4FAFF",fontSize:18,fontWeight:"900",marginTop:2},overSub:{color:"#7894A8",fontSize:9,marginTop:3},overStats:{flexDirection:"row",gap:8},overStatsMobile:{width:"100%",gap:6},overStat:{minWidth:112,borderWidth:1,borderColor:"#31536B",borderRadius:6,padding:9,backgroundColor:"#091722"},overStatMobile:{flex:1,minWidth:0,padding:8},overValue:{color:"#fff",fontSize:13,fontWeight:"900",marginTop:4},listHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:7},listTitle:{color:"#F2F6F9",fontSize:15,fontWeight:"900"},listHint:{color:"#73899A",fontSize:8},
+  cardsGrid:{width:"100%",alignSelf:"center"},cardsGridDesktop:{flexDirection:"row",flexWrap:"wrap",gap:10},cardsGridDesktopCentered:{maxWidth:1280},cardWrap:{width:"100%"},cardWrapDesktop:{width:"calc(50% - 5px)" as any,maxWidth:635},tableCard:{backgroundColor:"#08111A",borderWidth:1,borderColor:"#365B73",overflow:"hidden",marginBottom:10,shadowColor:"#000",shadowOpacity:0.28,shadowRadius:4},tableCardDesktop:{},tableHead:{height:28,paddingHorizontal:5,backgroundColor:"#091621",flexDirection:"row",justifyContent:"space-between",alignItems:"center",borderBottomWidth:1,borderBottomColor:"#27485E"},game:{color:"#EAF6FF",fontSize:9,fontWeight:"700"},tableId:{color:"#F8FCFF",borderWidth:1,borderColor:"#6E91A8",paddingHorizontal:6,paddingVertical:1,fontSize:9,fontWeight:"900",backgroundColor:"#0E202E"},headText:{color:"#B9CEDC",fontSize:8,fontWeight:"800"},statText:{fontSize:8,fontWeight:"900"},countWrap:{height:20,minWidth:28,borderWidth:1,borderColor:"#8D2030",borderRadius:4,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:2,paddingHorizontal:3},countdown:{color:"#FF5362",fontSize:8,fontWeight:"900"},miniBtn:{height:20,paddingHorizontal:6,borderRadius:4,alignItems:"center",justifyContent:"center",borderColor:"#3A6078",shadowColor:"#000",shadowOpacity:0.22,shadowRadius:2},miniBtnText:{color:"#fff",fontSize:7,fontWeight:"900"},
+  tableBody:{flexDirection:"row",height:176,backgroundColor:"#fff",overflow:"hidden"},tableBodyDesktop:{height:190},tableBodyMobile:{height:164},dealer:{width:112,backgroundColor:"#F2F0EC",padding:4,justifyContent:"flex-end"},dealerDesktop:{width:"21.88%"},dealerMobile:{width:"21.88%",minWidth:76},photo:{position:"absolute",top:3,left:3,right:3,height:112,backgroundColor:"#DCE2E6",alignItems:"center",justifyContent:"center",overflow:"hidden"},photoDesktop:{height:"75%"},photoMobile:{height:"73%"},photoImage:{width:"100%",height:"100%",resizeMode:"cover"},liveMediaFill:{width:"100%",height:"100%",alignItems:"center",justifyContent:"center",overflow:"hidden"},crown:{fontSize:30,color:"#C5A24C"},dealerName:{color:"#FFFFFF",backgroundColor:"#6F2F82",alignSelf:"flex-start",paddingHorizontal:5,paddingVertical:2,fontSize:11,fontWeight:"900",lineHeight:14},meta:{color:"#617889",fontSize:8.5,fontWeight:"700",lineHeight:11,marginTop:1},metaVideoRow:{height:12,flexDirection:"row",alignItems:"center",marginTop:1,overflow:"hidden"},metaVideoText:{flexShrink:1,marginTop:0,lineHeight:11},videoLabel:{color:"#7890A1",fontSize:7.5,fontWeight:"800",marginLeft:3,marginRight:2,lineHeight:10},videoSwitch:{width:18,height:9,borderRadius:5,backgroundColor:"#667B89",padding:1,justifyContent:"center"},videoSwitchOn:{backgroundColor:"#19B96C"},videoSwitchKnob:{width:7,height:7,borderRadius:3.5,backgroundColor:"#fff",alignSelf:"flex-start"},videoSwitchKnobOn:{alignSelf:"flex-end"},
+  roadArea:{flex:1,flexDirection:"row",backgroundColor:"#fff",minWidth:0,overflow:"hidden"},roadAreaDesktop:{},beadPane:{width:"32%",height:"100%",flexShrink:0,borderRightWidth:1,borderColor:"#C9D2D9",overflow:"hidden",backgroundColor:"#FFFFFF"},beadPaneDesktop:{width:"32%"},beadGrid:{width:"100%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",backgroundColor:"#FFFFFF"},beadCell:{width:"16.6666667%",height:"16.6666667%",flexGrow:0,flexShrink:0,borderRightWidth:1,borderBottomWidth:1,borderColor:"#D9DEE3",alignItems:"center",justifyContent:"center",backgroundColor:"#FFFFFF"},beadCellDesktop:{},beadDot:{width:"72%",aspectRatio:1,borderRadius:999,borderWidth:1,alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:.10,shadowRadius:1,elevation:1},beadDotDesktop:{width:"70%"},beadDotText:{color:"#FFFFFF",fontSize:8,fontWeight:"900",lineHeight:10,textAlign:"center"},beadDotTextDesktop:{fontSize:9,lineHeight:11},roadStack:{flex:1,minWidth:0,height:"100%"},bigGrid:{width:"100%",height:"62%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch"},bigGridDesktop:{},bigCell:{width:"6.6666667%",height:"16.6666667%",borderRightWidth:1,borderBottomWidth:1,borderColor:"#DDE4E9",alignItems:"center",justifyContent:"center",overflow:"hidden"},bigCellDesktop:{},bigMark:{width:"72%",maxWidth:"78%",aspectRatio:1,borderRadius:999,borderWidth:1.35,backgroundColor:"transparent",alignItems:"center",justifyContent:"center"},bigMarkDesktop:{width:"70%",borderWidth:1.2},tieNumber:{color:"#20B66B",fontSize:7,fontWeight:"900",lineHeight:8},tieNumberDesktop:{fontSize:7,lineHeight:8},lowerArea:{width:"100%",height:"38%",flexDirection:"row",borderTopWidth:1,borderTopColor:"#CCD6DE"},lowerAreaDesktop:{},lowerPane:{width:"33.333333%",height:"100%",flexDirection:"row",flexWrap:"wrap",alignContent:"stretch",borderRightWidth:1,borderRightColor:"#DDE4E9"},lowerCell:{width:"10%",height:"16.6666667%",alignItems:"center",justifyContent:"center",borderRightWidth:.5,borderBottomWidth:.5,borderColor:"#E4E8EB",overflow:"hidden"},lowerCellDesktop:{},lowerHollow:{width:"55%",aspectRatio:1,borderRadius:999,borderWidth:1.4,backgroundColor:"transparent"},lowerSolid:{width:"52%",aspectRatio:1,borderRadius:999},lowerSlash:{width:"58%",height:2,borderRadius:2,transform:[{rotate:"-45deg"}]},
   orb:{position:"absolute",right:16,bottom:24,zIndex:10020,width:50,height:50,borderRadius:25,backgroundColor:"#07131E",borderWidth:2,borderColor:"#6CC8FF",alignItems:"center",justifyContent:"center",shadowColor:"#000",shadowOpacity:0.5,shadowRadius:10,elevation:12,touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},orbMt:{bottom:34,zIndex:10020,elevation:40},orbStatus:{position:"absolute",right:4,top:4,width:8,height:8,borderRadius:4,borderWidth:1,borderColor:"#fff"},
   v38LaunchActive:{backgroundColor:"#0F7AAE"},
   v38InfoBtn:{height:28,paddingHorizontal:8,borderRadius:5,borderWidth:1,borderColor:"#315F78",backgroundColor:"#0C2A3D",flexDirection:"row",alignItems:"center",gap:4},v38InfoBtnText:{color:"#D9F1FF",fontSize:8,fontWeight:"900"},v38DetailScroll:{height:194},v38DetailContent:{padding:7,paddingBottom:12,gap:6},v38VectorBox:{backgroundColor:"#0A1C29",borderWidth:1,borderColor:"#31576D",borderRadius:6,padding:7},v38DetailHeadRow:{flexDirection:"row",alignItems:"center",justifyContent:"space-between",marginBottom:5},v38SectionCode:{color:"#8ED8FF",fontSize:8,fontWeight:"900",letterSpacing:.7},v38LiveDot:{fontSize:7.5,fontWeight:"900"},v38VectorLine:{color:"#D7E5ED",fontSize:8.5,fontWeight:"700",fontFamily:Platform.OS==="web"?"monospace":undefined,lineHeight:14},v38ModelBox:{backgroundColor:"#091722",borderWidth:1,borderColor:"#274A60",borderRadius:6,padding:7},v38ModelTop:{flexDirection:"row",alignItems:"center",gap:6,marginBottom:5},v38ModelName:{color:"#F4FAFF",fontSize:9,fontWeight:"900",letterSpacing:.5},v38ModelTag:{color:"#7599AD",fontSize:6.8,fontWeight:"900",flex:1},v38ModelOut:{fontSize:11,fontWeight:"900"},v38Equation:{color:"#BCE8FF",fontSize:9,fontWeight:"800",fontFamily:Platform.OS==="web"?"monospace":undefined,marginBottom:4},v38Calc:{color:"#D5E0E7",fontSize:8,fontWeight:"700",fontFamily:Platform.OS==="web"?"monospace":undefined,lineHeight:13},v38Rule:{color:"#7897AA",fontSize:7,fontWeight:"700",marginTop:4},
   terminalPanel:{position:"absolute",right:88,top:120,width:300,zIndex:10012,backgroundColor:"rgba(5,15,24,.985)",borderWidth:1,borderColor:"#3B789C",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.5,shadowRadius:12,elevation:32},terminalPanelMobile:{left:12,right:"auto" as any,top:115,width:300,maxWidth:"92%" as any},terminalHeader:{height:38,paddingHorizontal:8,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#082033",borderBottomWidth:1,borderBottomColor:"#285B79",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},terminalTitle:{color:"#F4FAFF",fontSize:11,fontWeight:"900",letterSpacing:.35},terminalBody:{padding:8},terminalLine:{minHeight:26,flexDirection:"row",alignItems:"center",borderBottomWidth:1,borderBottomColor:"#173246"},terminalLabel:{width:38,color:"#7FA1B5",fontSize:8,fontWeight:"900"},terminalCards:{flex:1,color:"#F4FAFF",fontSize:12,fontWeight:"900",letterSpacing:.7},terminalValues:{flex:1,color:"#B8CBD7",fontSize:9,fontWeight:"800",letterSpacing:.6},terminalCalcBox:{marginTop:6,minHeight:31,borderRadius:5,backgroundColor:"#0B1B29",borderWidth:1,borderColor:"#24465D",alignItems:"center",justifyContent:"center",paddingHorizontal:6},terminalCalc:{color:"#BCE8FF",fontSize:10,fontWeight:"900",fontFamily:Platform.OS==="web"?"monospace":undefined},terminalResultRow:{marginTop:6,minHeight:48,borderRadius:6,backgroundColor:"#10283A",borderWidth:1,borderColor:"#326884",paddingHorizontal:8,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},terminalResultLabel:{color:"#86A5B7",fontSize:7.5,fontWeight:"900"},terminalFinal:{color:"#F1F7FA",fontSize:12,fontWeight:"900",marginTop:2},terminalSideWrap:{alignItems:"flex-end"},terminalNext:{color:"#86A5B7",fontSize:7.5,fontWeight:"900"},terminalSide:{fontSize:20,fontWeight:"900",marginTop:1},
   v38Panel:{position:"absolute",right:88,top:120,width:360,zIndex:10010,backgroundColor:"rgba(5,15,24,.985)",borderWidth:1,borderColor:"#3B789C",borderRadius:10,overflow:"hidden",shadowColor:"#000",shadowOpacity:.5,shadowRadius:14,elevation:30},v38PanelMobile:{left:12,right:"auto" as any,top:115,width:340,maxWidth:"92%" as any},v38PanelMt:{zIndex:10015,elevation:45},v38Header:{height:42,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#082033",borderBottomWidth:1,borderBottomColor:"#285B79",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},v38HeaderLeft:{flexDirection:"row",alignItems:"center",gap:8},v38Title:{color:"#F4FAFF",fontSize:12,fontWeight:"900",letterSpacing:.5},v38Sub:{color:"#80A7BD",fontSize:8,fontWeight:"800",marginTop:1},v38Body:{padding:8},v38MetaRow:{flexDirection:"row",justifyContent:"space-between",marginBottom:6},v38Meta:{color:"#9DB2C0",fontSize:9,fontWeight:"800"},v38Cards:{flexDirection:"row",gap:6},v38Hand:{flex:1,minHeight:54,backgroundColor:"#0E2232",borderWidth:1,borderColor:"#294C63",borderRadius:6,padding:7},v38HandSide:{fontSize:10,fontWeight:"900"},v38CardText:{color:"#F5FAFD",fontSize:14,fontWeight:"900",marginTop:5},v38Point:{color:"#C7D7E1",fontSize:9,fontWeight:"800",marginTop:3},v38FormulaGrid:{flexDirection:"row",gap:5,marginTop:6},v38Formula:{flex:1,backgroundColor:"#0B1B29",borderWidth:1,borderColor:"#24465D",borderRadius:5,paddingVertical:6,alignItems:"center"},v38FormulaName:{color:"#9EB6C6",fontSize:8,fontWeight:"900"},v38FormulaSide:{fontSize:13,fontWeight:"900",marginTop:2},v38Recommend:{marginTop:6,minHeight:50,backgroundColor:"#10283A",borderWidth:1,borderColor:"#326884",borderRadius:6,paddingHorizontal:8,paddingVertical:6,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},v38RecommendLabel:{color:"#E8F4FA",fontSize:10,fontWeight:"900"},v38RecommendHint:{color:"#83A2B5",fontSize:7.5,fontWeight:"700",marginTop:3},v38RecommendSide:{fontSize:21,fontWeight:"900"},
-  floatPanel:{position:"absolute",right:74,bottom:22,zIndex:100,backgroundColor:"rgba(6,16,25,.975)",borderWidth:1,borderColor:"#416C88",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:14,elevation:15},floatPanelMt:{zIndex:9999},floatHeader:{height:38,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#081A28",borderBottomWidth:1,borderBottomColor:"#234A63",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},floatHeadLeft:{flexDirection:"row",alignItems:"center",gap:8},floatBrandLine:{flexDirection:"row",alignItems:"center",gap:7},floatTitle:{color:"#F5FAFD",fontWeight:"900",fontSize:12,letterSpacing:.7},floatStatus:{color:"#56D48C",fontSize:8,fontWeight:"900"},iconBtn:{width:27,height:27,borderRadius:5,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},iconTextBtn:{height:27,paddingHorizontal:7,borderRadius:5,backgroundColor:"#214A70",flexDirection:"row",gap:3,alignItems:"center"},iconText:{color:"#fff",fontSize:8,fontWeight:"800"},selectorWrap:{marginHorizontal:6,marginTop:6,position:"relative",zIndex:130},selector:{height:38,paddingHorizontal:9,borderWidth:1,borderColor:"#31516B",borderRadius:5,backgroundColor:"#09151F",flexDirection:"row",alignItems:"center",justifyContent:"space-between"},selectorLeft:{flexDirection:"row",alignItems:"center",gap:4},selectorConfidence:{flexDirection:"row",alignItems:"center",gap:4,marginLeft:4},selectorValue:{color:"#F0F5F8",fontSize:11,fontWeight:"900"},selectorMeta:{color:"#B6C5D0",fontSize:9},roomDropdown:{position:"absolute",left:0,right:0,top:42,maxHeight:205,backgroundColor:"#0A1722",borderWidth:1,borderColor:"#345A76",borderRadius:6,zIndex:160,elevation:30,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:10},roomDropdownScroll:{height:205,maxHeight:205,overflow:"scroll"},roomDropdownContent:{paddingBottom:2},roomDropdownItem:{minHeight:42,paddingHorizontal:10,paddingVertical:5,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#183044"},roomDropdownItemActive:{backgroundColor:"#1B5B88"},roomDropdownLeft:{flex:1,minWidth:0,paddingRight:8},roomDropdownText:{color:"#EDF5FA",fontSize:10,fontWeight:"900"},roomDropdownDealer:{color:"#AFC1CD",fontSize:8,marginTop:2},roomDropdownMeta:{color:"#8EA7B9",fontSize:8,fontWeight:"800"},roomDropdownRight:{alignItems:"flex-end",justifyContent:"center",gap:3},roomConfidence:{flexDirection:"row",alignItems:"center",gap:5},roomConfidenceText:{fontSize:8,fontWeight:"900",textShadowRadius:7},assistPage:{padding:6,minHeight:150},decisionRow:{flexDirection:"row",gap:5},decisionBox:{flex:1,minHeight:68,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,padding:7},smallLabel:{color:"#FFFFFF",fontSize:12,fontWeight:"900"},latestLine:{flexDirection:"row",alignItems:"center",gap:7,marginTop:7},glowDot:{width:17,height:17,borderRadius:8.5,shadowOpacity:1,shadowRadius:10,elevation:8},latestText:{fontSize:16,fontWeight:"900"},detectText:{color:"#FFFFFF",fontSize:14,fontWeight:"900",marginTop:7},recommendText:{fontSize:17,fontWeight:"900",marginTop:7},microText:{color:"#FFFFFF",fontSize:12,fontWeight:"900",marginTop:4},todayPnlBox:{marginTop:5,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,paddingHorizontal:8,paddingVertical:6,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},todayPnlValue:{fontSize:16,fontWeight:"900"},aiBox:{marginTop:5,backgroundColor:"#0B1925",borderRadius:5,padding:7},aiHead:{minHeight:20,flexDirection:"row",alignItems:"center",justifyContent:"space-between",gap:6},aiTitle:{color:"#B7D3E6",fontSize:11,fontWeight:"900"},stopLossMiniBtn:{height:20,paddingHorizontal:7,borderRadius:4,borderWidth:1,borderColor:"#315D79",backgroundColor:"#123149",alignItems:"center",justifyContent:"center"},stopLossMiniBtnPressed:{opacity:.72},stopLossMiniBtnText:{color:"#D9F2FF",fontSize:8,fontWeight:"900"},aiText:{color:"#C6D2DB",fontSize:11,lineHeight:17,marginTop:5},aiTextMobile:{fontSize:9.5,lineHeight:13,marginTop:3},moneyGrid:{flexDirection:"row",gap:5},fieldBox:{flex:1,backgroundColor:"#102335",borderRadius:5,padding:7,minHeight:58},moneyInput:{color:"#fff",fontSize:13,fontWeight:"900",padding:0,marginTop:5},nextAmount:{color:"#54D79A",fontSize:15,fontWeight:"900",marginTop:6},strategyScroll:{marginTop:6,maxHeight:30},strategyRow:{gap:4},strategyChip:{height:25,paddingHorizontal:8,borderRadius:4,backgroundColor:"#172B3B",justifyContent:"center"},strategyChipActive:{backgroundColor:"#2B78B5"},strategyChipText:{color:"#AABCC8",fontSize:7.5,fontWeight:"800"},progressBox:{marginTop:6,backgroundColor:"#0B1925",borderRadius:5,padding:7},progressText:{color:"#DDE9F0",fontSize:9,fontWeight:"800",marginTop:4},recommendHeader:{flexDirection:"row",alignItems:"center",justifyContent:"space-between"},martinResetMini:{paddingHorizontal:7,height:20,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetMiniText:{color:"#fff",fontSize:8,fontWeight:"900"},martinResetBtn:{marginTop:7,height:27,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetText:{color:"#fff",fontSize:9,fontWeight:"900"},betButtons:{flexDirection:"row",gap:5},betBtn:{flex:1,height:38,borderRadius:5,alignItems:"center",justifyContent:"center"},betBtnText:{color:"#fff",fontSize:12,fontWeight:"900"},statsGrid:{marginTop:6,backgroundColor:"#102335",borderRadius:5,padding:7,flexDirection:"row",justifyContent:"space-between"},statsValue:{color:"#fff",fontSize:11,fontWeight:"900",marginTop:3},recordBar:{marginTop:5,flexDirection:"row",justifyContent:"space-between",alignItems:"center"},resetText:{color:"#51BDF1",fontSize:8,fontWeight:"900"},historyRow:{gap:4,marginTop:5},historyChip:{backgroundColor:"#142A3B",borderRadius:4,paddingHorizontal:6,paddingVertical:4},pageDots:{height:19,flexDirection:"row",gap:7,alignItems:"center",justifyContent:"center"},pageDot:{width:6,height:6,borderRadius:3,backgroundColor:"#526574"},pageDotActive:{backgroundColor:"#fff"},
+  floatPanel:{position:"absolute",right:74,bottom:22,zIndex:100,backgroundColor:"rgba(6,16,25,.975)",borderWidth:1,borderColor:"#416C88",borderRadius:9,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:14,elevation:15},floatPanelMt:{zIndex:9999},floatHeader:{height:38,paddingHorizontal:9,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#081A28",borderBottomWidth:1,borderBottomColor:"#234A63",touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},floatHeadLeft:{flexDirection:"row",alignItems:"center",gap:8},floatBrandLine:{flexDirection:"row",alignItems:"center",gap:7},floatTitle:{color:"#F5FAFD",fontWeight:"900",fontSize:12,letterSpacing:.7},floatStatus:{color:"#56D48C",fontSize:8,fontWeight:"900"},iconBtn:{width:27,height:27,borderRadius:5,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},iconTextBtn:{height:27,paddingHorizontal:7,borderRadius:5,backgroundColor:"#214A70",flexDirection:"row",gap:3,alignItems:"center"},iconText:{color:"#fff",fontSize:8,fontWeight:"800"},selectorWrap:{marginHorizontal:6,marginTop:6,position:"relative",zIndex:130},selector:{height:38,paddingHorizontal:9,borderWidth:1,borderColor:"#31516B",borderRadius:5,backgroundColor:"#09151F",flexDirection:"row",alignItems:"center",justifyContent:"space-between"},selectorLeft:{flexDirection:"row",alignItems:"center",gap:4},selectorConfidence:{flexDirection:"row",alignItems:"center",gap:4,marginLeft:4},selectorValue:{color:"#F0F5F8",fontSize:11,fontWeight:"900"},selectorMeta:{color:"#B6C5D0",fontSize:9},roomDropdown:{position:"absolute",left:0,right:0,top:42,maxHeight:205,backgroundColor:"#0A1722",borderWidth:1,borderColor:"#345A76",borderRadius:6,zIndex:160,elevation:30,overflow:"hidden",shadowColor:"#000",shadowOpacity:.45,shadowRadius:10},roomDropdownScroll:{height:205,maxHeight:205,overflow:"scroll"},roomDropdownContent:{paddingBottom:2},roomDropdownItem:{minHeight:42,paddingHorizontal:10,paddingVertical:5,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderBottomWidth:1,borderBottomColor:"#183044"},roomDropdownItemActive:{backgroundColor:"#1B5B88"},roomDropdownLeft:{flex:1,minWidth:0,paddingRight:8},roomDropdownText:{color:"#EDF5FA",fontSize:10,fontWeight:"900"},roomDropdownDealer:{color:"#AFC1CD",fontSize:8,marginTop:2},roomDropdownMeta:{color:"#8EA7B9",fontSize:8,fontWeight:"800"},roomDropdownRight:{alignItems:"flex-end",justifyContent:"center",gap:3},roomConfidence:{flexDirection:"row",alignItems:"center",gap:5},roomConfidenceText:{fontSize:8,fontWeight:"900",textShadowRadius:7},assistPage:{padding:6,minHeight:150},decisionRow:{flexDirection:"row",gap:5},decisionBox:{flex:1,minHeight:68,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,padding:7},smallLabel:{color:"#FFFFFF",fontSize:12,fontWeight:"900"},latestLine:{flexDirection:"row",alignItems:"center",gap:7,marginTop:7},glowDot:{width:17,height:17,borderRadius:8.5,shadowOpacity:1,shadowRadius:10,elevation:8},latestText:{fontSize:16,fontWeight:"900"},detectText:{color:"#FFFFFF",fontSize:14,fontWeight:"900",marginTop:7},recommendText:{fontSize:17,fontWeight:"900",marginTop:7},microText:{color:"#FFFFFF",fontSize:12,fontWeight:"900",marginTop:4},todayPnlBox:{marginTop:5,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:5,paddingHorizontal:8,paddingVertical:6,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},todayPnlValue:{fontSize:16,fontWeight:"900"},aiBox:{marginTop:5,backgroundColor:"#0B1925",borderRadius:5,padding:7},aiTitle:{color:"#B7D3E6",fontSize:11,fontWeight:"900"},aiText:{color:"#C6D2DB",fontSize:11,lineHeight:17,marginTop:5},aiTextMobile:{fontSize:9.5,lineHeight:13,marginTop:3},moneyGrid:{flexDirection:"row",gap:5},fieldBox:{flex:1,backgroundColor:"#102335",borderRadius:5,padding:7,minHeight:58},moneyInput:{color:"#fff",fontSize:13,fontWeight:"900",padding:0,marginTop:5},nextAmount:{color:"#54D79A",fontSize:15,fontWeight:"900",marginTop:6},strategyScroll:{marginTop:6,maxHeight:30},strategyRow:{gap:4},strategyChip:{height:25,paddingHorizontal:8,borderRadius:4,backgroundColor:"#172B3B",justifyContent:"center"},strategyChipActive:{backgroundColor:"#2B78B5"},strategyChipText:{color:"#AABCC8",fontSize:7.5,fontWeight:"800"},progressBox:{marginTop:6,backgroundColor:"#0B1925",borderRadius:5,padding:7},progressText:{color:"#DDE9F0",fontSize:9,fontWeight:"800",marginTop:4},recommendHeader:{flexDirection:"row",alignItems:"center",justifyContent:"space-between"},martinResetMini:{paddingHorizontal:7,height:20,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetMiniText:{color:"#fff",fontSize:8,fontWeight:"900"},martinResetBtn:{marginTop:7,height:27,borderRadius:4,backgroundColor:"#214A70",alignItems:"center",justifyContent:"center"},martinResetText:{color:"#fff",fontSize:9,fontWeight:"900"},betButtons:{flexDirection:"row",gap:5},betBtn:{flex:1,height:38,borderRadius:5,alignItems:"center",justifyContent:"center"},betBtnText:{color:"#fff",fontSize:12,fontWeight:"900"},statsGrid:{marginTop:6,backgroundColor:"#102335",borderRadius:5,padding:7,flexDirection:"row",justifyContent:"space-between"},statsValue:{color:"#fff",fontSize:11,fontWeight:"900",marginTop:3},recordBar:{marginTop:5,flexDirection:"row",justifyContent:"space-between",alignItems:"center"},resetText:{color:"#51BDF1",fontSize:8,fontWeight:"900"},historyRow:{gap:4,marginTop:5},historyChip:{backgroundColor:"#142A3B",borderRadius:4,paddingHorizontal:6,paddingVertical:4},pageDots:{height:19,flexDirection:"row",gap:7,alignItems:"center",justifyContent:"center"},pageDot:{width:6,height:6,borderRadius:3,backgroundColor:"#526574"},pageDotActive:{backgroundColor:"#fff"},
   recommendTitleConfidence:{flexDirection:"row",alignItems:"center",gap:5},
   recommendMetaRow:{flexDirection:"row",alignItems:"center",justifyContent:"space-between",gap:3,marginTop:3},recommendStrategyMeta:{marginTop:0,flexShrink:1},confidenceInline:{flexDirection:"row",alignItems:"center",gap:4,flexShrink:0},confidenceText:{fontSize:8,fontWeight:"900",textShadowRadius:7},
   radarLauncher:{position:"absolute",top:66,right:14,zIndex:90,width:210,height:32,paddingHorizontal:9,borderRadius:7,borderWidth:1,borderColor:"#315D79",backgroundColor:"rgba(7,21,33,.97)",flexDirection:"row",alignItems:"center",gap:6,shadowColor:"#63C7FF",shadowOpacity:.20,shadowRadius:8,elevation:18,touchAction:"none" as any,userSelect:"none" as any,cursor:"grab" as any},radarLauncherMt:{zIndex:9998},radarLauncherMobile:{top:61,right:8,width:188},radarLauncherText:{color:"#EAF6FF",fontSize:9,fontWeight:"900"},radarLauncherBestWrap:{marginLeft:"auto",flexDirection:"row",alignItems:"center",gap:4},radarLauncherBest:{fontSize:8,fontWeight:"900"},
   radarPanel:{position:"absolute",top:66,left:14,right:14,zIndex:90,height:92,borderRadius:9,borderWidth:1,borderColor:"#315D79",backgroundColor:"rgba(6,18,29,.985)",paddingHorizontal:8,paddingVertical:6,shadowColor:"#63C7FF",shadowOpacity:.13,shadowRadius:10,elevation:18},radarPanelMt:{zIndex:9998},radarPanelMobile:{top:61,left:7,right:7,height:144},radarHead:{height:27,flexDirection:"row",alignItems:"center",justifyContent:"space-between"},radarKicker:{color:"#62B6E8",fontSize:6.5,fontWeight:"900",letterSpacing:1},radarTitleRow:{flexDirection:"row",alignItems:"center",gap:8},radarTitle:{color:"#F4FAFF",fontSize:11,fontWeight:"900"},radarBest:{color:"#63C7FF",fontSize:8,fontWeight:"900"},radarWaiting:{color:"#82929D",fontSize:8,fontWeight:"800"},radarClose:{width:26,height:24,borderRadius:5,borderWidth:1,borderColor:"#315D79",backgroundColor:"#0B1A28",alignItems:"center",justifyContent:"center"},radarRail:{gap:5,paddingRight:4,alignItems:"center"},radarRailMobile:{alignItems:"flex-start",paddingBottom:2},radarMobileColumn:{gap:5},radarCard:{width:92,height:50,borderRadius:6,borderWidth:1,borderColor:"#31495A",backgroundColor:"#0B1924",paddingHorizontal:6,paddingVertical:5},radarCardMobile:{width:104,height:52},radarCardBest:{borderColor:"#63C7FF",backgroundColor:"#0D2232",shadowColor:"#63C7FF",shadowOpacity:.30,shadowRadius:7,elevation:6},radarCardTop:{flexDirection:"row",alignItems:"center",justifyContent:"space-between"},radarRoom:{color:"#E8EEF2",fontSize:8,fontWeight:"900"},radarPick:{color:"#EAF8FF",backgroundColor:"#156A95",borderRadius:3,paddingHorizontal:4,paddingVertical:1,fontSize:5.5,fontWeight:"900",borderWidth:1,borderColor:"#63C7FF"},radarCardMain:{flexDirection:"row",alignItems:"center",justifyContent:"space-between",marginTop:7},radarSideLine:{flexDirection:"row",alignItems:"center",gap:5},radarSide:{fontSize:12,fontWeight:"900"},radarConfidence:{flexDirection:"row",alignItems:"center",gap:2},radarConfidenceText:{fontSize:8,fontWeight:"900"},radarPattern:{color:"#91A6B4",fontSize:6.5,fontWeight:"800",marginTop:1},signalDot:{width:9,height:9,borderRadius:4.5,borderWidth:1,borderColor:"rgba(255,255,255,.45)",shadowOpacity:1,shadowRadius:9,elevation:10},signalDotSmall:{width:7,height:7,borderRadius:3.5,borderWidth:1,borderColor:"rgba(255,255,255,.50)",shadowOpacity:1,shadowRadius:8,elevation:9},
   radarDetailModal:{width:"96%",maxWidth:900,backgroundColor:"#0A1721",borderWidth:1,borderColor:"#315D79",borderRadius:10,padding:12},radarDetailTitle:{color:"#F4FAFF",fontSize:16,fontWeight:"900",marginTop:2},radarDetailStats:{flexDirection:"row",gap:6,marginBottom:8,flexWrap:"wrap"},radarDetailStat:{flexGrow:1,minWidth:90,backgroundColor:"#102335",borderWidth:1,borderColor:"#294B64",borderRadius:6,paddingHorizontal:8,paddingVertical:6},radarDetailLabel:{color:"#AFC1CD",fontSize:7,fontWeight:"800"},radarDetailValue:{color:"#F3F7F9",fontSize:11,fontWeight:"900",marginTop:2},radarDetailConfidence:{flexDirection:"row",alignItems:"center",gap:5,marginTop:2},radarRoadWrap:{backgroundColor:"#07131D",borderRadius:7,overflow:"hidden",borderWidth:1,borderColor:"#315D79"},radarDetailNote:{color:"#C6D2DB",fontSize:9,lineHeight:14,marginTop:8},
-  matrixMark:{backgroundColor:"#071521",borderWidth:1,borderColor:"#4DA8D8",alignItems:"center",justifyContent:"center",overflow:"hidden",shadowColor:"#57C7FF",shadowOpacity:.26,shadowRadius:6,elevation:3},matrixMarkInner:{width:"72%",height:"72%",borderRadius:5,borderWidth:1,borderColor:"rgba(107,205,255,.45)",backgroundColor:"rgba(20,72,102,.22)",alignItems:"center",justifyContent:"center"},matrixMarkAccent:{position:"absolute",bottom:"13%",width:"46%",height:2,borderRadius:1,backgroundColor:"#53D1F5",shadowColor:"#53D1F5",shadowOpacity:.9,shadowRadius:4},matrixMarkAccentDg:{backgroundColor:"#D3A64D",shadowColor:"#D3A64D"},matrixMarkText:{color:"#EAF9FF",fontWeight:"900",letterSpacing:-.9,textShadowColor:"#5FD4FF",textShadowRadius:5},matrixMarkTextDg:{color:"#FFE7A5",textShadowColor:"#C99C42"},threadsSignature:{flexDirection:"row",alignItems:"center",gap:4},threadsGlyph:{color:"#F2F8FC",fontSize:11,fontWeight:"900",borderWidth:1,borderColor:"#557487",borderRadius:8,width:16,height:16,lineHeight:14,textAlign:"center"},threadsId:{color:"#D9E3EA",fontSize:10.5,fontWeight:"900",letterSpacing:.15},threadsSignatureMobile:{marginTop:1,gap:3},threadsWord:{color:"#F2F8FC",fontSize:8.5,fontWeight:"900",letterSpacing:.15},threadsIdMobile:{fontSize:9.5},
+  matrixMark:{backgroundColor:"#071521",borderWidth:1,borderColor:"#4DA8D8",alignItems:"center",justifyContent:"center",overflow:"hidden",shadowColor:"#57C7FF",shadowOpacity:.26,shadowRadius:6,elevation:3},matrixMarkInner:{width:"72%",height:"72%",borderRadius:5,borderWidth:1,borderColor:"rgba(107,205,255,.45)",backgroundColor:"rgba(20,72,102,.22)",alignItems:"center",justifyContent:"center"},matrixMarkAccent:{position:"absolute",bottom:"13%",width:"46%",height:2,borderRadius:1,backgroundColor:"#53D1F5",shadowColor:"#53D1F5",shadowOpacity:.9,shadowRadius:4},matrixMarkText:{color:"#EAF9FF",fontWeight:"900",letterSpacing:-.9,textShadowColor:"#5FD4FF",textShadowRadius:5},threadsSignature:{flexDirection:"row",alignItems:"center",gap:4},threadsGlyph:{color:"#F2F8FC",fontSize:11,fontWeight:"900",borderWidth:1,borderColor:"#557487",borderRadius:8,width:16,height:16,lineHeight:14,textAlign:"center"},threadsId:{color:"#D9E3EA",fontSize:10.5,fontWeight:"900",letterSpacing:.15},threadsSignatureMobile:{marginTop:1,gap:3},threadsWord:{color:"#F2F8FC",fontSize:8.5,fontWeight:"900",letterSpacing:.15},threadsIdMobile:{fontSize:9.5},
   floatPanelMobile:{left:18,top:170,right:"auto" as any,bottom:"auto" as any,borderRadius:9},floatHeaderMobile:{height:28,paddingHorizontal:6},selectorWrapMobile:{marginHorizontal:5,marginTop:4},selectorMobile:{height:28,paddingHorizontal:7},assistPageMobile:{paddingHorizontal:5,paddingTop:4,paddingBottom:2,minHeight:96},decisionRowMobile:{gap:4},decisionBoxMobile:{minHeight:46,paddingHorizontal:5,paddingVertical:4},todayPnlBoxMobile:{marginTop:3,paddingHorizontal:7,paddingVertical:3},aiBoxMobile:{marginTop:3,paddingHorizontal:5,paddingVertical:4},pageDotsMobile:{height:12},
   loginScreen:{flex:1,backgroundColor:"#020A12",alignItems:"center",justifyContent:"center",padding:18,overflow:"hidden"},loginVideo:{...StyleSheet.absoluteFillObject},loginShade:{...StyleSheet.absoluteFillObject,backgroundColor:"rgba(2,10,18,.46)"},loginPanel:{width:"100%",maxWidth:480,backgroundColor:"rgba(7,31,44,.76)",borderWidth:1,borderColor:"rgba(82,151,177,.62)",borderRadius:18,padding:18,shadowColor:"#000",shadowOpacity:.4,shadowRadius:20,elevation:14},loginTopline:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:26},loginTopText:{color:"#A9BED0",fontSize:9,letterSpacing:1.8,fontWeight:"700"},loginSafe:{color:"#39E0B0",fontSize:9,fontWeight:"800"},loginHero:{flexDirection:"row",alignItems:"stretch",width:"100%",marginBottom:16,minHeight:112},loginHeroMobile:{minHeight:108},loginBrandMobile:{flex:1.9,gap:8,paddingRight:7},loginTitleMobile:{fontSize:23,letterSpacing:-.45},threadsCardMobile:{flex:.82,minWidth:166,marginLeft:7,paddingHorizontal:10},loginBrand:{flex:1.9,flexDirection:"row",alignItems:"center",justifyContent:"flex-start",gap:13,paddingLeft:2,paddingRight:12},loginBrandCopy:{flexShrink:1},loginIcon:{width:56,height:56,borderRadius:14,borderWidth:1,borderColor:"#315D79",alignItems:"center",justifyContent:"center",backgroundColor:"rgba(5,20,31,.34)"},loginKicker:{color:"#8DB4CE",fontSize:10,letterSpacing:1.5,fontWeight:"800"},loginTitle:{color:"#F5F8FA",fontSize:28,fontWeight:"900",marginTop:5},loginSub:{color:"#91A7B8",fontSize:11.5,marginTop:4},loginSubMobile:{fontSize:9.5,letterSpacing:-.2},loginHeroDivider:{width:1,marginVertical:7,backgroundColor:"rgba(111,169,197,.25)"},threadsCard:{flex:.9,minWidth:142,marginLeft:13,paddingHorizontal:14,paddingVertical:9,borderRadius:15,borderWidth:1,borderColor:"rgba(108,177,205,.40)",backgroundColor:"rgba(3,18,29,.32)",justifyContent:"center"},threadsHead:{flexDirection:"row",alignItems:"center",gap:6},threadsLogo:{width:32,height:32,borderRadius:9,borderWidth:1,borderColor:"rgba(224,243,255,.52)",backgroundColor:"rgba(255,255,255,.07)",alignItems:"center",justifyContent:"center"},threadsLogoText:{color:"#F5FBFF",fontSize:22,fontWeight:"900",lineHeight:26},threadsLabel:{color:"#A9C4D6",fontSize:9,fontWeight:"900",letterSpacing:1.35},threadsName:{color:"#F5F9FC",fontSize:17,fontWeight:"900",marginTop:6},threadsAccount:{color:"#56D7D0",fontSize:14,fontWeight:"900",marginTop:1},threadsFollow:{height:34,marginTop:6,borderRadius:8,borderWidth:1,borderColor:"rgba(78,192,235,.65)",backgroundColor:"rgba(23,128,180,.22)",flexDirection:"row",alignItems:"center",justifyContent:"center",gap:4},threadsFollowPressed:{opacity:.72,transform:[{scale:.985}]},threadsFollowText:{color:"#EAF8FF",fontSize:10,fontWeight:"900",letterSpacing:1.15},loginDivider:{height:1,backgroundColor:"rgba(109,157,184,.32)",marginBottom:20},loginHintRow:{flexDirection:"row",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:11},loginHint:{color:"#A7B8C5",fontSize:11,flexShrink:1},registerBtn:{height:28,paddingHorizontal:11,borderRadius:7,borderWidth:1,borderColor:"rgba(66,185,245,.68)",backgroundColor:"rgba(22,140,235,.16)",alignItems:"center",justifyContent:"center",flexShrink:0},registerBtnPressed:{opacity:.72},registerBtnText:{color:"#42B9F5",fontSize:10,fontWeight:"900"},kickNotice:{color:"#FFB4B9",fontSize:10,fontWeight:"800",lineHeight:15,backgroundColor:"rgba(132,35,45,.22)",borderWidth:1,borderColor:"rgba(255,105,115,.35)",borderRadius:7,paddingHorizontal:10,paddingVertical:8,marginTop:-8,marginBottom:14},loginLabel:{color:"#B9C8D3",fontSize:11,fontWeight:"700",marginBottom:6},loginInput:{height:48,backgroundColor:"rgba(2,17,28,.68)",borderRadius:8,borderWidth:1,borderColor:"#385B70",color:"#fff",paddingHorizontal:14,fontSize:14,marginBottom:14},passwordWrap:{height:48,backgroundColor:"rgba(2,17,28,.68)",borderRadius:8,borderWidth:1,borderColor:"#385B70",flexDirection:"row",alignItems:"center",marginBottom:16},passwordInput:{flex:1,height:"100%",color:"#fff",paddingHorizontal:14,fontSize:14},eyeBtn:{width:46,height:"100%",alignItems:"center",justifyContent:"center"},loginBtn:{height:50,backgroundColor:"#168CEB",borderRadius:8,alignItems:"center",justifyContent:"center",flexDirection:"row",gap:8},loginBtnText:{color:"#fff",fontSize:14,fontWeight:"900"},error:{color:"#FF959C",fontSize:11,textAlign:"center",marginTop:10},loginFooterRow:{marginTop:10,flexDirection:"row",alignItems:"center",justifyContent:"center",gap:7,flexWrap:"nowrap"},loginFooterLeft:{flexDirection:"row",alignItems:"center",gap:4},loginFooterDivider:{color:"rgba(145,171,188,.55)",fontSize:10},loginFoot:{color:"#71899A",fontSize:8.5,textAlign:"center"},loginHelp:{color:"#42B9F5",fontSize:10,fontWeight:"800",textAlign:"center",marginTop:0},
-  modalShade:{flex:1,backgroundColor:"rgba(0,0,0,.72)",alignItems:"center",justifyContent:"center",padding:16},stopLossShade:{flex:1,backgroundColor:"rgba(0,0,0,.62)",alignItems:"center",justifyContent:"center",padding:14,zIndex:20000},stopLossModal:{width:"88%",maxWidth:300,backgroundColor:"#101E2A",borderWidth:1,borderColor:"#315D79",borderRadius:9,padding:11,shadowColor:"#000",shadowOpacity:.5,shadowRadius:18,elevation:30},stopLossHead:{height:25,flexDirection:"row",alignItems:"center",justifyContent:"space-between",marginBottom:7},stopLossTitleWrap:{flexDirection:"row",alignItems:"center",gap:6},stopLossTitle:{color:"#F1F7FB",fontSize:13,fontWeight:"900"},stopLossClose:{width:24,height:24,alignItems:"center",justifyContent:"center"},stopLossRow:{height:31,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderTopWidth:1,borderTopColor:"#20384A"},stopLossLabel:{color:"#B8C9D4",fontSize:10,fontWeight:"800"},stopLossBalance:{color:"#F3F8FB",fontSize:13,fontWeight:"900"},stopLossPrincipalRow:{height:38,flexDirection:"row",alignItems:"center",gap:8},stopLossInput:{flex:1,height:30,borderWidth:1,borderColor:"#36536A",borderRadius:5,backgroundColor:"#08131D",color:"#fff",paddingHorizontal:8,fontSize:11,fontWeight:"800"},useBalanceBtn:{alignSelf:"flex-end",height:24,paddingHorizontal:8,borderRadius:4,backgroundColor:"#173B56",borderWidth:1,borderColor:"#315D79",alignItems:"center",justifyContent:"center",marginBottom:5},useBalanceBtnText:{color:"#BDE8FF",fontSize:8,fontWeight:"900"},stopLossPercentRow:{height:34,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderTopWidth:1,borderTopColor:"#20384A"},stopLossStepper:{flexDirection:"row",alignItems:"center",gap:7},stepBtn:{width:25,height:24,borderRadius:4,backgroundColor:"#173B56",alignItems:"center",justifyContent:"center"},stepBtnText:{color:"#fff",fontSize:16,fontWeight:"900",lineHeight:18},stopLossPercent:{minWidth:38,textAlign:"center",color:"#F5FAFD",fontSize:12,fontWeight:"900"},stopLossThresholdRow:{height:33,flexDirection:"row",alignItems:"center",justifyContent:"space-between",borderTopWidth:1,borderTopColor:"#20384A"},stopLossThreshold:{color:"#FFCB66",fontSize:13,fontWeight:"900"},stopLossEnableBtn:{height:32,borderRadius:5,backgroundColor:"#1E7AB5",alignItems:"center",justifyContent:"center",marginTop:5},stopLossEnableText:{color:"#fff",fontSize:10,fontWeight:"900"},stopLossAlertModal:{width:"82%",maxWidth:270,backgroundColor:"#101E2A",borderWidth:1,borderColor:"#6B5A32",borderRadius:10,paddingHorizontal:15,paddingVertical:14,alignItems:"center",shadowColor:"#000",shadowOpacity:.55,shadowRadius:18,elevation:31},stopLossAlertIcon:{width:38,height:38,borderRadius:19,backgroundColor:"rgba(255,203,102,.10)",alignItems:"center",justifyContent:"center",marginBottom:5},stopLossAlertTitle:{color:"#FFF3D2",fontSize:15,fontWeight:"900"},stopLossAlertText:{color:"#F1F6F9",fontSize:11,fontWeight:"900",marginTop:7,textAlign:"center"},stopLossAlertSub:{color:"#AFC0CB",fontSize:9.5,marginTop:4,textAlign:"center"},stopLossAckBtn:{height:31,minWidth:108,borderRadius:5,backgroundColor:"#1E7AB5",alignItems:"center",justifyContent:"center",marginTop:11,paddingHorizontal:14},stopLossAckText:{color:"#fff",fontSize:10,fontWeight:"900"},connectionModal:{width:"100%",maxWidth:760,maxHeight:"92%",backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},smallModal:{width:"100%",maxWidth:520,backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},modalHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:12},modalTitle:{color:"#fff",fontSize:17,fontWeight:"800"},modalNote:{color:"#BAC7D0",fontSize:10,lineHeight:15,backgroundColor:"#0C1721",padding:10,borderRadius:5,marginBottom:12},fieldLabel:{color:"#C6D3DC",fontSize:10,marginBottom:5,marginTop:8},modalInput:{height:42,borderWidth:1,borderColor:"#36536A",borderRadius:5,backgroundColor:"#08131D",color:"#fff",paddingHorizontal:10},connectionStatusRow:{flexDirection:"row",gap:8,marginBottom:4},connectionStatusCard:{flex:1,borderWidth:1,borderColor:"#36536A",borderRadius:6,backgroundColor:"#08131D",paddingHorizontal:10,paddingVertical:8},connectionStatusText:{fontSize:13,fontWeight:"900",marginTop:2},mappingRow:{flexDirection:"row",gap:6,marginTop:10,flexWrap:"wrap"},mapChip:{color:"#C8D4DD",fontSize:9,backgroundColor:"#263A4C",paddingHorizontal:8,paddingVertical:6,borderRadius:4},modalActions:{flexDirection:"row",gap:7,marginTop:12,flexWrap:"wrap"},actionBtn:{height:38,paddingHorizontal:12,borderRadius:5,justifyContent:"center"},btnText:{color:"#fff",fontWeight:"900",fontSize:10},syncText:{color:"#AFC0CB",fontSize:9,marginTop:11},logBox:{height:130,backgroundColor:"#08131D",borderRadius:5,padding:9,marginTop:4},logText:{color:"#B8C8D2",fontSize:8,lineHeight:13},helpText:{color:"#D2DDE4",fontSize:11,lineHeight:18},
+  modalShade:{flex:1,backgroundColor:"rgba(0,0,0,.72)",alignItems:"center",justifyContent:"center",padding:16},connectionModal:{width:"100%",maxWidth:760,maxHeight:"92%",backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},smallModal:{width:"100%",maxWidth:520,backgroundColor:"#162231",borderWidth:1,borderColor:"#31506A",borderRadius:8,padding:18},modalHead:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:12},modalTitle:{color:"#fff",fontSize:17,fontWeight:"800"},modalNote:{color:"#BAC7D0",fontSize:10,lineHeight:15,backgroundColor:"#0C1721",padding:10,borderRadius:5,marginBottom:12},fieldLabel:{color:"#C6D3DC",fontSize:10,marginBottom:5,marginTop:8},modalInput:{height:42,borderWidth:1,borderColor:"#36536A",borderRadius:5,backgroundColor:"#08131D",color:"#fff",paddingHorizontal:10},mappingRow:{flexDirection:"row",gap:6,marginTop:10,flexWrap:"wrap"},mapChip:{color:"#C8D4DD",fontSize:9,backgroundColor:"#263A4C",paddingHorizontal:8,paddingVertical:6,borderRadius:4},modalActions:{flexDirection:"row",gap:7,marginTop:12,flexWrap:"wrap"},actionBtn:{height:38,paddingHorizontal:12,borderRadius:5,justifyContent:"center"},btnText:{color:"#fff",fontWeight:"900",fontSize:10},syncText:{color:"#AFC0CB",fontSize:9,marginTop:11},logBox:{height:130,backgroundColor:"#08131D",borderRadius:5,padding:9,marginTop:4},logText:{color:"#B8C8D2",fontSize:8,lineHeight:13},helpText:{color:"#D2DDE4",fontSize:11,lineHeight:18},
   mtOverlay:{...StyleSheet.absoluteFillObject,zIndex:500,backgroundColor:"#05090E"},mtScreen:{flex:1,backgroundColor:"#05090E"},mtTop:{minHeight:58,paddingHorizontal:14,flexDirection:"row",alignItems:"center",justifyContent:"space-between",backgroundColor:"#10202D",borderBottomWidth:1,borderBottomColor:"#28465A"},mtTitle:{color:"#fff",fontSize:15,fontWeight:"900"},iframeWrap:{flex:1},nativeMtFallback:{flex:1,alignItems:"center",justifyContent:"center"},toast:{position:"absolute",bottom:78,left:20,right:20,backgroundColor:"#203A4E",borderRadius:8,padding:9,zIndex:200},toastText:{color:"#fff",textAlign:"center",fontSize:10}
 });
 

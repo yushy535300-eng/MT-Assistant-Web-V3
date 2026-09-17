@@ -1,9 +1,0 @@
-DG SAME SESSION VIEW 修正
-
-1. DG 平台不再用 iframe 重新開啟 dgGameUrl，因此不會建立第二個 DG 登入工作階段。
-2. 直接把 Render 後端已經用來抓牌路的同一個 Chromium 畫面串流回前端。
-3. 滑鼠 / 觸控 / 滾輪 / 基本鍵盤輸入會透過受保護的 /api/dg/browser-input 回送同一個 Chromium。
-4. 關閉 DG 平台畫面只關閉前端視圖，不停止 Chromium、不停止 DG WebSocket、不停止牌路 SSE。
-5. MT 平台維持原本 iframe 行為；MT 牌路、今日輸贏等原功能未改。
-
-注意：DG 畫面使用 Chromium screencast JPEG 串流，目標是保留同一工作階段與互動，不是第二次登入。
