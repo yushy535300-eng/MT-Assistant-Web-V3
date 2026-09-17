@@ -9,5 +9,10 @@ describe("DG foreground frame mirror", () => {
     expect(source).toContain('fetch(\\"/api/dg/proxy/frames\\"');
     expect(source).toContain('app.post("/api/dg/proxy/frames"');
     expect(source).toContain("relay.ingestBridgeFrame(data)");
+    expect(source).toContain('/(?:^|\\/)index\\.html$/i.test(target.pathname)');
+    expect(source).not.toContain('next=scheme+\\"//\\"+location.host+\\"/api/dg/game-ws');
+    const relay = fs.readFileSync(path.resolve(process.cwd(), "server/dg-relay.ts"), "utf8");
+    expect(relay).toContain('this.transportMode = "bridge"');
+    expect(relay).toContain('this.setStatus("connected", "DG 網頁即時封包已接通")');
   });
 });

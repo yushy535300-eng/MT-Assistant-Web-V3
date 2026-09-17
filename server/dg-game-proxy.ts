@@ -62,7 +62,7 @@ function injectProxyHook(html: string, sessionId: string, upstreamOrigin: string
 `const __frames=[];let __frameTimer=0,__flushing=false;\n` +
 `const __flushFrames=async()=>{if(__flushing||!__frames.length)return;__flushing=true;clearTimeout(__frameTimer);__frameTimer=0;const frames=__frames.splice(0,64);try{await fetch(\"/api/dg/proxy/frames\",{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({frames}),keepalive:true});}catch{}finally{__flushing=false;if(__frames.length)__frameTimer=setTimeout(__flushFrames,30);}};\n` +
 `const __mirrorFrame=async value=>{try{let buf;if(value instanceof ArrayBuffer)buf=value;else if(ArrayBuffer.isView(value))buf=value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength);else if(typeof Blob!==\"undefined\"&&value instanceof Blob)buf=await value.arrayBuffer();else return;const bytes=new Uint8Array(buf);let binary=\"\";for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode.apply(null,bytes.subarray(i,i+32768));__frames.push(btoa(binary));if(__frames.length>=32)void __flushFrames();else if(!__frameTimer)__frameTimer=setTimeout(__flushFrames,30);}catch{}};\n` +
-`class MTDGWebSocket extends NativeWS{constructor(url,protocols){const raw=String(url||\"\");let next=raw;if(/^wss?:\\/\\//i.test(raw)){const scheme=location.protocol===\"https:\"?\"wss:\":\"ws:\";next=scheme+\"//\"+location.host+\"/api/dg/game-ws?sessionId=\"+encodeURIComponent(__sid)+\"&target=\"+encodeURIComponent(raw);}if(arguments.length>1)super(next,protocols);else super(next);this.addEventListener(\"message\",event=>{void __mirrorFrame(event.data);});}}\n` +
+`class MTDGWebSocket extends NativeWS{constructor(url,protocols){const raw=String(url||\"\");if(arguments.length>1)super(raw,protocols);else super(raw);this.addEventListener(\"message\",event=>{void __mirrorFrame(event.data);});}}\n` +
 `window.WebSocket=MTDGWebSocket;\n` +
 `const mapHttp=(value)=>{try{const raw=String(value||"");if(!/^https?:\/\//i.test(raw))return value;const u=new URL(raw);return u.origin===__origin?(u.pathname+u.search+u.hash):value;}catch{return value;}};\n` +
 `const nativeFetch=window.fetch;if(nativeFetch){window.fetch=function(input,init){if(typeof input==="string"||input instanceof URL)return nativeFetch.call(this,mapHttp(String(input)),init);return nativeFetch.call(this,input,init);};}\n` +
@@ -309,7 +309,9 @@ export function registerDgGameProxy(options: RegisterOptions) {
         return;
       }
       const contentType = upstream.headers.get("content-type") || "";
-      const isHtml = /text\/html|application\/xhtml\+xml/i.test(contentType);
+      // Some DG gateways return index.html with a non-HTML Content-Type. The
+      // hook is mandatory, so use the requested pathname as an authority too.
+      const isHtml = /text\/html|application\/xhtml\+xml/i.test(contentType) || /(?:^|\/)index\.html$/i.test(target.pathname);
       res.status(upstream.status);
       forwardResponseHeaders(upstream, res, isHtml);
       if (req.method === "HEAD" || upstream.status === 204 || upstream.status === 304 || !upstream.body) return res.end();

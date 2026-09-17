@@ -908,11 +908,19 @@ export class DgRelay {
    */
   enterBridgeMode() {
     if (this.stopped) throw new Error("DG relay 已停止");
-    // Keep the one already-authenticated upstream. The foreground page is a
-    // local view over it and must not authenticate or subscribe a second time.
+    // The real in-app DG page becomes the only vendor WebSocket owner. Its
+    // received binary frames are mirrored back through /api/dg/proxy/frames.
+    // Stop the background socket first so this transition never double-logins.
     this.foregroundBridgeActive = true;
+    this.transportMode = "bridge";
     this.foregroundBridgeSinks.clear();
-    this.log("Bridge｜前景 DG 沿用既有已登入 WebSocket，不重新登入");
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = null;
+    if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
+    if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
+    try { this.ws?.close(); } catch {}
+    this.ws = null;
+    this.setStatus("connecting", "等待 DG 網頁即時封包...");
+    this.log("Bridge｜背景 WebSocket 已停止，前景 DG 網頁接管唯一即時連線");
   }
 
   attachForegroundBridgeSink(sink: (data: Buffer) => void) {
@@ -941,10 +949,8 @@ export class DgRelay {
   }
 
   ingestBridgeFrame(data: Buffer) {
-    // Kept for compatibility with older bridge builds. Foreground proxy mode now
-    // mirrors frames from Chromium instead of creating another vendor socket.
     if (this.stopped || !data?.length) return false;
-    if (this.status !== "connected") this.setStatus("connected", "已連線");
+    if (this.status !== "connected") this.setStatus("connected", "DG 網頁即時封包已接通");
     this.handle(data);
     return true;
   }
@@ -968,7 +974,10 @@ export class DgRelay {
     if (this.stopped || !this.foregroundBridgeActive) return;
     this.foregroundBridgeActive = false;
     this.foregroundBridgeSinks.clear();
-    this.log("Bridge｜已離開前景 DG，原 WebSocket 持續維持牌路");
+    this.transportMode = "raw";
+    this.setStatus("connecting", "正在恢復 DG 背景牌路...");
+    this.log("Bridge｜已離開前景 DG，恢復背景 WebSocket");
+    this.open();
   }
 
   stop() {
