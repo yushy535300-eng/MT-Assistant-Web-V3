@@ -3,13 +3,17 @@ import fs from "node:fs";
 import path from "node:path";
 
 describe("DG foreground multi-socket bridge", () => {
-  it("broadcasts every upstream frame to all DG page sockets", () => {
-    const source = fs.readFileSync(path.resolve(process.cwd(), "server/dg-relay.ts"), "utf8");
+  it("keeps one authenticated upstream and filters duplicate page login", () => {
+    const relay = fs.readFileSync(path.resolve(process.cwd(), "server/dg-relay.ts"), "utf8");
+    const proxy = fs.readFileSync(path.resolve(process.cwd(), "server/dg-game-proxy.ts"), "utf8");
 
-    expect(source).toContain("foregroundBridgeSinks = new Set");
-    expect(source).toContain("for (const sink of this.foregroundBridgeSinks)");
-    expect(source).toContain("this.foregroundBridgeSinks.add(sink)");
-    expect(source).toContain("this.foregroundBridgeSinks.delete(sink)");
-    expect(source).not.toContain("private foregroundBridgeSink:");
+    expect(relay).toContain("bootstrapFrames = new Map");
+    expect(relay).toContain("cmd === 10086 || cmd === 45 || cmd === 2");
+    expect(relay).toContain("this.bootstrapFrames.get(responseCmd)");
+    expect(relay).toContain("return this.ws.sendBinary(data)");
+    expect(relay).not.toContain('this.transportMode = "bridge"');
+    expect(relay).not.toContain("openForegroundSocket(targetUrl: string");
+    expect(proxy).toContain("relay.forwardForegroundFrame(queue[0]!, writeLocal)");
+    expect(proxy).toContain("relay.attachForegroundBridgeSink(writeLocal)");
   });
 });

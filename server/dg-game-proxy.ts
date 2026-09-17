@@ -187,9 +187,9 @@ function handleGameWsUpgrade(req: IncomingMessage, client: Socket, head: Buffer,
   const browserKey = String(req.headers["sec-websocket-key"] || "");
   if (!browserKey) { client.end("HTTP/1.1 400 Bad Request\r\n\r\n"); return; }
 
-  // The foreground browser connects only to this LOCAL socket. DgRelay owns one
-  // lightweight raw vendor WebSocket and both the game page + floating road view
-  // reuse that same upstream session. No Chromium and no second DG login.
+  // This is a local view over the relay's ONE already-authenticated upstream.
+  // Duplicate page bootstrap messages are handled locally by DgRelay; only
+  // actual gameplay operations are allowed through to the vendor socket.
   const response = [
     "HTTP/1.1 101 Switching Protocols",
     "Upgrade: websocket",
@@ -205,13 +205,17 @@ function handleGameWsUpgrade(req: IncomingMessage, client: Socket, head: Buffer,
   const queue: Buffer[] = [];
   let draining = false;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  const writeLocal = (payload: Buffer) => {
+    if (closed || client.destroyed || !payload?.length) return;
+    try { client.write(encodeServerWsFrame(2, payload)); } catch {}
+  };
 
   const drain = async () => {
     if (closed || draining) return;
     draining = true;
     try {
       while (!closed && queue.length) {
-        const ok = await relay.forwardForegroundFrame(queue[0]!);
+        const ok = await relay.forwardForegroundFrame(queue[0]!, writeLocal);
         if (!ok) {
           retryTimer = setTimeout(() => { retryTimer = null; void drain(); }, 120);
           retryTimer.unref?.();
@@ -230,13 +234,8 @@ function handleGameWsUpgrade(req: IncomingMessage, client: Socket, head: Buffer,
     void drain();
   });
 
-  const detach = relay.attachForegroundBridgeSink(payload => {
-    if (closed || client.destroyed || !payload?.length) return;
-    try { client.write(encodeServerWsFrame(2, payload)); } catch {}
-  });
+  const detach = relay.attachForegroundBridgeSink(writeLocal);
 
-  if (head?.length) tap.push(head);
-  client.on("data", chunk => tap.push(chunk));
   const finish = (state: "close" | "error") => {
     if (closed) return;
     closed = true;
@@ -245,6 +244,8 @@ function handleGameWsUpgrade(req: IncomingMessage, client: Socket, head: Buffer,
     relay.bridgeSocketState(state, proxySession.launchUrl);
     try { client.destroy(); } catch {}
   };
+  if (head?.length) tap.push(head);
+  client.on("data", chunk => tap.push(chunk));
   client.on("error", () => finish("error"));
   client.on("close", () => finish("close"));
 }

@@ -538,6 +538,7 @@ export class DgRelay {
   // first and can leave the page repeatedly authenticating/subscribing while
   // the assistant appears connected but its feed stalls.
   private foregroundBridgeSinks = new Set<(data: Buffer) => void>();
+  private bootstrapFrames = new Map<number, Buffer>();
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -748,6 +749,7 @@ export class DgRelay {
     this.touch();
     let bean: PublicBean; try { bean = parsePublicBean(data); } catch { return; }
     const cmd = n(bean.cmd);
+    if (cmd === 10086 || cmd === 2 || cmd === 44) this.bootstrapFrames.set(cmd, Buffer.from(data));
     if (cmd === 10086) {
       if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
       if (n(bean.codeId) !== 0) {
@@ -878,12 +880,11 @@ export class DgRelay {
    */
   enterBridgeMode() {
     if (this.stopped) throw new Error("DG relay 已停止");
-    // The foreground DG page reuses this SAME raw vendor WebSocket. No second
-    // DG login/socket and no Chromium process are created. Inbound frames keep
-    // feeding the road parser and are also mirrored to the foreground page.
+    // Keep the one already-authenticated upstream. The foreground page is a
+    // local view over it and must not authenticate or subscribe a second time.
     this.foregroundBridgeActive = true;
     this.foregroundBridgeSinks.clear();
-    this.log("Bridge｜前景 DG 共用既有輕量 WebSocket 單一 Session");
+    this.log("Bridge｜前景 DG 沿用既有已登入 WebSocket，不重新登入");
   }
 
   attachForegroundBridgeSink(sink: (data: Buffer) => void) {
@@ -892,8 +893,22 @@ export class DgRelay {
     return () => { this.foregroundBridgeSinks.delete(sink); };
   }
 
-  async forwardForegroundFrame(data: Buffer) {
+  async forwardForegroundFrame(data: Buffer, localReply?: (data: Buffer) => void) {
     if (this.stopped || !this.foregroundBridgeActive || !data?.length || !this.ws) return false;
+    try {
+      const cmd = n(parsePublicBean(data).cmd);
+      if (cmd === 10086 || cmd === 45 || cmd === 2 || cmd === 5011 || cmd === 87 || cmd === 24 || cmd === 99) {
+        if (localReply) {
+          const replay = cmd === 10086 ? [10086] : cmd === 2 ? [2, 44] : [];
+          for (const responseCmd of replay) {
+            const cached = this.bootstrapFrames.get(responseCmd);
+            if (cached) { try { localReply(Buffer.from(cached)); } catch {} }
+          }
+        }
+        this.touch();
+        return true;
+      }
+    } catch {}
     return this.ws.sendBinary(data);
   }
 
@@ -925,7 +940,7 @@ export class DgRelay {
     if (this.stopped || !this.foregroundBridgeActive) return;
     this.foregroundBridgeActive = false;
     this.foregroundBridgeSinks.clear();
-    this.log("Bridge｜已離開前景 DG，背景輕量 WebSocket 繼續維持牌路");
+    this.log("Bridge｜已離開前景 DG，原 WebSocket 持續維持牌路");
   }
 
   stop() {
@@ -936,6 +951,7 @@ export class DgRelay {
     this.ws?.close(); this.ws = null;
     this.foregroundBridgeActive = false;
     this.foregroundBridgeSinks.clear();
+    this.bootstrapFrames.clear();
     this.clients.clear();
     this.map.clear();
     this.pendingRoads.clear();
