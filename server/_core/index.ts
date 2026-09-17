@@ -4,11 +4,13 @@ import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { appRouter } from "../routers";
+import { appRouter, hasActiveTrackerSession } from "../routers";
 import { createContext } from "./context";
 import { randomUUID } from "node:crypto";
 import { adminPage } from "../admin-page";
 import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
+import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken, sweepIdleDgRelays } from "../dg-relay";
+import { registerDgGameProxy } from "../dg-game-proxy";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,7 +21,20 @@ async function startServer() {
   app.use(express.json({ limit: "5mb" }));
   app.use(express.urlencoded({ limit: "5mb", extended: true }));
 
-  app.get("/api/health", (_req, res) => res.json({ ok: true, timestamp: Date.now() }));
+  // DG-only foreground same-session proxy. This is intentionally registered
+  // before the app's static catch-all. MT routes / sockets are untouched.
+  registerDgGameProxy({ app, server, hasActiveSession: hasActiveTrackerSession, getRelay: getDgRelay });
+
+  app.get("/api/health", (_req, res) => {
+    const mem=process.memoryUsage();
+    res.json({ ok: true, timestamp: Date.now(), memoryMb: { rss: Math.round(mem.rss/1048576), heapUsed: Math.round(mem.heapUsed/1048576) } });
+  });
+
+  const dgSweepTimer=setInterval(()=>{
+    const result=sweepIdleDgRelays(180000);
+    if(result.stopped)console.log(`[DG cleanup] stopped=${result.stopped} active=${result.active}`);
+  },60000);
+  dgSweepTimer.unref?.();
 
   const adminSessions = new Set<string>();
   const getAdminToken = (req:any) => {
@@ -51,10 +66,126 @@ async function startServer() {
     const token=randomUUID();adminSessions.add(token);res.setHeader("Set-Cookie",`mt_admin_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800${process.env.NODE_ENV==="production"?"; Secure":""}`);adminRedirect(res);
   });
   app.post("/api/admin/logout-form",(req,res)=>{const t=getAdminToken(req);if(t)adminSessions.delete(t);res.setHeader("Set-Cookie",`mt_admin_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV==="production"?"; Secure":""}`);adminRedirect(res)});
-  app.post("/api/admin/whitelist-form",requireAdmin,async(req,res)=>{try{const u=String(req.body?.username||"").trim();if(!u)return adminRedirect(res,"請輸入 TZ 帳號");const d=String(req.body?.days||"permanent");await upsertWhitelist({username:u,permanent:d==="permanent",days:d==="permanent"?null:Number(d),note:String(req.body?.note||"")});adminRedirect(res,`${u} 已新增並立即生效`)}catch(e:any){adminRedirect(res,`新增失敗：${e?.message||e}`)}});
+  app.post("/api/admin/whitelist-form",requireAdmin,async(req,res)=>{try{const u=String(req.body?.username||"").trim();if(!u)return adminRedirect(res,"請輸入平台帳號");const platform=String(req.body?.platform||"TZ").toUpperCase();const d=String(req.body?.days||"permanent");await upsertWhitelist({username:u,platform,permanent:d==="permanent",days:d==="permanent"?null:Number(d),note:String(req.body?.note||"")});adminRedirect(res,`${u} 已新增並立即生效`)}catch(e:any){adminRedirect(res,`新增失敗：${e?.message||e}`)}});
   app.post("/api/admin/whitelist/:id/toggle-form",requireAdmin,async(req,res)=>{try{await setWhitelistEnabled(Number(req.params.id),String(req.body?.enabled)==="1");adminRedirect(res,"授權狀態已更新") }catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
   app.post("/api/admin/whitelist/:id/extend-form",requireAdmin,async(req,res)=>{try{await extendWhitelist(Number(req.params.id),30);adminRedirect(res,"已延長 30 天")}catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
   app.post("/api/admin/whitelist/:id/delete-form",requireAdmin,async(req,res)=>{try{await deleteWhitelist(Number(req.params.id));adminRedirect(res,"帳號已刪除") }catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
+
+  // Compatibility endpoint retained for older clients. Chromium has been removed
+  // from the DG road path, so there is nothing to prewarm anymore.
+  app.post("/api/dg/prewarm", (req,res)=>{
+    const sessionId=String(req.body?.sessionId||"");
+    if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false,error:"session_invalid"});
+    return res.json({ok:true,mode:"lightweight-ws"});
+  });
+
+  // DG relay: the browser keeps its normal TZ/DG login flow, while the server
+  // owns the vendor WebSocket so the required DG Origin header can be preserved.
+  app.post("/api/dg/start", async (req,res)=>{
+    const sessionId=String(req.body?.sessionId||"");
+    const gameUrl=String(req.body?.gameUrl||"");
+    if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false,error:"session_invalid"});
+    let parsed:URL; try{parsed=new URL(gameUrl)}catch{return res.status(400).json({ok:false,error:"invalid_game_url"})}
+    // DG rotates launch domains. Do not pin the relay to one historical
+    // new-dd-cn.* hostname; validate the security properties instead.
+    const host=parsed.hostname.toLowerCase();
+    const looksLocal = host==="localhost" || host.endsWith(".localhost") || host==="0.0.0.0" || host==="::1" || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+    const hasToken=!!parsed.searchParams.get("token");
+    // The DG launch path/domain can rotate between gateways. The relay only
+    // needs a public HTTPS vendor origin plus the one-time token; do not reject
+    // a valid launch URL merely because its path is no longer /ddnewpc/direct1.
+    if(parsed.protocol!=="https:"||looksLocal||!hasToken) return res.status(400).json({ok:false,error:"invalid_game_url"});
+    try{
+      const result=await startDgRelay(sessionId,gameUrl);
+      const status=result.relay.getStatus();
+      if(result.reused) console.log(`[DG API] reuse｜status=${status}｜session=${sessionId.slice(0,8)}`);
+      else console.log(`[DG API] start｜host=${parsed.hostname}｜path=${parsed.pathname}｜session=${sessionId.slice(0,8)}`);
+      return res.json({ok:true,reused:result.reused,status});
+    }
+    catch(e:any){console.error("[DG relay] start failed",e);return res.status(502).json({ok:false,error:e?.message||"dg_start_failed"});}
+  });
+  app.get("/api/dg/stream",(req,res)=>{
+    const sessionId=String(req.query.sessionId||"");
+    if(!hasActiveTrackerSession(sessionId)) return res.status(401).end();
+    const relay=getDgRelay(sessionId); if(!relay) return res.status(404).end();
+    res.status(200);
+    res.setHeader("Content-Type","text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control","no-cache, no-transform");
+    res.setHeader("Connection","keep-alive");
+    res.setHeader("X-Accel-Buffering","no");
+    (res as any).flushHeaders?.();
+    const unsubscribe=relay.subscribe(res);
+    const keepalive=setInterval(()=>{try{res.write(": keepalive\n\n")}catch{}},15000);
+    let cleaned=false;
+    const cleanup=()=>{
+      if(cleaned)return;
+      cleaned=true;
+      clearInterval(keepalive);
+      try{unsubscribe()}catch{}
+    };
+    req.once("close",cleanup);
+    res.once("close",cleanup);
+    res.once("finish",cleanup);
+  });
+  app.post("/api/dg/stop",(req,res)=>{
+    const sessionId=String(req.body?.sessionId||"");
+    // Allow cleanup of an already-created relay even when the tracker session
+    // has just expired/logged out. The opaque session id is still required.
+    if(!hasActiveTrackerSession(sessionId) && !getDgRelay(sessionId)) return res.status(401).json({ok:false});
+    stopDgRelay(sessionId); return res.json({ok:true});
+  });
+
+
+  // DG single-session browser bridge. When the user opens the real DG iframe,
+  // stop the competing Render Chromium transport but keep the SAME relay object,
+  // SSE subscribers and table cache alive. The companion extension mirrors the
+  // foreground DG WebSocket's binary frames into this relay.
+  app.post("/api/dg/bridge/enter", async (req,res)=>{
+    const sessionId=String(req.body?.sessionId||"");
+    if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false,error:"session_invalid"});
+    const relay=getDgRelay(sessionId);
+    if(!relay) return res.status(404).json({ok:false,error:"relay_not_found"});
+    try { relay.enterBridgeMode(); return res.json({ok:true}); }
+    catch(e:any){ return res.status(500).json({ok:false,error:e?.message||"bridge_enter_failed"}); }
+  });
+
+  app.post("/api/dg/bridge/leave", async (req,res)=>{
+    const sessionId=String(req.body?.sessionId||"");
+    if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false,error:"session_invalid"});
+    const relay=getDgRelay(sessionId);
+    if(!relay) return res.status(404).json({ok:false,error:"relay_not_found"});
+    try { await relay.leaveBridgeMode(); return res.json({ok:true}); }
+    catch(e:any){ return res.status(500).json({ok:false,error:e?.message||"bridge_leave_failed"}); }
+  });
+
+  app.post("/api/dg/bridge/status", (req,res)=>{
+    const token=String(req.body?.token||"");
+    const state=String(req.body?.state||"");
+    const pageUrl=String(req.body?.pageUrl||"");
+    const relay=findDgRelayByToken(token);
+    if(!relay) return res.status(404).json({ok:false,error:"bridge_not_active"});
+    if(state!=="open"&&state!=="close"&&state!=="error") return res.status(400).json({ok:false,error:"invalid_state"});
+    relay.bridgeSocketState(state as "open"|"close"|"error",pageUrl);
+    return res.json({ok:true});
+  });
+
+  app.post("/api/dg/bridge/frames", (req,res)=>{
+    const token=String(req.body?.token||"");
+    const relay=findDgRelayByToken(token);
+    if(!relay) return res.status(404).json({ok:false,error:"bridge_not_active"});
+    const frames=Array.isArray(req.body?.frames)?req.body.frames:[];
+    if(!frames.length||frames.length>128) return res.status(400).json({ok:false,error:"invalid_frames"});
+    let accepted=0;
+    for(const raw of frames){
+      if(typeof raw!=="string"||raw.length>2_000_000) continue;
+      try {
+        const data=Buffer.from(raw,"base64");
+        if(!data.length||data.length>1_500_000) continue;
+        if(relay.ingestBridgeFrame(data)) accepted++;
+      } catch {}
+    }
+    return res.json({ok:true,accepted});
+  });
 
   app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
 
