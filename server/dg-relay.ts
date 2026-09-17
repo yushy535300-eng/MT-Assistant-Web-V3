@@ -64,10 +64,21 @@ const HAR_VERIFIED_DG_WS = "wss://newappa0.ywjxi.com";
 const LEGACY_OVERSEAS_DG_WS = "wss://hwdata-new.taxyss.com";
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-function encrypt3Des(plain: string) {
+export function encryptDgToken(plain: string) {
   const cipher = createCipheriv("des-ede3", WS_KEY_24, null);
   cipher.setAutoPadding(true);
   return Buffer.concat([cipher.update(Buffer.from(plain, "utf8")), cipher.final()]).toString("base64");
+}
+
+/**
+ * DG validates the `sign` query against the literal Base64 text produced by
+ * its browser bundle.  Do not pass this value through encodeURIComponent:
+ * the vendor's successful handshake keeps `/`, `+` and the trailing `=`
+ * characters verbatim (confirmed by the 2026-09-17 DG-page HAR).
+ */
+export function signedDgWsUrl(wsUrl: string, token: string) {
+  const base = wsUrl.replace(/\/$/, "");
+  return `${base}/?sign=${encryptDgToken(token)}`;
 }
 
 function extractToken(gameUrl: string) {
@@ -634,7 +645,7 @@ export class DgRelay {
   }
   private tables() { return [...this.map.values()].sort(tableSort); }
   private emitTables() { this.broadcast("tables", this.tables()); }
-  private authToken(cmd: number) { return encrypt3Des(JSON.stringify({ cmd, token: this.token, time: Date.now() })); }
+  private authToken(cmd: number) { return encryptDgToken(JSON.stringify({ cmd, token: this.token, time: Date.now() })); }
   private send(cmd: number, extra: Parameters<typeof encodePublicBean>[2] = {}) { this.ws?.sendBinary(encodePublicBean(cmd, this.authToken(cmd), extra)); }
   private open() {
     if (this.stopped || this.transportMode !== "raw") return;
@@ -643,8 +654,7 @@ export class DgRelay {
     this.origin = activeOrigin;
     this.setStatus("connecting", `連線中 ${endpointName}...`);
     this.log(`嘗試 WSS=${endpointName}｜Origin=${activeOrigin}`);
-    const sign = encrypt3Des(this.token);
-    const url = `${this.wsUrl.replace(/\/$/, "")}/?sign=${encodeURIComponent(sign)}`;
+    const url = signedDgWsUrl(this.wsUrl, this.token);
     this.ws = new RawWsClient(url, this.origin, data => {
       this.handle(data);
       if (this.foregroundBridgeActive && this.foregroundBridgeSink) {
