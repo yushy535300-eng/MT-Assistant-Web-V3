@@ -9,8 +9,9 @@ import { createContext } from "./context";
 import { randomUUID } from "node:crypto";
 import { adminPage } from "../admin-page";
 import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
-import { startDgRelay, getDgRelay, stopDgRelay } from "../dg-relay";
+import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken } from "../dg-relay";
 import { prewarmDgChromium } from "../dg-chromium";
+import { registerDgGameProxy } from "../dg-game-proxy";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,6 +21,10 @@ async function startServer() {
   const server = createServer(app);
   app.use(express.json({ limit: "5mb" }));
   app.use(express.urlencoded({ limit: "5mb", extended: true }));
+
+  // DG-only foreground same-session proxy. This is intentionally registered
+  // before the app's static catch-all. MT routes / sockets are untouched.
+  registerDgGameProxy({ app, server, hasActiveSession: hasActiveTrackerSession, getRelay: getDgRelay });
 
   app.get("/api/health", (_req, res) => res.json({ ok: true, timestamp: Date.now() }));
 
@@ -112,6 +117,58 @@ async function startServer() {
     // has just expired/logged out. The opaque session id is still required.
     if(!hasActiveTrackerSession(sessionId) && !getDgRelay(sessionId)) return res.status(401).json({ok:false});
     stopDgRelay(sessionId); return res.json({ok:true});
+  });
+
+
+  // DG single-session browser bridge. When the user opens the real DG iframe,
+  // stop the competing Render Chromium transport but keep the SAME relay object,
+  // SSE subscribers and table cache alive. The companion extension mirrors the
+  // foreground DG WebSocket's binary frames into this relay.
+  app.post("/api/dg/bridge/enter", async (req,res)=>{
+    const sessionId=String(req.body?.sessionId||"");
+    if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false,error:"session_invalid"});
+    const relay=getDgRelay(sessionId);
+    if(!relay) return res.status(404).json({ok:false,error:"relay_not_found"});
+    try { relay.enterBridgeMode(); return res.json({ok:true}); }
+    catch(e:any){ return res.status(500).json({ok:false,error:e?.message||"bridge_enter_failed"}); }
+  });
+
+  app.post("/api/dg/bridge/leave", async (req,res)=>{
+    const sessionId=String(req.body?.sessionId||"");
+    if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false,error:"session_invalid"});
+    const relay=getDgRelay(sessionId);
+    if(!relay) return res.status(404).json({ok:false,error:"relay_not_found"});
+    try { await relay.leaveBridgeMode(); return res.json({ok:true}); }
+    catch(e:any){ return res.status(500).json({ok:false,error:e?.message||"bridge_leave_failed"}); }
+  });
+
+  app.post("/api/dg/bridge/status", (req,res)=>{
+    const token=String(req.body?.token||"");
+    const state=String(req.body?.state||"");
+    const pageUrl=String(req.body?.pageUrl||"");
+    const relay=findDgRelayByToken(token);
+    if(!relay) return res.status(404).json({ok:false,error:"bridge_not_active"});
+    if(state!=="open"&&state!=="close"&&state!=="error") return res.status(400).json({ok:false,error:"invalid_state"});
+    relay.bridgeSocketState(state as "open"|"close"|"error",pageUrl);
+    return res.json({ok:true});
+  });
+
+  app.post("/api/dg/bridge/frames", (req,res)=>{
+    const token=String(req.body?.token||"");
+    const relay=findDgRelayByToken(token);
+    if(!relay) return res.status(404).json({ok:false,error:"bridge_not_active"});
+    const frames=Array.isArray(req.body?.frames)?req.body.frames:[];
+    if(!frames.length||frames.length>128) return res.status(400).json({ok:false,error:"invalid_frames"});
+    let accepted=0;
+    for(const raw of frames){
+      if(typeof raw!=="string"||raw.length>2_000_000) continue;
+      try {
+        const data=Buffer.from(raw,"base64");
+        if(!data.length||data.length>1_500_000) continue;
+        if(relay.ingestBridgeFrame(data)) accepted++;
+      } catch {}
+    }
+    return res.json({ok:true,accepted});
   });
 
   app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));

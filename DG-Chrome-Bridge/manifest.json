@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "MT Assistant DG Single Session Bridge",
+  "version": "1.0.0",
+  "description": "Mirrors the currently-open DG page WebSocket into MT Assistant so the floating assistant and the real DG game share one session.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://*/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [
+    {
+      "matches": ["https://*/*"],
+      "js": ["dg-hook-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": ["https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}

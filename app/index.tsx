@@ -1106,6 +1106,7 @@ export default function HomeScreen(){
       setDgNeedsRecovery(false);
       dgHasConnectedRef.current=false;
       dgForegroundRecoveryAttemptRef.current=0;
+      dgBridgeActiveRef.current=false;
       suppressDgRecoveryRef.current=false;
       roadConnectBusyRef.current=false;
       setFloatingOpen(false);
@@ -1148,6 +1149,7 @@ export default function HomeScreen(){
   const [dgStatus,setDgStatus]=useState("未連線");
   const [dgGameUrl,setDgGameUrl]=useState("");
   const [dgNeedsRecovery,setDgNeedsRecovery]=useState(false);
+  const dgBridgeActiveRef=useRef(false);
   const [dgConnectEpoch,setDgConnectEpoch]=useState(0);
   const dgHasConnectedRef=useRef(false);
   const dgForegroundRecoveryAttemptRef=useRef(0);
@@ -2274,6 +2276,35 @@ export default function HomeScreen(){
     roadConnectBusyRef.current=false;
   };
 
+  // DG-only same-session web proxy. When the real DG game opens we stop only
+  // the competing Render Chromium transport, then load DG through our same-origin
+  // proxy. The foreground game's own WebSocket is tunneled once and mirrored into
+  // the existing DG relay, so the floating assistant keeps receiving the SAME data.
+  const enterDgSameSessionProxy=async(gameUrl:string)=>{
+    if(!accessSessionId||!gameUrl)return "";
+    try{
+      const r=await fetch("/api/dg/proxy/enter",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId:accessSessionId,gameUrl})});
+      let data:any=null;try{data=await r.json()}catch{}
+      if(!r.ok||!data?.ok||!data?.url)throw new Error(String(data?.error||"DG 單工作階段入口啟動失敗"));
+      dgBridgeActiveRef.current=true;
+      setDgConnected(false);
+      setDgStatus("連線中");
+      setDgNeedsRecovery(false);
+      return String(data.url);
+    }catch(error:any){
+      dgBridgeActiveRef.current=false;
+      throw new Error(error?.message||"DG 單工作階段入口啟動失敗");
+    }
+  };
+
+  const leaveDgSameSessionProxy=async()=>{
+    if(!dgBridgeActiveRef.current||!accessSessionId)return;
+    dgBridgeActiveRef.current=false;
+    setDgConnected(false);
+    setDgStatus("連線中");
+    try{await fetch("/api/dg/proxy/leave",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId:accessSessionId})})}catch{}
+  };
+
   // 一進牌路主頁就自動連 MT / DG，跟舊版一樣。
   // 這裡只負責牌路資料連線；MT平台 / DG平台按鈕仍然是另外的遊戲入口。
   useEffect(()=>{
@@ -2329,7 +2360,7 @@ export default function HomeScreen(){
   // 遊戲開著時不無限互踢；回牌路後再走正式重新授權。
   // 回到牌路主頁後再自動重新授權並恢復。
   useEffect(()=>{
-    if(!accessGranted||walletTransferBusy||!dgNeedsRecovery||suppressDgRecoveryRef.current)return;
+    if(!accessGranted||walletTransferBusy||!dgNeedsRecovery||suppressDgRecoveryRef.current||dgBridgeActiveRef.current)return;
     if(!dgGameUrl)return;
     let cancelled=false;
 
@@ -2449,6 +2480,7 @@ export default function HomeScreen(){
     setDgNeedsRecovery(false);
     dgHasConnectedRef.current=false;
     dgForegroundRecoveryAttemptRef.current=0;
+    dgBridgeActiveRef.current=false;
     suppressDgRecoveryRef.current=false;
     roadConnectBusyRef.current=false;
     // Revoke the server-side app session without awaiting it. The login screen is already active.
@@ -2494,8 +2526,12 @@ export default function HomeScreen(){
         dgForegroundRecoveryAttemptRef.current=0;
         setDgWasOpened(true);
         setDgNeedsRecovery(false);
+        // DG ONLY: switch the existing relay into foreground-proxy mode BEFORE
+        // opening the game. No second DG login/Chromium session is allowed here.
+        // The proxied DG page's one real WebSocket also feeds the floating assistant.
+        const proxyUrl=Platform.OS==="web"?await enterDgSameSessionProxy(url):url;
         setGameViewPlatform("DG");
-        setGameViewUrl(url);
+        setGameViewUrl(proxyUrl||url);
       }
       setHasEnteredGame(true);
       setMtOpen(true);
@@ -2503,6 +2539,12 @@ export default function HomeScreen(){
       notify(error?.message||`取得 ${activePlatform} 平台授權失敗`);
     }finally{setPlatformLaunching(false)}
   };
+  const closeGameView=()=>{
+    const wasDg=gameViewPlatform==="DG";
+    setMtOpen(false);
+    if(wasDg&&dgBridgeActiveRef.current) void leaveDgSameSessionProxy();
+  };
+
   const confirmTransferAll=()=>{
     if(!hasEnteredGame){notify("請先進入 MT 或 DG 平台");return;}
     setWalletTransferOpen(true);
@@ -2804,12 +2846,12 @@ export default function HomeScreen(){
         <Pressable style={s.stopLossAckBtn} onPress={()=>setStopLossAlertOpen(false)}><Text style={s.stopLossAckText}>我知道了</Text></Pressable>
       </View></View></Modal>
 
-      <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>牌路連線中心</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>MT、DG 進入牌路主頁後會自動連線。下列網址只供顯示，使用者無法修改。</Text><View style={s.connectionStatusRow}><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>MT</Text><Text style={[s.connectionStatusText,{color:connected?"#4BD693":"#FFB54D"}]}>{connected?"已連線":"連線中"}</Text></View><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>DG</Text><Text style={[s.connectionStatusText,{color:dgConnected?"#4BD693":"#FFB54D"}]}>{dgConnected?"已連線":"連線中"}</Text></View></View><Text style={s.fieldLabel}>MT 即時牌路 WebSocket（固定）</Text><TextInput value={readonlyConnectionUrl(wsUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>MT 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(mtUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>DG 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(dgGameUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><View style={s.modalActions}><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>void connectRoadDashboard(true)}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.btnText}>重新連線</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#344553"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View></View></View></Modal>
+      <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>牌路連線中心</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>MT、DG 進入牌路主頁後會自動連線。下列網址只供顯示，使用者無法修改。DG 單工作階段：內建</Text><View style={s.connectionStatusRow}><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>MT</Text><Text style={[s.connectionStatusText,{color:connected?"#4BD693":"#FFB54D"}]}>{connected?"已連線":"連線中"}</Text></View><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>DG</Text><Text style={[s.connectionStatusText,{color:dgConnected?"#4BD693":"#FFB54D"}]}>{dgConnected?"已連線":"連線中"}</Text></View></View><Text style={s.fieldLabel}>MT 即時牌路 WebSocket（固定）</Text><TextInput value={readonlyConnectionUrl(wsUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>MT 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(mtUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>DG 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(dgGameUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><View style={s.modalActions}><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>void connectRoadDashboard(true)}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.btnText}>重新連線</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#344553"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View></View></View></Modal>
       <Modal visible={helpOpen} transparent animationType="fade" onRequestClose={()=>setHelpOpen(false)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>說明</Text><Pressable onPress={()=>setHelpOpen(false)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>主頁顯示 15 桌即時牌路。MT 懸浮輔助可左右滑動 3 頁：即時輔助、資金策略、輸贏統計。</Text></View></View></Modal>
       <Modal visible={!!radarDetailTable} transparent animationType="fade" onRequestClose={()=>setRadarDetailId(null)}><View style={s.modalShade}><View style={s.radarDetailModal}><View style={s.modalHead}><View><Text style={s.radarKicker}>MT MATRIX · LIVE ROAD SNAPSHOT</Text><Text style={s.radarDetailTitle}>{radarDetailId} · 第 {radarDetailTable?.round??0} 局</Text></View><Pressable onPress={()=>setRadarDetailId(null)} style={s.radarClose}><MaterialIcons name="close" size={20} color="#DCEEFF"/></Pressable></View>{radarDetailTable?<><View style={s.radarDetailStats}><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前推薦</Text><Text style={[s.radarDetailValue,{color:resultColor(radarDetailDecision.side)}]}>{radarDetailDecision.side}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>信心度</Text><View style={s.radarDetailConfidence}><View style={[s.signalDot,{backgroundColor:confidenceState(radarDetailConfidence).color,shadowColor:confidenceState(radarDetailConfidence).color}]}/><Text style={[s.radarDetailValue,{color:confidenceState(radarDetailConfidence).color,marginTop:0}]}>{confidenceState(radarDetailConfidence).label}</Text></View></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前牌型</Text><Text numberOfLines={1} style={s.radarDetailValue}>{detectPattern(radarDetailTable.results)}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>莊／閒／和</Text><Text style={s.radarDetailValue}>{radarDetailTable.banker}／{radarDetailTable.player}／{radarDetailTable.tie}</Text></View></View><View style={[s.radarRoadWrap,{height:desktop?190:150}]}><RoadGrid table={radarDetailTable} desktop={desktop} transparent/></View><Text style={s.radarDetailNote}>{analysisText(radarDetailTable)}</Text></>:null}</View></View></Modal>
 
       <Modal visible={!!analysisTable} transparent animationType="fade" onRequestClose={()=>setAnalysisTable(null)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>百家樂 {analysisTable?.id} 分析</Text><Pressable onPress={()=>setAnalysisTable(null)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>{analysisText(analysisTable??undefined)}</Text></View></View></Modal>
-      {mtOpen?<View style={s.mtOverlay}><View style={s.mtScreen}><View style={[s.mtTop,gameViewPlatform==="DG"&&s.topbarDg]}><View style={s.brandRow}><View style={[s.brandIcon,gameViewPlatform==="DG"&&s.brandIconDg]}><MatrixMark size={29} brand={gameViewPlatform}/></View><View><Text style={[s.kicker,gameViewPlatform==="DG"&&s.kickerDg]}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>{gameViewPlatform} MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>{gameViewPlatform} MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setMtOpen(false)}><MaterialIcons name="arrow-back" size={16} color="#fff"/><Text style={s.headerBtnText}>回牌路</Text></Pressable></View></View><View style={s.iframeWrap}>{Platform.OS==="web"?createElement("iframe" as any,{src:gameViewUrl,style:{width:"100%",height:"100%",border:"0",background:"#000"},allow:"clipboard-read; clipboard-write; fullscreen"}):<View style={s.nativeMtFallback}><Text style={s.helpText}>目前原生模式請使用外部瀏覽器開啟目前平台。</Text></View>}</View></View></View>:null}
+      {mtOpen?<View style={s.mtOverlay}><View style={s.mtScreen}><View style={[s.mtTop,gameViewPlatform==="DG"&&s.topbarDg]}><View style={s.brandRow}><View style={[s.brandIcon,gameViewPlatform==="DG"&&s.brandIconDg]}><MatrixMark size={29} brand={gameViewPlatform}/></View><View><Text style={[s.kicker,gameViewPlatform==="DG"&&s.kickerDg]}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>{gameViewPlatform} MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>{gameViewPlatform} MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={closeGameView}><MaterialIcons name="arrow-back" size={16} color="#fff"/><Text style={s.headerBtnText}>回牌路</Text></Pressable></View></View><View style={s.iframeWrap}>{Platform.OS==="web"?createElement("iframe" as any,{src:gameViewUrl,style:{width:"100%",height:"100%",border:"0",background:"#000"},allow:"clipboard-read; clipboard-write; fullscreen"}):<View style={s.nativeMtFallback}><Text style={s.helpText}>目前原生模式請使用外部瀏覽器開啟目前平台。</Text></View>}</View></View></View>:null}
       {MultiTableRadar({insideMt:mtOpen})}
       {FloatingAssistant({insideMt:mtOpen})}
       {V38Calculator({insideMt:mtOpen})}

@@ -491,7 +491,7 @@ export class DgRelay {
   private jsonType = 0;
   private ws: RawWsClient | null = null;
   private chromium: DgChromiumTransport | null = null;
-  private transportMode: "raw" | "browser" = "raw";
+  private transportMode: "raw" | "browser" | "bridge" = "raw";
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -536,6 +536,7 @@ export class DgRelay {
         gameUrl: this.gameUrl,
         onLog: message => this.log(`Chromium｜${message}`),
         onMainUrl: url => {
+          if (this.stopped || this.transportMode !== "browser") return;
           try {
             const parsed = new URL(url);
             this.launchUrl = parsed.toString();
@@ -547,13 +548,14 @@ export class DgRelay {
           } catch {}
         },
         onHandshake: (url, status) => {
+          if (this.stopped || this.transportMode !== "browser") return;
           if (status !== 101) return;
           this.wsUrl = url;
           this.setStatus("connecting", "Chromium WebSocket 101，正在等待 DG 驗證...");
         },
-        onBinary: data => this.handle(data),
+        onBinary: data => { if (!this.stopped && this.transportMode === "browser") this.handle(data); },
         onFailure: message => {
-          if (this.stopped) return;
+          if (this.stopped || this.transportMode !== "browser") return;
           this.setStatus("error", message);
           this.log(`Chromium｜${message}`);
         },
@@ -642,7 +644,7 @@ export class DgRelay {
   private authToken(cmd: number) { return encrypt3Des(JSON.stringify({ cmd, token: this.token, time: Date.now() })); }
   private send(cmd: number, extra: Parameters<typeof encodePublicBean>[2] = {}) { this.ws?.sendBinary(encodePublicBean(cmd, this.authToken(cmd), extra)); }
   private open() {
-    if (this.stopped) return;
+    if (this.stopped || this.transportMode !== "raw") return;
     let endpointName = this.wsUrl; try { endpointName = new URL(this.wsUrl).hostname; } catch {}
     const activeOrigin = this.originCandidates[this.originCandidateIndex] || this.origin;
     this.origin = activeOrigin;
@@ -662,7 +664,7 @@ export class DgRelay {
         this.ws?.abort("DG 驗證回應逾時");
       }, 6500);
     }, why => {
-      if (this.stopped) return;
+      if (this.stopped || this.transportMode !== "raw") return;
       if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
       if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
       const reason = String(why || "closed");
@@ -719,7 +721,7 @@ export class DgRelay {
     this.ws.connect();
   }
   private requestVideos() {
-    if (this.transportMode === "browser") return;
+    if (this.transportMode !== "raw") return;
     const baccarat = this.tables().filter(t => /^BAC\d+/i.test(t.apiId) || /^TID\d+/i.test(t.apiId));
     baccarat.forEach((t, idx) => {
       const tableId = Number(t.tableBadge); if (!tableId || this.initialVideoRequested.has(tableId)) return;
@@ -734,9 +736,9 @@ export class DgRelay {
       if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
       if (n(bean.codeId) !== 0) {
         const reason = `DG 驗證失敗 (${bean.codeId})`;
-        if (this.transportMode === "browser") {
+        if (this.transportMode === "browser" || this.transportMode === "bridge") {
           this.setStatus("error", reason);
-          this.log(`Chromium｜${reason}`);
+          this.log(`${this.transportMode === "bridge" ? "Bridge" : "Chromium"}｜${reason}`);
           return;
         }
         this.wsFailuresThisCycle += 1;
@@ -848,6 +850,67 @@ export class DgRelay {
       }
     }
   }
+  matchesToken(token: string) {
+    return !!token && token === this.token;
+  }
+
+  /**
+   * Switch the existing relay object to browser-bridge mode without destroying
+   * SSE subscribers or the last table snapshot. The real DG iframe becomes the
+   * ONLY DG session; its already-received binary frames are mirrored back here
+   * by the companion Chrome extension.
+   */
+  enterBridgeMode() {
+    if (this.stopped) throw new Error("DG relay 已停止");
+    this.transportMode = "bridge";
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = null;
+    if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
+    if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
+    try { this.ws?.close(); } catch {}
+    this.ws = null;
+    try { this.chromium?.stop(); } catch {}
+    this.chromium = null;
+    this.setStatus("connecting", "連線中");
+    this.log("Bridge｜已停止背景 Chromium，等待真正 DG 頁面接管單一 Session");
+  }
+
+  ingestBridgeFrame(data: Buffer) {
+    if (this.stopped || this.transportMode !== "bridge" || !data?.length) return false;
+    // The extension can attach after DG has already completed cmd=10086. The
+    // first valid server frame is therefore enough to mark the bridge alive.
+    if (this.status !== "connected") this.setStatus("connected", "已連線");
+    this.handle(data);
+    return true;
+  }
+
+  bridgeSocketState(state: "open" | "close" | "error", pageUrl?: string) {
+    if (this.stopped || this.transportMode !== "bridge") return;
+    if (pageUrl) {
+      try {
+        const u = new URL(pageUrl);
+        this.launchUrl = u.toString();
+        this.origin = u.origin;
+      } catch {}
+    }
+    if (state === "open") {
+      this.setStatus("connecting", "連線中");
+      this.log("Bridge｜真正 DG WebSocket 已開啟");
+    } else {
+      // Keep the last roads visible. Do not start a competing background login
+      // while the foreground DG page is still the active session.
+      this.setStatus("connecting", "連線中");
+      this.log(`Bridge｜真正 DG WebSocket ${state === "close" ? "已關閉" : "發生錯誤"}`);
+    }
+  }
+
+  async leaveBridgeMode() {
+    if (this.stopped || this.transportMode !== "bridge") return;
+    this.setStatus("connecting", "連線中");
+    this.log("Bridge｜已離開 DG 遊戲，恢復背景牌路連線");
+    // start() first attempts Chromium again and only falls back to raw WSS.
+    await this.start();
+  }
+
   stop() {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = null;
@@ -900,4 +963,11 @@ export function stopDgRelay(sessionId: string) {
   if (r) r.stop();
   relays.delete(sessionId);
   relayStarts.delete(sessionId);
+}
+
+export function findDgRelayByToken(token: string) {
+  const clean = String(token || "").trim();
+  if (!clean) return null;
+  for (const relay of relays.values()) if (relay.matchesToken(clean)) return relay;
+  return null;
 }
