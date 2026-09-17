@@ -539,6 +539,7 @@ export class DgRelay {
   // the assistant appears connected but its feed stalls.
   private foregroundBridgeSinks = new Set<(data: Buffer) => void>();
   private bootstrapFrames = new Map<number, Buffer>();
+  private videoFrames = new Map<number, Buffer>();
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -759,6 +760,7 @@ export class DgRelay {
     let bean: PublicBean; try { bean = parsePublicBean(data); } catch { return; }
     const cmd = n(bean.cmd);
     if (cmd === 10086 || cmd === 2 || cmd === 44) this.bootstrapFrames.set(cmd, Buffer.from(data));
+    if (cmd === 29 && bean.tableId) this.videoFrames.set(n(bean.tableId), Buffer.from(data));
     if (cmd === 10086) {
       if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
       if (n(bean.codeId) !== 0) {
@@ -925,11 +927,21 @@ export class DgRelay {
     if (this.stopped || !this.foregroundBridgeActive || !data?.length || !this.ws) return false;
     try {
       const cmd = n(parsePublicBean(data).cmd);
-      if (cmd === 10086 || cmd === 45 || cmd === 2 || cmd === 5011 || cmd === 87 || cmd === 24 || cmd === 99) {
+      // Captured DG page startup/enter-table controls. None of these are bets.
+      // Letting 29/19/4/44/9 reach the already-subscribed background socket
+      // changes it from lobby feed state into one-table game state and starves
+      // the assistant even though the WebSocket itself remains open.
+      if (cmd === 10086 || cmd === 45 || cmd === 2 || cmd === 5011 || cmd === 87 || cmd === 24 || cmd === 99 ||
+          cmd === 29 || cmd === 19 || cmd === 4 || cmd === 44 || cmd === 9) {
         if (localReply) {
           const replay = cmd === 10086 ? [10086] : cmd === 2 ? [2, 44] : [];
           for (const responseCmd of replay) {
             const cached = this.bootstrapFrames.get(responseCmd);
+            if (cached) { try { localReply(Buffer.from(cached)); } catch {} }
+          }
+          if (cmd === 29) {
+            const request = parsePublicBean(data);
+            const cached = request.tableId ? this.videoFrames.get(n(request.tableId)) : undefined;
             if (cached) { try { localReply(Buffer.from(cached)); } catch {} }
           }
         }
@@ -980,6 +992,7 @@ export class DgRelay {
     this.foregroundBridgeActive = false;
     this.foregroundBridgeSinks.clear();
     this.bootstrapFrames.clear();
+    this.videoFrames.clear();
     this.clients.clear();
     this.map.clear();
     this.pendingRoads.clear();
