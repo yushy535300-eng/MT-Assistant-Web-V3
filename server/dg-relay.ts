@@ -550,6 +550,9 @@ export class DgRelay {
   private initialVideoRequested = new Set<number>();
   private firstTableLogged = false;
   private lastActivityAt = Date.now();
+  private lastVendorPacketAt = Date.now();
+  private lastSubscriptionRecoveryAt = 0;
+  private feedStale = false;
   // DG may push cmd=1004 (full road list) before the initial table snapshot.
   // Keep that newest road list temporarily instead of dropping it; otherwise
   // the UI can be exactly one hand behind DG at startup.
@@ -747,6 +750,12 @@ export class DgRelay {
   }
   private handle(data: Buffer) {
     this.touch();
+    this.lastVendorPacketAt = Date.now();
+    if (this.feedStale) {
+      this.feedStale = false;
+      this.setStatus("connected", "DG 即時資料已恢復");
+      this.log("即時封包已恢復");
+    }
     let bean: PublicBean; try { bean = parsePublicBean(data); } catch { return; }
     const cmd = n(bean.cmd);
     if (cmd === 10086 || cmd === 2 || cmd === 44) this.bootstrapFrames.set(cmd, Buffer.from(data));
@@ -801,7 +810,26 @@ export class DgRelay {
         setTimeout(() => { if (!this.stopped) this.send(87, { type: 1 }); }, 80);
         setTimeout(() => { if (!this.stopped) this.send(24, { type: 2 }); }, 120);
         if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
-        this.keepaliveTimer = setInterval(() => { if (!this.stopped) this.send(99); }, 20000);
+        // DG's captured native page sends cmd=99 every 3 seconds. A 20-second
+        // interval can leave the TCP/WebSocket open while the vendor silently
+        // stops live table pushes, producing a false "DG LIVE" stale screen.
+        this.keepaliveTimer = setInterval(() => {
+          if (this.stopped) return;
+          this.send(99);
+          const now = Date.now();
+          if (now - this.lastVendorPacketAt <= 9000 || now - this.lastSubscriptionRecoveryAt <= 9000) return;
+          this.lastSubscriptionRecoveryAt = now;
+          this.feedStale = true;
+          this.setStatus("connecting", "DG 即時資料逾時，正在原連線恢復...");
+          // Recover subscriptions on the SAME authenticated socket. Never send
+          // cmd=10086 here and never create a second DG login/session.
+          this.send(45, { type: 1 });
+          this.send(2, { lobbyId: 5, type: 0 });
+          this.send(5011, { type: 0 });
+          this.send(87, { type: 1 });
+          this.send(24, { type: 2 });
+          this.log("即時封包逾時 9 秒，已在原連線重送牌路訂閱（未重新登入）");
+        }, 3000);
       }
     }
     if (cmd === 29 && bean.tableId && bean.object && /^https?:\/\//i.test(bean.object)) {
