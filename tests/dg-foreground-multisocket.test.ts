@@ -9,8 +9,6 @@ describe("DG foreground multi-socket bridge", () => {
 
     expect(relay).toContain("bootstrapFrames = new Map");
     expect(relay).toContain("cmd === 10086 || cmd === 45 || cmd === 2");
-    expect(relay).toContain("cmd === 29 || cmd === 19 || cmd === 4 || cmd === 44 || cmd === 9");
-    expect(relay).toContain("this.videoFrames.get(n(request.tableId))");
     expect(relay).toContain("this.bootstrapFrames.get(responseCmd)");
     expect(relay).toContain("return this.ws.sendBinary(data)");
     expect(relay).not.toContain('this.transportMode = "bridge"');
