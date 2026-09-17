@@ -59,7 +59,10 @@ function injectProxyHook(html: string, sessionId: string, upstreamOrigin: string
 `const NativeWS=window.WebSocket;\n` +
 `if(!NativeWS||window.__MT_DG_PROXY_WS__)return;\n` +
 `window.__MT_DG_PROXY_WS__=true;\n` +
-`class MTDGWebSocket extends NativeWS{constructor(url,protocols){const raw=String(url||\"\");let next=raw;if(/^wss?:\\/\\//i.test(raw)){const scheme=location.protocol===\"https:\"?\"wss:\":\"ws:\";next=scheme+\"//\"+location.host+\"/api/dg/game-ws?sessionId=\"+encodeURIComponent(__sid)+\"&target=\"+encodeURIComponent(raw);}if(arguments.length>1)super(next,protocols);else super(next);}}\n` +
+`const __frames=[];let __frameTimer=0,__flushing=false;\n` +
+`const __flushFrames=async()=>{if(__flushing||!__frames.length)return;__flushing=true;clearTimeout(__frameTimer);__frameTimer=0;const frames=__frames.splice(0,64);try{await fetch(\"/api/dg/proxy/frames\",{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({frames}),keepalive:true});}catch{}finally{__flushing=false;if(__frames.length)__frameTimer=setTimeout(__flushFrames,30);}};\n` +
+`const __mirrorFrame=async value=>{try{let buf;if(value instanceof ArrayBuffer)buf=value;else if(ArrayBuffer.isView(value))buf=value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength);else if(typeof Blob!==\"undefined\"&&value instanceof Blob)buf=await value.arrayBuffer();else return;const bytes=new Uint8Array(buf);let binary=\"\";for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode.apply(null,bytes.subarray(i,i+32768));__frames.push(btoa(binary));if(__frames.length>=32)void __flushFrames();else if(!__frameTimer)__frameTimer=setTimeout(__flushFrames,30);}catch{}};\n` +
+`class MTDGWebSocket extends NativeWS{constructor(url,protocols){const raw=String(url||\"\");let next=raw;if(/^wss?:\\/\\//i.test(raw)){const scheme=location.protocol===\"https:\"?\"wss:\":\"ws:\";next=scheme+\"//\"+location.host+\"/api/dg/game-ws?sessionId=\"+encodeURIComponent(__sid)+\"&target=\"+encodeURIComponent(raw);}if(arguments.length>1)super(next,protocols);else super(next);this.addEventListener(\"message\",event=>{void __mirrorFrame(event.data);});}}\n` +
 `window.WebSocket=MTDGWebSocket;\n` +
 `const mapHttp=(value)=>{try{const raw=String(value||"");if(!/^https?:\/\//i.test(raw))return value;const u=new URL(raw);return u.origin===__origin?(u.pathname+u.search+u.hash):value;}catch{return value;}};\n` +
 `const nativeFetch=window.fetch;if(nativeFetch){window.fetch=function(input,init){if(typeof input==="string"||input instanceof URL)return nativeFetch.call(this,mapHttp(String(input)),init);return nativeFetch.call(this,input,init);};}\n` +
@@ -253,6 +256,27 @@ function handleGameWsUpgrade(req: IncomingMessage, client: Socket, head: Buffer,
 export function registerDgGameProxy(options: RegisterOptions) {
   const { app, server, hasActiveSession, getRelay } = options;
 
+  // Mirror the binary frames received by the actual DG page into the existing
+  // relay. This does not create or authenticate another DG WebSocket.
+  app.post("/api/dg/proxy/frames", (req: Request, res: Response) => {
+    const session = sessionFromRequest(req);
+    if (!session || !hasActiveSession(session.sessionId)) return res.status(401).json({ ok: false, error: "session_invalid" });
+    const relay = getRelay(session.sessionId);
+    if (!relay) return res.status(404).json({ ok: false, error: "relay_not_found" });
+    const frames = Array.isArray(req.body?.frames) ? req.body.frames : [];
+    if (!frames.length || frames.length > 64) return res.status(400).json({ ok: false, error: "invalid_frames" });
+    let accepted = 0;
+    for (const raw of frames) {
+      if (typeof raw !== "string" || raw.length > 2_000_000) continue;
+      try {
+        const data = Buffer.from(raw, "base64");
+        if (!data.length || data.length > 1_500_000) continue;
+        if (relay.ingestBridgeFrame(data)) accepted++;
+      } catch {}
+    }
+    return res.json({ ok: true, accepted });
+  });
+
   // These paths mirror DG's own same-origin layout. Register them BEFORE the
   // normal JSON/body parsers and app static handler, so the foreground game can
   // run as a first-party iframe without any browser extension.
@@ -303,6 +327,7 @@ export function registerDgGameProxy(options: RegisterOptions) {
   };
 
   app.use("/ddnewpc", proxyHandler);
+  app.use("/ddnewwap", proxyHandler);
   app.use("/static", proxyHandler);
   app.use("/vd", proxyHandler);
   app.use("/apidata", proxyHandler);
