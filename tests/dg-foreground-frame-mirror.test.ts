@@ -7,6 +7,8 @@ describe("DG foreground frame mirror", () => {
     const source = fs.readFileSync(path.resolve(process.cwd(), "server/dg-game-proxy.ts"), "utf8");
     expect(source).toContain('this.addEventListener(\\"message\\",event=>{void __mirrorFrame(event.data);})');
     expect(source).toContain('fetch(\\"/api/dg/proxy/frames\\"');
+    expect(source).toContain('raw.startsWith("http://")||raw.startsWith("https://")');
+    expect(source).not.toContain('/^https?:\\/\\//i.test(raw)');
     expect(source).toContain('app.post("/api/dg/proxy/frames"');
     expect(source).toContain("relay.ingestBridgeFrame(data)");
     expect(source).toContain('/(?:^|\\/)index\\.html$/i.test(target.pathname)');
