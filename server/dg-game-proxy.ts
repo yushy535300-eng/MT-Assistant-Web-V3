@@ -187,9 +187,9 @@ function handleGameWsUpgrade(req: IncomingMessage, client: Socket, head: Buffer,
   const browserKey = String(req.headers["sec-websocket-key"] || "");
   if (!browserKey) { client.end("HTTP/1.1 400 Bad Request\r\n\r\n"); return; }
 
-  // The foreground browser connects only to this LOCAL socket. There is no
-  // Render -> DG raw TLS socket here. The one accepted upstream vendor socket
-  // remains the existing Chromium WebSocket owned by DgRelay.
+  // The foreground browser connects only to this LOCAL socket. DgRelay owns one
+  // lightweight raw vendor WebSocket and both the game page + floating road view
+  // reuse that same upstream session. No Chromium and no second DG login.
   const response = [
     "HTTP/1.1 101 Switching Protocols",
     "Upgrade: websocket",
@@ -199,7 +199,7 @@ function handleGameWsUpgrade(req: IncomingMessage, client: Socket, head: Buffer,
   ].join("\r\n");
   client.write(response);
   relay.bridgeSocketState("open", proxySession.launchUrl);
-  console.log(`[DG proxy] foreground local WS 101｜upstream=Chromium-single-session｜session=${sessionId.slice(0,8)}`);
+  console.log(`[DG proxy] foreground local WS 101｜upstream=lightweight-single-session｜session=${sessionId.slice(0,8)}`);
 
   let closed = false;
   const queue: Buffer[] = [];

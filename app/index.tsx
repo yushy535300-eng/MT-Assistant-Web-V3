@@ -414,11 +414,6 @@ function DealerLiveVideo({table,enabled,connected}:{table:TableData;enabled:bool
       const p=playerRef.current;playerRef.current=null;
       if(p){try{p.pause?.()}catch{};try{p.unload?.()}catch{};try{p.detachMediaElement?.()}catch{};try{p.destroy?.()}catch{}}
     };
-    const scheduleRetry=(delay:number)=>{
-      if(disposed)return;
-      if(retryRef.current)clearTimeout(retryRef.current);
-      retryRef.current=setTimeout(()=>{retryRef.current=null;void start()},delay);
-    };
     const start=async()=>{
       try{
         const mpegts=await ensureMpegTs();
@@ -436,7 +431,7 @@ function DealerLiveVideo({table,enabled,connected}:{table:TableData;enabled:bool
         if(mpegts.Events?.ERROR)player.on(mpegts.Events.ERROR,()=>{
           if(disposed)return;
           setPlaying(false);destroy();
-          scheduleRetry(1800);
+          retryRef.current=setTimeout(start,1800);
         });
         video.onplaying=()=>{if(!disposed)setPlaying(true)};
         video.onstalled=()=>{if(!disposed)setPlaying(false)};
@@ -444,7 +439,7 @@ function DealerLiveVideo({table,enabled,connected}:{table:TableData;enabled:bool
         player.load();
         Promise.resolve(player.play()).catch(()=>undefined);
       }catch{
-        if(!disposed)scheduleRetry(2200);
+        if(!disposed)retryRef.current=setTimeout(start,2200);
       }
     };
     start();
@@ -1048,33 +1043,6 @@ function parseDgV38Poker(table:DgTableData):V38PokerState|null{
   }catch{return null}
 }
 
-
-function mergeStableTableSnapshots(previous: TableData[], incoming: TableData[]): TableData[] {
-  if (!Array.isArray(incoming)) return previous;
-  const prevById = new Map(previous.map(t => [String(t.apiId ?? t.id), t]));
-  let changed = previous.length !== incoming.length;
-  const next = incoming.map(raw => {
-    const id = String(raw?.apiId ?? raw?.id ?? "");
-    const old = prevById.get(id);
-    if (!old) { changed = true; return raw; }
-    const oldResults = Array.isArray(old.results) ? old.results : [];
-    const newResults = Array.isArray(raw?.results) ? raw.results : [];
-    const same =
-      old.name === raw.name && old.players === raw.players && old.countdown === raw.countdown &&
-      old.countdownUpdatedAt === raw.countdownUpdatedAt && old.roomId === raw.roomId &&
-      old.tableBadge === raw.tableBadge && old.shoe === raw.shoe && old.round === raw.round &&
-      old.banker === raw.banker && old.player === raw.player && old.tie === raw.tie &&
-      old.live === raw.live && old.dealerPhoto === raw.dealerPhoto && old.streamUrl === raw.streamUrl &&
-      old.poker === raw.poker && old.lastResultKey === raw.lastResultKey &&
-      oldResults.length === newResults.length && oldResults.every((v, i) => v === newResults[i]);
-    if (same) return old;
-    changed = true;
-    return raw;
-  });
-  if (!changed && previous.every((v, i) => v === next[i])) return previous;
-  return next;
-}
-
 export default function HomeScreen(){
   const {width,height}=useWindowDimensions();
   const desktop=width>=1000;
@@ -1143,6 +1111,7 @@ export default function HomeScreen(){
       roadConnectBusyRef.current=false;
       setFloatingOpen(false);
       setMtOpen(false);
+      setInsideMt(false);
       currentBalanceRef.current=null;
       setCurrentBalance(null);
       setStopLossOpen(false);
@@ -2275,11 +2244,6 @@ export default function HomeScreen(){
       if(!connected)setConnected(false);
       if(!dgConnected)setDgStatus("連線中");
     }
-    // Chromium 先預熱，但不等待它完成；MT / DG 授權同步取得，縮短主頁等待時間。
-    void fetch("/api/dg/prewarm",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({sessionId:accessSessionId}),
-    }).catch(()=>undefined);
     const needMt=force||!lockedMtUrlRef.current||!connected;
     const needDg=force||!dgGameUrl||!dgConnected;
     const [mtResult,dgResult]=await Promise.allSettled([
@@ -2353,7 +2317,7 @@ export default function HomeScreen(){
     setDgConnected(false);
     setDgStatus("連線中");
     connectDgLive(dgGameUrl,accessSessionId,{
-      onTables:(next:DgTableData[])=>{if(!cancelled)setDgTables(prev=>mergeStableTableSnapshots(prev,next as TableData[]))},
+      onTables:(next:DgTableData[])=>{if(!cancelled)setDgTables(next as TableData[])},
       onStatus:(status,message)=>{
         if(cancelled)return;
         const online=status==="connected";
@@ -2497,6 +2461,7 @@ export default function HomeScreen(){
     setAnalysisTable(null);
     setFloatingOpen(false);
     setMtOpen(false);
+    setInsideMt(false);
     resetStopLossForLogout();
     setToken("");
     setMtUrl("");
@@ -2852,7 +2817,7 @@ export default function HomeScreen(){
   return <ScreenContainer edges={["top","left","right","bottom"]} containerClassName="bg-[#080E17]" className="bg-[#080E17]">
     <View style={[s.screen,activePlatform==="DG"&&s.screenDg,desktop&&Platform.OS==="web"?s.screenDesktopZoom:null]}>
       <View style={[s.topbar,!desktop?s.topbarMobile:null,activePlatform==="DG"&&s.topbarDg]}><View style={s.brandRow}><View style={[s.brandIcon,activePlatform==="DG"&&s.brandIconDg]}><MatrixMark size={29} brand={activePlatform}/></View><View><Text style={[s.kicker,activePlatform==="DG"&&s.kickerDg]}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>{activePlatform} MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={logoutSession}><MaterialIcons name="logout" size={16} color="#fff"/><Text style={s.headerBtnText}>登出</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setConnectionOpen(true)}><MaterialIcons name="settings" size={16} color="#fff"/><Text style={s.headerBtnText}>連線</Text></Pressable></View></View>
-      {!mtOpen?<ScrollView contentContainerStyle={s.content}><View style={[s.overview,!desktop&&s.overviewMobile,activePlatform==="DG"&&s.overviewDg]}><View style={!desktop?s.overviewTextMobile:undefined}><Text style={[s.overKicker,activePlatform==="DG"&&s.overKickerDg]}>REAL-TIME MONITORING</Text><Text style={s.overTitle}>LIVE TABLE MATRIX</Text><Text style={s.overSub}>{activePlatform==="DG"?"DG 真人桌況 · 黑金牌路 · 荷官同步":"即時桌況 · 牌路分析 · 荷官同步"}</Text></View><View style={[s.overStats,!desktop&&s.overStatsMobile]}><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>連線狀態</Text><Text style={[s.overValue,{color:activeConnected?"#4BD693":"#FFB54D"}]}>{activeConnected?"已連線":"連線中"}</Text></View><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>平台 · 可用 {availableTableCount} 桌</Text><View style={s.platformSwitch}><Pressable onPress={()=>setActivePlatform("MT")} style={[s.platformTab,activePlatform==="MT"&&s.platformTabMtActive]}><Text style={[s.platformTabText,activePlatform==="MT"&&s.platformTabTextActive]}>MT</Text></Pressable><Pressable onPress={()=>setActivePlatform("DG")} style={[s.platformTab,activePlatform==="DG"&&s.platformTabDgActive]}><Text style={[s.platformTabText,activePlatform==="DG"&&s.platformTabTextDgActive]}>DG</Text></Pressable><Pressable disabled={!hasEnteredGame||walletTransferBusy} onPress={confirmTransferAll} style={[s.walletReturnBtn,(!hasEnteredGame||walletTransferBusy)&&s.walletReturnBtnDisabled]}><MaterialIcons name="account-balance-wallet" size={13} color={hasEnteredGame?"#FFF1C6":"#71808B"}/><Text style={[s.walletReturnText,!hasEnteredGame&&s.walletReturnTextDisabled]}>{walletTransferBusy?"轉回中":"一鍵轉回"}</Text></Pressable></View></View></View></View><View style={s.listHead}><Text style={s.listTitle}>所有房型</Text><Text style={s.listHint}>{activePlatform} · 歷史牌局 · 即時更新 · 荷官同步</Text></View><View style={[s.cardsGrid,desktop&&s.cardsGridDesktop,desktop&&s.cardsGridDesktopCentered]}>{tables.map(t=><View key={t.apiId} style={desktop?s.cardWrapDesktop:s.cardWrap}><MemoTableCard table={t} desktop={desktop} onAction={stableTableAction} connected={activeConnected} platform={activePlatform}/></View>)}</View></ScrollView>:null}
+      <ScrollView contentContainerStyle={s.content}><View style={[s.overview,!desktop&&s.overviewMobile,activePlatform==="DG"&&s.overviewDg]}><View style={!desktop?s.overviewTextMobile:undefined}><Text style={[s.overKicker,activePlatform==="DG"&&s.overKickerDg]}>REAL-TIME MONITORING</Text><Text style={s.overTitle}>LIVE TABLE MATRIX</Text><Text style={s.overSub}>{activePlatform==="DG"?"DG 真人桌況 · 黑金牌路 · 荷官同步":"即時桌況 · 牌路分析 · 荷官同步"}</Text></View><View style={[s.overStats,!desktop&&s.overStatsMobile]}><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>連線狀態</Text><Text style={[s.overValue,{color:activeConnected?"#4BD693":"#FFB54D"}]}>{activeConnected?"已連線":"連線中"}</Text></View><View style={[s.overStat,!desktop&&s.overStatMobile,activePlatform==="DG"&&s.overStatDg]}><Text style={s.smallLabel}>平台 · 可用 {availableTableCount} 桌</Text><View style={s.platformSwitch}><Pressable onPress={()=>setActivePlatform("MT")} style={[s.platformTab,activePlatform==="MT"&&s.platformTabMtActive]}><Text style={[s.platformTabText,activePlatform==="MT"&&s.platformTabTextActive]}>MT</Text></Pressable><Pressable onPress={()=>setActivePlatform("DG")} style={[s.platformTab,activePlatform==="DG"&&s.platformTabDgActive]}><Text style={[s.platformTabText,activePlatform==="DG"&&s.platformTabTextDgActive]}>DG</Text></Pressable><Pressable disabled={!hasEnteredGame||walletTransferBusy} onPress={confirmTransferAll} style={[s.walletReturnBtn,(!hasEnteredGame||walletTransferBusy)&&s.walletReturnBtnDisabled]}><MaterialIcons name="account-balance-wallet" size={13} color={hasEnteredGame?"#FFF1C6":"#71808B"}/><Text style={[s.walletReturnText,!hasEnteredGame&&s.walletReturnTextDisabled]}>{walletTransferBusy?"轉回中":"一鍵轉回"}</Text></Pressable></View></View></View></View><View style={s.listHead}><Text style={s.listTitle}>所有房型</Text><Text style={s.listHint}>{activePlatform} · 歷史牌局 · 即時更新 · 荷官同步</Text></View><View style={[s.cardsGrid,desktop&&s.cardsGridDesktop,desktop&&s.cardsGridDesktopCentered]}>{tables.map(t=><View key={t.apiId} style={desktop?s.cardWrapDesktop:s.cardWrap}><MemoTableCard table={t} desktop={desktop} onAction={stableTableAction} connected={activeConnected} platform={activePlatform}/></View>)}</View></ScrollView>
 
       {toast?<View style={s.toast}><Text style={s.toastText}>{toast}</Text></View>:null}
 
@@ -2878,7 +2843,7 @@ export default function HomeScreen(){
 
       <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>牌路連線中心</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>MT、DG 進入牌路主頁後會自動連線。下列網址只供顯示，使用者無法修改。DG 單工作階段：內建</Text><View style={s.connectionStatusRow}><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>MT</Text><Text style={[s.connectionStatusText,{color:connected?"#4BD693":"#FFB54D"}]}>{connected?"已連線":"連線中"}</Text></View><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>DG</Text><Text style={[s.connectionStatusText,{color:dgConnected?"#4BD693":"#FFB54D"}]}>{dgConnected?"已連線":"連線中"}</Text></View></View><Text style={s.fieldLabel}>MT 即時牌路 WebSocket（固定）</Text><TextInput value={readonlyConnectionUrl(wsUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>MT 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(mtUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>DG 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(dgGameUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><View style={s.modalActions}><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>void connectRoadDashboard(true)}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.btnText}>重新連線</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#344553"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View></View></View></Modal>
       <Modal visible={helpOpen} transparent animationType="fade" onRequestClose={()=>setHelpOpen(false)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>說明</Text><Pressable onPress={()=>setHelpOpen(false)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>主頁顯示 15 桌即時牌路。MT 懸浮輔助可左右滑動 3 頁：即時輔助、資金策略、輸贏統計。</Text></View></View></Modal>
-      <Modal visible={!!radarDetailTable} transparent animationType="fade" onRequestClose={()=>setRadarDetailId(null)}><View style={s.modalShade}><View style={s.radarDetailModal}><View style={s.modalHead}><View><Text style={s.radarKicker}>MT MATRIX · LIVE ROAD SNAPSHOT</Text><Text style={s.radarDetailTitle}>{radarDetailId} · 第 {radarDetailTable?.round??0} 局</Text></View><Pressable onPress={()=>setRadarDetailId(null)} style={s.radarClose}><MaterialIcons name="close" size={20} color="#DCEEFF"/></Pressable></View>{radarDetailTable?<><View style={s.radarDetailStats}><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前推薦</Text><Text style={[s.radarDetailValue,{color:resultColor(radarDetailDecision.side)}]}>{radarDetailDecision.side}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>信心度</Text><View style={s.radarDetailConfidence}><View style={[s.signalDot,{backgroundColor:confidenceState(radarDetailConfidence).color,shadowColor:confidenceState(radarDetailConfidence).color}]}/><Text style={[s.radarDetailValue,{color:confidenceState(radarDetailConfidence).color,marginTop:0}]}>{confidenceState(radarDetailConfidence).label}</Text></View></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前牌型</Text><Text numberOfLines={1} style={s.radarDetailValue}>{detectPattern(radarDetailTable.results)}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>莊／閒／和</Text><Text style={s.radarDetailValue}>{radarDetailTable.banker}／{radarDetailTable.player}／{radarDetailTable.tie}</Text></View></View><View style={[s.radarRoadWrap,{height:desktop?190:150}]}><RoadGrid table={radarDetailTable} desktop={desktop} platform={activePlatform}/></View><Text style={s.radarDetailNote}>{analysisText(radarDetailTable)}</Text></>:null}</View></View></Modal>
+      <Modal visible={!!radarDetailTable} transparent animationType="fade" onRequestClose={()=>setRadarDetailId(null)}><View style={s.modalShade}><View style={s.radarDetailModal}><View style={s.modalHead}><View><Text style={s.radarKicker}>MT MATRIX · LIVE ROAD SNAPSHOT</Text><Text style={s.radarDetailTitle}>{radarDetailId} · 第 {radarDetailTable?.round??0} 局</Text></View><Pressable onPress={()=>setRadarDetailId(null)} style={s.radarClose}><MaterialIcons name="close" size={20} color="#DCEEFF"/></Pressable></View>{radarDetailTable?<><View style={s.radarDetailStats}><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前推薦</Text><Text style={[s.radarDetailValue,{color:resultColor(radarDetailDecision.side)}]}>{radarDetailDecision.side}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>信心度</Text><View style={s.radarDetailConfidence}><View style={[s.signalDot,{backgroundColor:confidenceState(radarDetailConfidence).color,shadowColor:confidenceState(radarDetailConfidence).color}]}/><Text style={[s.radarDetailValue,{color:confidenceState(radarDetailConfidence).color,marginTop:0}]}>{confidenceState(radarDetailConfidence).label}</Text></View></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前牌型</Text><Text numberOfLines={1} style={s.radarDetailValue}>{detectPattern(radarDetailTable.results)}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>莊／閒／和</Text><Text style={s.radarDetailValue}>{radarDetailTable.banker}／{radarDetailTable.player}／{radarDetailTable.tie}</Text></View></View><View style={[s.radarRoadWrap,{height:desktop?190:150}]}><RoadGrid table={radarDetailTable} desktop={desktop} transparent/></View><Text style={s.radarDetailNote}>{analysisText(radarDetailTable)}</Text></>:null}</View></View></Modal>
 
       <Modal visible={!!analysisTable} transparent animationType="fade" onRequestClose={()=>setAnalysisTable(null)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>百家樂 {analysisTable?.id} 分析</Text><Pressable onPress={()=>setAnalysisTable(null)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>{analysisText(analysisTable??undefined)}</Text></View></View></Modal>
       {mtOpen?<View style={s.mtOverlay}><View style={s.mtScreen}><View style={[s.mtTop,gameViewPlatform==="DG"&&s.topbarDg]}><View style={s.brandRow}><View style={[s.brandIcon,gameViewPlatform==="DG"&&s.brandIconDg]}><MatrixMark size={29} brand={gameViewPlatform}/></View><View><Text style={[s.kicker,gameViewPlatform==="DG"&&s.kickerDg]}>LIVE TABLE ANALYTICS</Text>{desktop?<View style={s.brandTitleRow}><Text style={s.title}>{gameViewPlatform} MATRIX</Text><ThreadsSignature/></View>:<View style={s.brandMobileStack}><Text style={s.title}>{gameViewPlatform} MATRIX</Text><ThreadsSignature mobile/></View>}</View></View><View style={s.row}><Pressable style={s.lineBtn} onPress={openLineContact}><View style={s.lineLogo}><Text style={s.lineLogoText}>LINE</Text></View><Text style={s.lineText}>LINE</Text></Pressable><Pressable style={s.headerBtn} onPress={()=>setHelpOpen(true)}><MaterialIcons name="help-outline" size={16} color="#fff"/><Text style={s.headerBtnText}>說明</Text></Pressable><Pressable style={s.headerBtn} onPress={closeGameView}><MaterialIcons name="arrow-back" size={16} color="#fff"/><Text style={s.headerBtnText}>回牌路</Text></Pressable></View></View><View style={s.iframeWrap}>{Platform.OS==="web"?createElement("iframe" as any,{src:gameViewUrl,style:{width:"100%",height:"100%",border:"0",background:"#000"},allow:"clipboard-read; clipboard-write; fullscreen"}):<View style={s.nativeMtFallback}><Text style={s.helpText}>目前原生模式請使用外部瀏覽器開啟目前平台。</Text></View>}</View></View></View>:null}

@@ -7,25 +7,12 @@ import { authorizeWhitelist, getWhitelistPlatform } from "./whitelist";
 // TZ website authorization + single-login registry.
 // The browser talks to TZ directly so Render is not the source IP of the TZ login request.
 // Passwords are never sent to or stored by this server.
-const activeSessions = new Map<string, { sessionId:string; platform:string; username:string; lastSeen:number }>();
-const TRACKER_SESSION_IDLE_MS = 15 * 60 * 1000;
+const activeSessions = new Map<string, { sessionId:string; platform:string; username:string }>();
 
 export function hasActiveTrackerSession(sessionId:string){
   if(!sessionId)return false;
-  const now=Date.now();
-  for(const [key,value] of activeSessions.entries()) {
-    if(now-value.lastSeen>TRACKER_SESSION_IDLE_MS){activeSessions.delete(key);continue;}
-    if(value.sessionId===sessionId) return true;
-  }
+  for(const value of activeSessions.values()) if(value.sessionId===sessionId) return true;
   return false;
-}
-
-export function pruneInactiveTrackerSessions(maxIdleMs=TRACKER_SESSION_IDLE_MS){
-  const now=Date.now(); const removed:string[]=[];
-  for(const [key,value] of activeSessions.entries()){
-    if(now-value.lastSeen>maxIdleMs){removed.push(value.sessionId);activeSessions.delete(key);}
-  }
-  return removed;
 }
 
 export const appRouter = router({
@@ -51,7 +38,7 @@ export const appRouter = router({
         if (!access.allowed) return { success: false, sessionId: "", reason: access.reason } as const;
 
         const sessionId = randomUUID();
-        activeSessions.set(`${platform}:${username}`, {sessionId,platform,username,lastSeen:Date.now()});
+        activeSessions.set(`${platform}:${username}`, {sessionId,platform,username});
         return { success: true, sessionId } as const;
       }),
     checkSession: publicProcedure
@@ -60,7 +47,6 @@ export const appRouter = router({
         let current:{sessionId:string;platform:string;username:string}|null=null;
         for (const value of activeSessions.values()) { if(value.sessionId===input.sessionId){current=value;break;} }
         if (!current) return { valid: false, reason: "session_invalid" } as const;
-        current.lastSeen=Date.now();
         const {username,platform}=current;
 
         // Re-check the live whitelist on every session heartbeat. This makes admin

@@ -12,8 +12,7 @@
     "build": "pnpm export:web && pnpm build:server",
     "start": "NODE_ENV=production node dist/server/index.js",
     "check": "tsc --noEmit",
-    "test": "vitest run",
-    "postinstall": "node scripts/ensure-chromium.mjs"
+    "test": "vitest run"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",

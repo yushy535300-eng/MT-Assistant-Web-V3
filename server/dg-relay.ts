@@ -1,6 +1,5 @@
 import tls, { type TLSSocket } from "node:tls";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
-import { startDgChromiumTransport, type DgChromiumTransport } from "./dg-chromium";
 
 export type DgRoadResult = "莊" | "閒" | "和";
 export type DgTableSnapshot = {
@@ -449,7 +448,10 @@ class RawWsClient {
     const body = Buffer.alloc(payload.length); for (let i = 0; i < payload.length; i++) body[i] = payload[i]! ^ mask[i % 4]!;
     return Buffer.concat([head, mask, body]);
   }
-  sendBinary(payload: Buffer) { if (this.socket && this.handshakeDone && !this.socket.destroyed) this.socket.write(this.frame(2, payload)); }
+  sendBinary(payload: Buffer) {
+    if (!this.socket || !this.handshakeDone || this.socket.destroyed) return false;
+    try { this.socket.write(this.frame(2, payload)); return true; } catch { return false; }
+  }
   private sendPong(payload: Buffer) { if (this.socket && this.handshakeDone && !this.socket.destroyed) this.socket.write(this.frame(10, payload)); }
   private consumeFrames() {
     while (this.buffer.length >= 2) {
@@ -490,8 +492,7 @@ export class DgRelay {
   private launchUrl: string;
   private jsonType = 0;
   private ws: RawWsClient | null = null;
-  private chromium: DgChromiumTransport | null = null;
-  private transportMode: "raw" | "browser" | "bridge" = "raw";
+  private transportMode: "raw" | "bridge" = "raw";
   private foregroundBridgeActive = false;
   private foregroundBridgeSink: ((data: Buffer) => void) | null = null;
   private stopped = false;
@@ -526,60 +527,13 @@ export class DgRelay {
     return !this.stopped && (this.status === "idle" || this.status === "connecting" || this.status === "connected");
   }
   async start() {
-    // First choice: let a real headless Chromium page execute DG's own direct1
-    // bootstrap and create the vendor WebSocket. This keeps the browser TLS
-    // stack, redirect flow, Origin, sign generation and command order exactly
-    // where the DG bundle expects them. We only mirror incoming binary frames.
-    this.setStatus("connecting", "正在啟動 Chromium DG...");
-    try {
-      this.transportMode = "browser";
-      this.chromium = await startDgChromiumTransport({
-        sessionId: this.sessionId,
-        gameUrl: this.gameUrl,
-        onLog: message => this.log(`Chromium｜${message}`),
-        onMainUrl: url => {
-          if (this.stopped || this.transportMode !== "browser") return;
-          try {
-            const parsed = new URL(url);
-            this.launchUrl = parsed.toString();
-            this.origin = parsed.origin;
-            const match = parsed.pathname.match(/^(.*?\/ddnewpc)(?:\/|$)/i);
-            if (match?.[1]) this.gameBasePath = match[1].replace(/\/$/, "");
-            const rawType = Number(parsed.searchParams.get("type"));
-            if (Number.isInteger(rawType) && rawType >= 0 && rawType <= 5) this.jsonType = rawType;
-          } catch {}
-        },
-        onHandshake: (url, status) => {
-          if (this.stopped || this.transportMode !== "browser") return;
-          if (status !== 101) return;
-          this.wsUrl = url;
-          this.setStatus("connecting", "Chromium WebSocket 101，正在等待 DG 驗證...");
-        },
-        onBinary: data => {
-          if (this.stopped || this.transportMode !== "browser") return;
-          this.handle(data);
-          if (this.foregroundBridgeActive && this.foregroundBridgeSink) {
-            try { this.foregroundBridgeSink(data); } catch {}
-          }
-        },
-        onFailure: message => {
-          if (this.stopped || this.transportMode !== "browser") return;
-          this.setStatus("error", message);
-          this.log(`Chromium｜${message}`);
-        },
-      });
-      this.log("Chromium 模式已接管 DG；前端不直接連 vendor WSS");
-      return;
-    } catch (error: any) {
-      this.transportMode = "raw";
-      this.chromium = null;
-      this.log(`Chromium 啟動失敗，才改用 Node WSS 備援：${error?.message || "unknown"}`);
-      this.setStatus("connecting", "Chromium 無法啟動，改用備援中繼...");
-    }
+    // Chromium is intentionally NOT used. A lightweight Node TLS/WebSocket
+    // transport keeps the DG road feed real-time without spawning a browser
+    // process per user/session. This materially reduces Render RAM/CPU pressure
+    // and avoids Chromium sessions competing with the foreground DG game.
+    this.transportMode = "raw";
+    this.setStatus("connecting", "DG 即時牌路連線中...");
 
-    // Fallback only: resolve direct1 -> actual DG index page and use the raw
-    // Node relay. This preserves the previous implementation if Chromium is
-    // unavailable on a particular deployment environment.
     try {
       const launch = await resolveDgLaunch(this.gameUrl);
       this.launchUrl = launch.launchUrl;
@@ -621,9 +575,6 @@ export class DgRelay {
       this.wsUrl = this.wsCandidates[0]!;
       this.log(`WSS 候選：type=${this.jsonType} → ${this.wsCandidates.map(x=>{try{return new URL(x).hostname}catch{return x}}).join(", ")}`);
     } catch (error: any) {
-      // If settings cannot be loaded, still try the endpoints that have been
-      // observed succeeding in real captures. This is transport failover only;
-      // we do not label any of them as the user's region.
       this.wsCandidates = collectConfiguredWs({}, this.jsonType, this.origin);
       this.wsCandidateIndex = 0;
       this.wsFailuresThisCycle = 0;
@@ -660,7 +611,12 @@ export class DgRelay {
     this.log(`嘗試 WSS=${endpointName}｜Origin=${activeOrigin}`);
     const sign = encrypt3Des(this.token);
     const url = `${this.wsUrl.replace(/\/$/, "")}/?sign=${encodeURIComponent(sign)}`;
-    this.ws = new RawWsClient(url, this.origin, data => this.handle(data), () => {
+    this.ws = new RawWsClient(url, this.origin, data => {
+      this.handle(data);
+      if (this.foregroundBridgeActive && this.foregroundBridgeSink) {
+        try { this.foregroundBridgeSink(data); } catch {}
+      }
+    }, () => {
       this.wsLastError = "";
       this.setStatus("connecting", `已連上 ${endpointName}，正在驗證...`);
       this.log(`WebSocket 101：${endpointName}｜Origin=${activeOrigin}`);
@@ -744,9 +700,9 @@ export class DgRelay {
       if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
       if (n(bean.codeId) !== 0) {
         const reason = `DG 驗證失敗 (${bean.codeId})`;
-        if (this.transportMode === "browser" || this.transportMode === "bridge") {
+        if (this.transportMode === "bridge") {
           this.setStatus("error", reason);
-          this.log(`${this.transportMode === "bridge" ? "Bridge" : "Chromium"}｜${reason}`);
+          this.log(`Bridge｜${reason}`);
           return;
         }
         this.wsFailuresThisCycle += 1;
@@ -870,12 +826,12 @@ export class DgRelay {
    */
   enterBridgeMode() {
     if (this.stopped) throw new Error("DG relay 已停止");
-    // IMPORTANT: do NOT stop Chromium here. The accepted Chromium vendor WSS
-    // remains the ONE upstream DG session. The foreground proxied page connects
-    // only to our local bridge and reuses that same upstream socket.
+    // The foreground DG page reuses this SAME raw vendor WebSocket. No second
+    // DG login/socket and no Chromium process are created. Inbound frames keep
+    // feeding the road parser and are also mirrored to the foreground page.
     this.foregroundBridgeActive = true;
     this.foregroundBridgeSink = null;
-    this.log("Bridge｜前景 DG 共用既有 Chromium 單一 Session");
+    this.log("Bridge｜前景 DG 共用既有輕量 WebSocket 單一 Session");
   }
 
   attachForegroundBridgeSink(sink: (data: Buffer) => void) {
@@ -885,8 +841,8 @@ export class DgRelay {
   }
 
   async forwardForegroundFrame(data: Buffer) {
-    if (this.stopped || !this.foregroundBridgeActive || !data?.length || !this.chromium) return false;
-    return await this.chromium.sendBinary(data);
+    if (this.stopped || !this.foregroundBridgeActive || !data?.length || !this.ws) return false;
+    return this.ws.sendBinary(data);
   }
 
   ingestBridgeFrame(data: Buffer) {
@@ -907,7 +863,7 @@ export class DgRelay {
       } catch {}
     }
     if (state === "open") {
-      this.log("Bridge｜前景 DG 已接上既有單一 Chromium Session");
+      this.log("Bridge｜前景 DG 已接上既有輕量 WebSocket 單一 Session");
     } else {
       this.log(`Bridge｜前景 DG ${state === "close" ? "已離開" : "橋接發生錯誤"}`);
     }
@@ -917,7 +873,7 @@ export class DgRelay {
     if (this.stopped || !this.foregroundBridgeActive) return;
     this.foregroundBridgeActive = false;
     this.foregroundBridgeSink = null;
-    this.log("Bridge｜已離開前景 DG，背景 Chromium 繼續維持牌路");
+    this.log("Bridge｜已離開前景 DG，背景輕量 WebSocket 繼續維持牌路");
   }
 
   stop() {
@@ -926,8 +882,6 @@ export class DgRelay {
     if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
     this.ws?.close(); this.ws = null;
-    try { this.chromium?.stop(); } catch {}
-    this.chromium = null;
     this.foregroundBridgeActive = false;
     this.foregroundBridgeSink = null;
     this.log("中繼已停止"); this.setStatus("closed", "已停止");
@@ -982,17 +936,3 @@ export function findDgRelayByToken(token: string) {
   for (const relay of relays.values()) if (relay.matchesToken(clean)) return relay;
   return null;
 }
-
-export function sweepInactiveDgRelays(isActive:(sessionId:string)=>boolean){
-  let stopped=0;
-  for(const [sessionId,relay] of relays.entries()){
-    if(isActive(sessionId)) continue;
-    try{relay.stop()}catch{}
-    relays.delete(sessionId);
-    relayStarts.delete(sessionId);
-    stopped++;
-  }
-  return stopped;
-}
-
-export function getDgRelayCount(){ return relays.size; }

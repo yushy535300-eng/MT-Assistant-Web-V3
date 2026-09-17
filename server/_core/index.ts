@@ -4,13 +4,12 @@ import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { appRouter, hasActiveTrackerSession, pruneInactiveTrackerSessions } from "../routers";
+import { appRouter, hasActiveTrackerSession } from "../routers";
 import { createContext } from "./context";
 import { randomUUID } from "node:crypto";
 import { adminPage } from "../admin-page";
 import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
-import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken, sweepInactiveDgRelays, getDgRelayCount } from "../dg-relay";
-import { prewarmDgChromium } from "../dg-chromium";
+import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken } from "../dg-relay";
 import { registerDgGameProxy } from "../dg-game-proxy";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -26,16 +25,7 @@ async function startServer() {
   // before the app's static catch-all. MT routes / sockets are untouched.
   registerDgGameProxy({ app, server, hasActiveSession: hasActiveTrackerSession, getRelay: getDgRelay });
 
-  app.get("/api/health", (_req, res) => res.json({ ok: true, timestamp: Date.now(), dgRelays: getDgRelayCount() }));
-
-  // Full-project stability guard: a browser can disappear without running logout/cleanup.
-  // Reap stale tracker sessions and their Chromium relays so Render RAM cannot grow forever.
-  const dgCleanupTimer=setInterval(()=>{
-    pruneInactiveTrackerSessions();
-    const stopped=sweepInactiveDgRelays(hasActiveTrackerSession);
-    if(stopped)console.log(`[DG cleanup] reclaimed ${stopped} inactive relay(s)`);
-  },60_000);
-  dgCleanupTimer.unref?.();
+  app.get("/api/health", (_req, res) => res.json({ ok: true, timestamp: Date.now() }));
 
   const adminSessions = new Set<string>();
   const getAdminToken = (req:any) => {
@@ -72,13 +62,12 @@ async function startServer() {
   app.post("/api/admin/whitelist/:id/extend-form",requireAdmin,async(req,res)=>{try{await extendWhitelist(Number(req.params.id),30);adminRedirect(res,"已延長 30 天")}catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
   app.post("/api/admin/whitelist/:id/delete-form",requireAdmin,async(req,res)=>{try{await deleteWhitelist(Number(req.params.id));adminRedirect(res,"帳號已刪除") }catch(e:any){adminRedirect(res,`操作失敗：${e?.message||e}`)}});
 
-  // Pre-warm only the Chromium process. This does NOT call DGLI/login and therefore
-  // does not enter DG or trigger the platform's automatic wallet transfer.
-  app.post("/api/dg/prewarm", async (req,res)=>{
+  // Compatibility endpoint retained for older clients. Chromium has been removed
+  // from the DG road path, so there is nothing to prewarm anymore.
+  app.post("/api/dg/prewarm", (req,res)=>{
     const sessionId=String(req.body?.sessionId||"");
     if(!hasActiveTrackerSession(sessionId)) return res.status(401).json({ok:false,error:"session_invalid"});
-    try{await prewarmDgChromium(message=>console.log(`[DG prewarm][${sessionId.slice(0,8)}] ${message}`));return res.json({ok:true});}
-    catch(e:any){console.error("[DG prewarm] failed",e);return res.status(500).json({ok:false,error:e?.message||"prewarm_failed"});}
+    return res.json({ok:true,mode:"lightweight-ws"});
   });
 
   // DG relay: the browser keeps its normal TZ/DG login flow, while the server
