@@ -532,7 +532,12 @@ export class DgRelay {
   private ws: RawWsClient | null = null;
   private transportMode: "raw" | "bridge" = "raw";
   private foregroundBridgeActive = false;
-  private foregroundBridgeSink: ((data: Buffer) => void) | null = null;
+  // DG's page opens more than one WebSocket (the supplied HAR contains two
+  // simultaneous sockets). Every local proxy socket must receive the same
+  // upstream pushes; keeping only one sink makes the last socket replace the
+  // first and can leave the page repeatedly authenticating/subscribing while
+  // the assistant appears connected but its feed stalls.
+  private foregroundBridgeSinks = new Set<(data: Buffer) => void>();
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -657,8 +662,10 @@ export class DgRelay {
     const url = signedDgWsUrl(this.wsUrl, this.token);
     this.ws = new RawWsClient(url, this.origin, data => {
       this.handle(data);
-      if (this.foregroundBridgeActive && this.foregroundBridgeSink) {
-        try { this.foregroundBridgeSink(data); } catch {}
+      if (this.foregroundBridgeActive) {
+        for (const sink of this.foregroundBridgeSinks) {
+          try { sink(data); } catch {}
+        }
       }
     }, () => {
       this.wsLastError = "";
@@ -875,14 +882,14 @@ export class DgRelay {
     // DG login/socket and no Chromium process are created. Inbound frames keep
     // feeding the road parser and are also mirrored to the foreground page.
     this.foregroundBridgeActive = true;
-    this.foregroundBridgeSink = null;
+    this.foregroundBridgeSinks.clear();
     this.log("Bridge｜前景 DG 共用既有輕量 WebSocket 單一 Session");
   }
 
   attachForegroundBridgeSink(sink: (data: Buffer) => void) {
     if (this.stopped || !this.foregroundBridgeActive) return () => {};
-    this.foregroundBridgeSink = sink;
-    return () => { if (this.foregroundBridgeSink === sink) this.foregroundBridgeSink = null; };
+    this.foregroundBridgeSinks.add(sink);
+    return () => { this.foregroundBridgeSinks.delete(sink); };
   }
 
   async forwardForegroundFrame(data: Buffer) {
@@ -917,7 +924,7 @@ export class DgRelay {
   async leaveBridgeMode() {
     if (this.stopped || !this.foregroundBridgeActive) return;
     this.foregroundBridgeActive = false;
-    this.foregroundBridgeSink = null;
+    this.foregroundBridgeSinks.clear();
     this.log("Bridge｜已離開前景 DG，背景輕量 WebSocket 繼續維持牌路");
   }
 
@@ -928,7 +935,7 @@ export class DgRelay {
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
     this.ws?.close(); this.ws = null;
     this.foregroundBridgeActive = false;
-    this.foregroundBridgeSink = null;
+    this.foregroundBridgeSinks.clear();
     this.clients.clear();
     this.map.clear();
     this.pendingRoads.clear();
