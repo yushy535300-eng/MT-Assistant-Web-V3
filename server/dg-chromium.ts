@@ -6,7 +6,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 const NORMAL_CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
 const DG_HOST_RE = /(?:^|\.)(?:kindlestone\.com|taxyss\.com|ywjxi\.com|20299999\.com|dingdangmail\.com)$/i;
 
-export type DgChromiumTransport = { stop: () => void };
+export type DgChromiumTransport = { stop: () => void; sendBinary: (data: Buffer) => Promise<boolean> };
 export type DgChromiumHooks = {
   sessionId: string;
   gameUrl: string;
@@ -474,6 +474,30 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
   await cdp.send('Network.setCacheDisabled', { cacheDisabled: true }, pageSessionId).catch(() => {});
   await cdp.send('Network.setUserAgentOverride', { userAgent: NORMAL_CHROME_UA, acceptLanguage: 'zh-TW,zh;q=0.9', platform: 'Windows' }, pageSessionId);
 
+  // Track the real DG WebSocket created by the headless page. When the user opens
+  // the foreground DG UI we keep this ONE upstream socket and forward the
+  // foreground page's binary commands through it. This avoids opening a second
+  // DG vendor session while still using Chromium's accepted TLS/Origin stack.
+  await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    if (window.__MT_DG_WS_TRACKER__) return;
+    const NativeWS = window.WebSocket;
+    window.__MT_DG_WS_TRACKER__ = { native: NativeWS, sockets: [], active: null };
+    class TrackedWS extends NativeWS {
+      constructor(url, protocols) {
+        if (arguments.length > 1) super(url, protocols); else super(url);
+        const box = window.__MT_DG_WS_TRACKER__;
+        try { box.sockets.push(this); } catch {}
+        this.addEventListener('open', () => { try { box.active = this; } catch {} });
+        this.addEventListener('close', () => { try { if (box.active === this) box.active = box.sockets.find(x => x && x.readyState === 1) || null; } catch {} });
+      }
+    }
+    try { Object.defineProperty(TrackedWS, 'CONNECTING', { value: NativeWS.CONNECTING }); } catch {}
+    try { Object.defineProperty(TrackedWS, 'OPEN', { value: NativeWS.OPEN }); } catch {}
+    try { Object.defineProperty(TrackedWS, 'CLOSING', { value: NativeWS.CLOSING }); } catch {}
+    try { Object.defineProperty(TrackedWS, 'CLOSED', { value: NativeWS.CLOSED }); } catch {}
+    window.WebSocket = TrackedWS;
+  })();` }, pageSessionId).catch(() => {});
+
   // Diagnostic build intentionally DOES NOT block images/fonts/video.
   // We want the DG page to initialize exactly like a normal Chrome tab first.
   diag('資源阻擋已關閉：本版讓 DG 頁面完整載入，避免初始化流程因資源被擋而中斷');
@@ -505,5 +529,34 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
     hooks.onFailure?.(`Chromium 意外結束 (code=${code}, signal=${signal})`);
   });
 
-  return { stop };
+  let sendChain = Promise.resolve<boolean>(true);
+  const sendBinary = (data: Buffer) => {
+    const b64 = Buffer.from(data).toString('base64');
+    sendChain = sendChain.catch(() => false).then(async () => {
+      if (stopped) return false;
+      try {
+        const result = await cdp.send('Runtime.evaluate', {
+          expression: `(() => {
+            try {
+              const box = window.__MT_DG_WS_TRACKER__;
+              const ws = box && (box.active && box.active.readyState === 1 ? box.active : box.sockets.find(x => x && x.readyState === 1));
+              if (!ws) return false;
+              const raw = atob(${JSON.stringify(b64)});
+              const bytes = new Uint8Array(raw.length);
+              for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+              ws.send(bytes.buffer);
+              box.active = ws;
+              return true;
+            } catch { return false; }
+          })()`,
+          returnByValue: true,
+          awaitPromise: true,
+        }, pageSessionId, 8000);
+        return !!result?.result?.value;
+      } catch { return false; }
+    });
+    return sendChain;
+  };
+
+  return { stop, sendBinary };
 }

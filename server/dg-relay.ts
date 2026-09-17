@@ -492,6 +492,8 @@ export class DgRelay {
   private ws: RawWsClient | null = null;
   private chromium: DgChromiumTransport | null = null;
   private transportMode: "raw" | "browser" | "bridge" = "raw";
+  private foregroundBridgeActive = false;
+  private foregroundBridgeSink: ((data: Buffer) => void) | null = null;
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -553,7 +555,13 @@ export class DgRelay {
           this.wsUrl = url;
           this.setStatus("connecting", "Chromium WebSocket 101，正在等待 DG 驗證...");
         },
-        onBinary: data => { if (!this.stopped && this.transportMode === "browser") this.handle(data); },
+        onBinary: data => {
+          if (this.stopped || this.transportMode !== "browser") return;
+          this.handle(data);
+          if (this.foregroundBridgeActive && this.foregroundBridgeSink) {
+            try { this.foregroundBridgeSink(data); } catch {}
+          }
+        },
         onFailure: message => {
           if (this.stopped || this.transportMode !== "browser") return;
           this.setStatus("error", message);
@@ -862,53 +870,54 @@ export class DgRelay {
    */
   enterBridgeMode() {
     if (this.stopped) throw new Error("DG relay 已停止");
-    this.transportMode = "bridge";
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = null;
-    if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
-    if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
-    try { this.ws?.close(); } catch {}
-    this.ws = null;
-    try { this.chromium?.stop(); } catch {}
-    this.chromium = null;
-    this.setStatus("connecting", "連線中");
-    this.log("Bridge｜已停止背景 Chromium，等待真正 DG 頁面接管單一 Session");
+    // IMPORTANT: do NOT stop Chromium here. The accepted Chromium vendor WSS
+    // remains the ONE upstream DG session. The foreground proxied page connects
+    // only to our local bridge and reuses that same upstream socket.
+    this.foregroundBridgeActive = true;
+    this.foregroundBridgeSink = null;
+    this.log("Bridge｜前景 DG 共用既有 Chromium 單一 Session");
+  }
+
+  attachForegroundBridgeSink(sink: (data: Buffer) => void) {
+    if (this.stopped || !this.foregroundBridgeActive) return () => {};
+    this.foregroundBridgeSink = sink;
+    return () => { if (this.foregroundBridgeSink === sink) this.foregroundBridgeSink = null; };
+  }
+
+  async forwardForegroundFrame(data: Buffer) {
+    if (this.stopped || !this.foregroundBridgeActive || !data?.length || !this.chromium) return false;
+    return await this.chromium.sendBinary(data);
   }
 
   ingestBridgeFrame(data: Buffer) {
-    if (this.stopped || this.transportMode !== "bridge" || !data?.length) return false;
-    // The extension can attach after DG has already completed cmd=10086. The
-    // first valid server frame is therefore enough to mark the bridge alive.
+    // Kept for compatibility with older bridge builds. Foreground proxy mode now
+    // mirrors frames from Chromium instead of creating another vendor socket.
+    if (this.stopped || !data?.length) return false;
     if (this.status !== "connected") this.setStatus("connected", "已連線");
     this.handle(data);
     return true;
   }
 
   bridgeSocketState(state: "open" | "close" | "error", pageUrl?: string) {
-    if (this.stopped || this.transportMode !== "bridge") return;
+    if (this.stopped || !this.foregroundBridgeActive) return;
     if (pageUrl) {
       try {
         const u = new URL(pageUrl);
         this.launchUrl = u.toString();
-        this.origin = u.origin;
       } catch {}
     }
     if (state === "open") {
-      this.setStatus("connecting", "連線中");
-      this.log("Bridge｜真正 DG WebSocket 已開啟");
+      this.log("Bridge｜前景 DG 已接上既有單一 Chromium Session");
     } else {
-      // Keep the last roads visible. Do not start a competing background login
-      // while the foreground DG page is still the active session.
-      this.setStatus("connecting", "連線中");
-      this.log(`Bridge｜真正 DG WebSocket ${state === "close" ? "已關閉" : "發生錯誤"}`);
+      this.log(`Bridge｜前景 DG ${state === "close" ? "已離開" : "橋接發生錯誤"}`);
     }
   }
 
   async leaveBridgeMode() {
-    if (this.stopped || this.transportMode !== "bridge") return;
-    this.setStatus("connecting", "連線中");
-    this.log("Bridge｜已離開 DG 遊戲，恢復背景牌路連線");
-    // start() first attempts Chromium again and only falls back to raw WSS.
-    await this.start();
+    if (this.stopped || !this.foregroundBridgeActive) return;
+    this.foregroundBridgeActive = false;
+    this.foregroundBridgeSink = null;
+    this.log("Bridge｜已離開前景 DG，背景 Chromium 繼續維持牌路");
   }
 
   stop() {
@@ -919,6 +928,8 @@ export class DgRelay {
     this.ws?.close(); this.ws = null;
     try { this.chromium?.stop(); } catch {}
     this.chromium = null;
+    this.foregroundBridgeActive = false;
+    this.foregroundBridgeSink = null;
     this.log("中繼已停止"); this.setStatus("closed", "已停止");
   }
 }
@@ -971,3 +982,17 @@ export function findDgRelayByToken(token: string) {
   for (const relay of relays.values()) if (relay.matchesToken(clean)) return relay;
   return null;
 }
+
+export function sweepInactiveDgRelays(isActive:(sessionId:string)=>boolean){
+  let stopped=0;
+  for(const [sessionId,relay] of relays.entries()){
+    if(isActive(sessionId)) continue;
+    try{relay.stop()}catch{}
+    relays.delete(sessionId);
+    relayStarts.delete(sessionId);
+    stopped++;
+  }
+  return stopped;
+}
+
+export function getDgRelayCount(){ return relays.size; }

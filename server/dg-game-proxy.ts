@@ -1,8 +1,7 @@
 import type { Express, Request, Response } from "express";
 import type { Server as HttpServer, IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
-import tls from "node:tls";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import type { DgRelay } from "./dg-relay";
 
@@ -159,6 +158,19 @@ class ServerFrameTap {
   }
 }
 
+function encodeServerWsFrame(opcode: number, payload: Buffer) {
+  const len = payload.length;
+  let head: Buffer;
+  if (len < 126) {
+    head = Buffer.from([0x80 | (opcode & 0x0f), len]);
+  } else if (len <= 0xffff) {
+    head = Buffer.alloc(4); head[0] = 0x80 | (opcode & 0x0f); head[1] = 126; head.writeUInt16BE(len, 2);
+  } else {
+    head = Buffer.alloc(10); head[0] = 0x80 | (opcode & 0x0f); head[1] = 127; head.writeBigUInt64BE(BigInt(len), 2);
+  }
+  return Buffer.concat([head, payload]);
+}
+
 function handleGameWsUpgrade(req: IncomingMessage, client: Socket, head: Buffer, options: RegisterOptions) {
   let parsed: URL;
   try { parsed = new URL(req.url || "", "http://localhost"); } catch { client.destroy(); return; }
@@ -169,95 +181,72 @@ function handleGameWsUpgrade(req: IncomingMessage, client: Socket, head: Buffer,
   const proxySession = proxySessions.get(sessionId);
   const relay = options.getRelay(sessionId);
   if (!proxySession || !relay) { client.end("HTTP/1.1 404 Not Found\r\n\r\n"); return; }
-  let target: URL;
-  try { target = new URL(targetRaw); } catch { client.end("HTTP/1.1 400 Bad Request\r\n\r\n"); return; }
-  if (target.protocol !== "wss:" || isPrivateHost(target.hostname)) { client.end("HTTP/1.1 400 Bad Request\r\n\r\n"); return; }
+  let target: URL | null = null;
+  try { target = targetRaw ? new URL(targetRaw) : null; } catch {}
+  if (target && (target.protocol !== "wss:" || isPrivateHost(target.hostname))) { client.end("HTTP/1.1 400 Bad Request\r\n\r\n"); return; }
   const browserKey = String(req.headers["sec-websocket-key"] || "");
   if (!browserKey) { client.end("HTTP/1.1 400 Bad Request\r\n\r\n"); return; }
 
-  const upstreamKey = randomBytes(16).toString("base64");
-  const port = Number(target.port || 443);
-  const upstream = tls.connect({ host: target.hostname, port, servername: target.hostname, rejectUnauthorized: true });
-  let handshake = Buffer.alloc(0);
-  let opened = false;
+  // The foreground browser connects only to this LOCAL socket. There is no
+  // Render -> DG raw TLS socket here. The one accepted upstream vendor socket
+  // remains the existing Chromium WebSocket owned by DgRelay.
+  const response = [
+    "HTTP/1.1 101 Switching Protocols",
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    `Sec-WebSocket-Accept: ${wsAccept(browserKey)}`,
+    "\r\n",
+  ].join("\r\n");
+  client.write(response);
+  relay.bridgeSocketState("open", proxySession.launchUrl);
+  console.log(`[DG proxy] foreground local WS 101｜upstream=Chromium-single-session｜session=${sessionId.slice(0,8)}`);
+
   let closed = false;
-  const tap = new ServerFrameTap(payload => relay.ingestBridgeFrame(payload));
-  const finish = (state: "close" | "error") => {
-    if (closed) return; closed = true;
-    relay.bridgeSocketState(state, proxySession.launchUrl);
-    try { upstream.destroy(); } catch {}
-    try { client.destroy(); } catch {}
+  const queue: Buffer[] = [];
+  let draining = false;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const drain = async () => {
+    if (closed || draining) return;
+    draining = true;
+    try {
+      while (!closed && queue.length) {
+        const ok = await relay.forwardForegroundFrame(queue[0]!);
+        if (!ok) {
+          retryTimer = setTimeout(() => { retryTimer = null; void drain(); }, 120);
+          retryTimer.unref?.();
+          break;
+        }
+        queue.shift();
+      }
+    } finally { draining = false; }
   };
 
-  upstream.once("secureConnect", () => {
-    const proto = typeof req.headers["sec-websocket-protocol"] === "string" ? req.headers["sec-websocket-protocol"] : "";
-    const requestLines = [
-      `GET ${target.pathname || "/"}${target.search} HTTP/1.1`,
-      `Host: ${target.host}`,
-      "Upgrade: websocket",
-      "Connection: Upgrade",
-      `Sec-WebSocket-Key: ${upstreamKey}`,
-      "Sec-WebSocket-Version: 13",
-      `Origin: ${proxySession.origin}`,
-      `User-Agent: ${String(req.headers["user-agent"] || "Mozilla/5.0")}`,
-      ...(proto ? [`Sec-WebSocket-Protocol: ${proto}`] : []),
-      "\r\n",
-    ];
-    upstream.write(requestLines.join("\r\n"));
+  const tap = new ServerFrameTap(payload => {
+    if (closed || !payload?.length) return;
+    // Bound the queue so a dead browser cannot consume unbounded memory.
+    if (queue.length >= 256) queue.shift();
+    queue.push(Buffer.from(payload));
+    void drain();
   });
 
-  upstream.on("data", chunk => {
-    if (opened) {
-      tap.push(chunk);
-      if (!client.destroyed) client.write(chunk);
-      return;
-    }
-    handshake = Buffer.concat([handshake, chunk]);
-    const marker = handshake.indexOf("\r\n\r\n");
-    if (marker < 0) {
-      if (handshake.length > 64 * 1024) finish("error");
-      return;
-    }
-    const rawHead = handshake.subarray(0, marker + 4).toString("latin1");
-    const rest = handshake.subarray(marker + 4);
-    const first = rawHead.split("\r\n", 1)[0] || "";
-    if (!/^HTTP\/1\.[01] 101\b/.test(first)) {
-      console.warn(`[DG proxy] upstream WSS rejected｜${first}｜host=${target.hostname}`);
-      client.end("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
-      finish("error");
-      return;
-    }
-    const headers = new Map<string,string>();
-    for (const line of rawHead.split("\r\n").slice(1)) {
-      const i = line.indexOf(":"); if (i < 0) continue;
-      headers.set(line.slice(0, i).trim().toLowerCase(), line.slice(i + 1).trim());
-    }
-    const expected = wsAccept(upstreamKey);
-    if ((headers.get("sec-websocket-accept") || "") !== expected) {
-      client.end("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
-      finish("error"); return;
-    }
-    const response = [
-      "HTTP/1.1 101 Switching Protocols",
-      "Upgrade: websocket",
-      "Connection: Upgrade",
-      `Sec-WebSocket-Accept: ${wsAccept(browserKey)}`,
-      ...(headers.get("sec-websocket-protocol") ? [`Sec-WebSocket-Protocol: ${headers.get("sec-websocket-protocol")}`] : []),
-      "\r\n",
-    ].join("\r\n");
-    client.write(response);
-    opened = true;
-    relay.bridgeSocketState("open", proxySession.launchUrl);
-    console.log(`[DG proxy] foreground WSS 101｜host=${target.hostname}｜session=${sessionId.slice(0,8)}`);
-    if (head?.length) upstream.write(head);
-    if (rest.length) { tap.push(rest); client.write(rest); }
+  const detach = relay.attachForegroundBridgeSink(payload => {
+    if (closed || client.destroyed || !payload?.length) return;
+    try { client.write(encodeServerWsFrame(2, payload)); } catch {}
   });
 
-  client.on("data", chunk => { if (opened && !upstream.destroyed) upstream.write(chunk); });
+  if (head?.length) tap.push(head);
+  client.on("data", chunk => tap.push(chunk));
+  const finish = (state: "close" | "error") => {
+    if (closed) return;
+    closed = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    try { detach(); } catch {}
+    relay.bridgeSocketState(state, proxySession.launchUrl);
+    try { client.destroy(); } catch {}
+  };
   client.on("error", () => finish("error"));
   client.on("close", () => finish("close"));
-  upstream.on("error", (error) => { console.warn(`[DG proxy] upstream WSS error｜${error.message}`); finish("error"); });
-  upstream.on("close", () => finish("close"));
 }
 
 export function registerDgGameProxy(options: RegisterOptions) {
@@ -314,6 +303,9 @@ export function registerDgGameProxy(options: RegisterOptions) {
 
   app.use("/ddnewpc", proxyHandler);
   app.use("/static", proxyHandler);
+  app.use("/vd", proxyHandler);
+  app.use("/apidata", proxyHandler);
+  app.use("/giftrobot", proxyHandler);
 
   // Parent-page control endpoints. They only affect DG; MT never enters this path.
   app.post("/api/dg/proxy/enter", async (req: Request, res: Response) => {

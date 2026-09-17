@@ -4,12 +4,12 @@ import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { appRouter, hasActiveTrackerSession } from "../routers";
+import { appRouter, hasActiveTrackerSession, pruneInactiveTrackerSessions } from "../routers";
 import { createContext } from "./context";
 import { randomUUID } from "node:crypto";
 import { adminPage } from "../admin-page";
 import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
-import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken } from "../dg-relay";
+import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken, sweepInactiveDgRelays, getDgRelayCount } from "../dg-relay";
 import { prewarmDgChromium } from "../dg-chromium";
 import { registerDgGameProxy } from "../dg-game-proxy";
 
@@ -26,7 +26,16 @@ async function startServer() {
   // before the app's static catch-all. MT routes / sockets are untouched.
   registerDgGameProxy({ app, server, hasActiveSession: hasActiveTrackerSession, getRelay: getDgRelay });
 
-  app.get("/api/health", (_req, res) => res.json({ ok: true, timestamp: Date.now() }));
+  app.get("/api/health", (_req, res) => res.json({ ok: true, timestamp: Date.now(), dgRelays: getDgRelayCount() }));
+
+  // Full-project stability guard: a browser can disappear without running logout/cleanup.
+  // Reap stale tracker sessions and their Chromium relays so Render RAM cannot grow forever.
+  const dgCleanupTimer=setInterval(()=>{
+    pruneInactiveTrackerSessions();
+    const stopped=sweepInactiveDgRelays(hasActiveTrackerSession);
+    if(stopped)console.log(`[DG cleanup] reclaimed ${stopped} inactive relay(s)`);
+  },60_000);
+  dgCleanupTimer.unref?.();
 
   const adminSessions = new Set<string>();
   const getAdminToken = (req:any) => {
