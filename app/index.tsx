@@ -1153,6 +1153,11 @@ export default function HomeScreen(){
   const dgAuthPromiseRef=useRef<Promise<string>|null>(null);
   const dgLastAuthAtRef=useRef(0);
   const dgSameTokenRetryRef=useRef(0);
+  // A successful "transfer all back" moves the balance out of the current
+  // game wallet. DG normally reuses its existing DGLI URL to avoid duplicate
+  // sessions, but the next explicit DG launch must authenticate once so the
+  // platform can transfer the main-wallet balance into DG again.
+  const dgFreshAuthorizationRequiredRef=useRef(false);
   const [dgNeedsRecovery,setDgNeedsRecovery]=useState(false);
   const dgBridgeActiveRef=useRef(false);
   const [dgConnectEpoch,setDgConnectEpoch]=useState(0);
@@ -2489,6 +2494,7 @@ export default function HomeScreen(){
     setDgConnected(false);
     setDgStatus("未連線");
     dgGameUrlRef.current=""; dgAuthPromiseRef.current=null; dgLastAuthAtRef.current=0; dgSameTokenRetryRef.current=0;
+    dgFreshAuthorizationRequiredRef.current=false;
     setDgGameUrl("");
     setDgTables([]);
     platformTokenRef.current="";
@@ -2550,8 +2556,27 @@ export default function HomeScreen(){
         // 不再按一次 DG平台就重新呼叫 DGLI/login，避免第二組 token 讓背景
         // Chromium / WebSocket 被 DG 判定為舊 session 而斷線。只有主頁尚未
         // 取得 DG 授權時，才補取一次並同時交給牌路 relay 使用。
+        const needsWalletReentry=dgFreshAuthorizationRequiredRef.current;
         let url=dgGameUrlRef.current||dgGameUrl;
-        if(!url)url=await ensureDgAuthorization(false);
+        if(needsWalletReentry){
+          // The user explicitly transferred every game wallet back to main.
+          // Retire the old DG relay/token first, then obtain exactly one fresh
+          // DGLI launch. That login is what moves the main-wallet balance back
+          // into DG; afterwards the foreground page and floating assistant
+          // share this new single session as usual.
+          if(dgBridgeActiveRef.current)await leaveDgSameSessionProxy();
+          try{dgControllerRef.current?.close()}catch{}
+          dgControllerRef.current=null;
+          await stopDgRelayServer(accessSessionId);
+          setDgConnected(false);
+          setDgStatus("連線中");
+          dgGameUrlRef.current="";
+          setDgGameUrl("");
+          url=await ensureDgAuthorization(true);
+          const start=await fetch("/api/dg/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId:accessSessionId,gameUrl:url})});
+          let startData:any=null;try{startData=await start.json()}catch{}
+          if(!start.ok||!startData?.ok)throw new Error(String(startData?.error||"DG 新工作階段啟動失敗"));
+        }else if(!url)url=await ensureDgAuthorization(false);
         suppressDgRecoveryRef.current=false;
         dgForegroundRecoveryAttemptRef.current=0;
         setDgWasOpened(true);
@@ -2560,6 +2585,7 @@ export default function HomeScreen(){
         // opening the game. No second DG login/Chromium session is allowed here.
         // The proxied DG page's one real WebSocket also feeds the floating assistant.
         const proxyUrl=Platform.OS==="web"?await enterDgSameSessionProxy(url):url;
+        dgFreshAuthorizationRequiredRef.current=false;
         setGameViewPlatform("DG");
         setGameViewUrl(proxyUrl||url);
       }
@@ -2590,6 +2616,7 @@ export default function HomeScreen(){
         // 轉回後不要關掉目前正在收牌路的 relay；只禁止「重新登入 DG」的自動恢復，
         // 避免剛轉回主錢包又因新的 DGLI/login 被平台自動轉回 DG。
         suppressDgRecoveryRef.current=true;
+        dgFreshAuthorizationRequiredRef.current=true;
         setDgNeedsRecovery(false);
         notify("轉回成功");setWalletTransferOpen(false);
       }
@@ -2835,6 +2862,7 @@ export default function HomeScreen(){
     setToken("");
     setMtUrl("");
     dgGameUrlRef.current=""; dgAuthPromiseRef.current=null; dgLastAuthAtRef.current=0; dgSameTokenRetryRef.current=0;
+    dgFreshAuthorizationRequiredRef.current=false;
     setDgGameUrl("");
     setDgTables([]);
     setDgConnected(false);
