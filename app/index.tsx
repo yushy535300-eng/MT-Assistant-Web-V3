@@ -1326,6 +1326,13 @@ export default function HomeScreen(){
   useEffect(()=>{
     if(Platform.OS!=="web" || typeof document==="undefined") return;
     document.title="MT Assistant";
+    let homeTitle=document.querySelector('meta[name="apple-mobile-web-app-title"]') as HTMLMetaElement|null;
+    if(!homeTitle){
+      homeTitle=document.createElement("meta");
+      homeTitle.name="apple-mobile-web-app-title";
+      document.head.appendChild(homeTitle);
+    }
+    homeTitle.content="多平台百家輔助";
     const scrollbarStyleId="mt-hidden-scrollbar";
     if(!document.getElementById(scrollbarStyleId)){
       const style=document.createElement("style");
