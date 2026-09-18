@@ -52,6 +52,7 @@ type BetSide = "莊" | "閒" | "和";
 type BetRecord = { side: BetSide; result: Result; amount: number; pnl: number; at: number };
 type PendingBet = { tableId: string; side: BetSide; amount: number; resultKey?: string } | null;
 
+const mtLoadingTableIds = ["BAG01","BAG02","BAG03","BAG03A","BAG05","BAG06","BAG07","BAG08","BAG09","BAG10","BAG11","BAG12","BAG13","BAG13A","BAG15"];
 const dealerStreamUrls: Record<string,string> = {
   BAG01: "https://pull.bighit888.com/livestream/bag01-1.flv",
   BAG02: "https://pull.bighit888.com/livestream/bag02-1.flv",
@@ -93,7 +94,13 @@ function ensureMpegTs(){
   });
   return mpegTsLoaderPromise;
 }
-const initialTables: TableData[] = [];
+// Visual road templates shown only while the first authoritative /tables
+// snapshot is loading. They are never used as the live membership whitelist.
+const initialTables: TableData[] = mtLoadingTableIds.map((apiId) => ({
+  id: apiId, apiId, game: "百家樂", name: "—", players: "—",
+  roomId: "—", tableBadge: "—", shoe: "—", round: 0, banker: 0, player: 0, tie: 0,
+  results: [], trend: "", live: false,
+}));
 const dgPlaceholderDefs = [
   ["BAC001","RB01","60101"],["BAC002","RB02","60102"],["BAC003","RB03","60103"],["BAC004","RB04","60104"],["BAC005","RB05","60105"],
   ["TID348","S01","50101"],["TID349","S02","50102"],["TID350","S03","50103"],["TID351","S05","50104"],["TID352","S06","50105"],
@@ -919,7 +926,17 @@ function applyTablesSameShoe(current: TableData[], sources: any[]): TableData[] 
         ? rawNewSnapshot.length > 0
         : typeof rawNewSnapshot === "string" && rawNewSnapshot.replace(/[^0-9]/g, "").length >= 1;
       if (hasNewSnapshot) return countCurrentShoe({...tableWithStream,results:[...tableWithStream.results]});
-      return {...tableWithStream,results:[],banker:0,player:0,tie:0};
+      // MT international tables briefly publish a new shoe/round with an empty
+      // road before the first real bead arrives. Keep the last painted road for
+      // that transition packet so the card never flashes completely blank.
+      // The first non-empty authoritative snapshot above switches to the new
+      // shoe atomically.
+      return countCurrentShoe({
+        ...tableWithStream,
+        shoe:prev.shoe,
+        round:prev.round,
+        results:[...prev.results],
+      });
     }
 
     // Same shoe: never let a stale/short snapshot roll the visible road backward.
@@ -1199,11 +1216,12 @@ export default function HomeScreen(){
   const reconnectTimerRef=useRef<ReturnType<typeof setTimeout>|null>(null);
   const roomDropdownScrollRef=useRef<ScrollView|null>(null);
   const roomDropdownOffsetRef=useRef(0);
-  const [mtTables,setMtTables]=useState<TableData[]>(initialTables);
+  const [mtTables,setMtTables]=useState<TableData[]>([]);
+  const [mtSnapshotReady,setMtSnapshotReady]=useState(false);
   // WebSocket packets are processed immediately into this ref. React painting is
   // committed at most once per animation frame, so the socket frequency is NOT
   // reduced while drag gestures no longer fight dozens of synchronous renders.
-  const liveTablesRef=useRef<TableData[]>(initialTables);
+  const liveTablesRef=useRef<TableData[]>([]);
   const tablesFrameRef=useRef<number|null>(null);
   const updateLiveTables=(updater:(current:TableData[])=>TableData[])=>{
     const current=liveTablesRef.current;
@@ -1217,8 +1235,8 @@ export default function HomeScreen(){
       });
     }
   };
-  const tables:TableData[]=activePlatform==="DG"?(dgTables.length?dgTables:dgPlaceholderTables):mtTables;
-  const availableTableCount=activePlatform==="DG"?dgTables.length:mtTables.length;
+  const tables:TableData[]=activePlatform==="DG"?(dgTables.length?dgTables:dgPlaceholderTables):(mtSnapshotReady?mtTables:initialTables);
+  const availableTableCount=activePlatform==="DG"?dgTables.length:(mtSnapshotReady?mtTables.length:0);
   const activeConnected=activePlatform==="DG"?dgConnected:connected;
   const [events,setEvents]=useState<string[]>([]);
   const [toast,setToast]=useState("");
@@ -2221,6 +2239,7 @@ export default function HomeScreen(){
         }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();requestBalance();startDealerRefresh();startBalanceRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.endsWith("/tables")){
       const filtered=src.filter(isMtBaccaratTable);
       activeMtTableIds=[...new Set(filtered.map(getApiTableId).filter(Boolean))];
+      setMtSnapshotReady(true);
       updateLiveTables(c=>{
         // The first complete snapshot after every connection/reconnection is the
         // confirmation source, exactly like a manual reconnect.
@@ -2245,7 +2264,10 @@ export default function HomeScreen(){
             const endTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"");
             refreshBetReportAfterSettlement(endTableId,p);
           }
-          updateLiveTables(c=>{const reset=resetRoadForNewShoePayload(c,p);return applyDealerRealtime(applyLiveWait(reset,p,activeMtTableIds),p)});return}}catch{}};
+          // wait/end are countdown lifecycle packets. International tables may
+          // report round 0/1 before their new road snapshot is ready, so these
+          // packets must never clear the currently painted road.
+          updateLiveTables(c=>applyDealerRealtime(applyLiveWait(c,p,activeMtTableIds),p));return}}catch{}};
     ws.onerror=()=>{if(!isCurrentSocket())return;setConnected(false);appendEvent("WebSocket 發生錯誤")};
     ws.onclose=()=>{
       clearSocketTimers();
