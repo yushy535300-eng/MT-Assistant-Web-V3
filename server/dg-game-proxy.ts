@@ -4,6 +4,7 @@ import type { Socket } from "node:net";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import type { DgRelay } from "./dg-relay";
+import { DG_REPORT_BRIDGE_SCRIPT } from "./dg-report-bridge";
 
 type ProxySession = {
   sessionId: string;
@@ -59,10 +60,11 @@ function injectProxyHook(html: string, sessionId: string, upstreamOrigin: string
 `const NativeWS=window.WebSocket;\n` +
 `if(!NativeWS||window.__MT_DG_PROXY_WS__)return;\n` +
 `window.__MT_DG_PROXY_WS__=true;\n` +
+DG_REPORT_BRIDGE_SCRIPT +
 `const __frames=[];let __frameTimer=0,__flushing=false;\n` +
 `const __flushFrames=async()=>{if(__flushing||!__frames.length)return;__flushing=true;clearTimeout(__frameTimer);__frameTimer=0;const frames=__frames.splice(0,64);try{await fetch(\"/api/dg/proxy/frames\",{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({frames}),keepalive:true});}catch{}finally{__flushing=false;if(__frames.length)__frameTimer=setTimeout(__flushFrames,30);}};\n` +
 `const __mirrorFrame=async value=>{try{let buf;if(value instanceof ArrayBuffer)buf=value;else if(ArrayBuffer.isView(value))buf=value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength);else if(typeof Blob!==\"undefined\"&&value instanceof Blob)buf=await value.arrayBuffer();else return;const bytes=new Uint8Array(buf);let binary=\"\";for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode.apply(null,bytes.subarray(i,i+32768));__frames.push(btoa(binary));if(__frames.length>=32)void __flushFrames();else if(!__frameTimer)__frameTimer=setTimeout(__flushFrames,30);}catch{}};\n` +
-`class MTDGWebSocket extends NativeWS{constructor(url,protocols){const raw=String(url||\"\");if(arguments.length>1)super(raw,protocols);else super(raw);this.addEventListener(\"message\",event=>{void __mirrorFrame(event.data);});}}\n` +
+`class MTDGWebSocket extends NativeWS{constructor(url,protocols){const raw=String(url||\"\");if(arguments.length>1)super(raw,protocols);else super(raw);this.addEventListener(\"message\",event=>{void __mirrorFrame(event.data);__pnlReceive(this,event);});}}\n` +
 `window.WebSocket=MTDGWebSocket;\n` +
 `const mapHttp=(value)=>{try{const raw=String(value||"");if(!(raw.startsWith("http://")||raw.startsWith("https://")))return value;const u=new URL(raw);return u.origin===__origin?(u.pathname+u.search+u.hash):value;}catch{return value;}};\n` +
 `const nativeFetch=window.fetch;if(nativeFetch){window.fetch=function(input,init){if(typeof input==="string"||input instanceof URL)return nativeFetch.call(this,mapHttp(String(input)),init);return nativeFetch.call(this,input,init);};}\n` +
@@ -255,6 +257,16 @@ function handleGameWsUpgrade(req: IncomingMessage, client: Socket, head: Buffer,
 
 export function registerDgGameProxy(options: RegisterOptions) {
   const { app, server, hasActiveSession, getRelay } = options;
+
+  app.post("/api/dg/proxy/report-request", (req: Request, res: Response) => {
+    const session = sessionFromRequest(req);
+    if (!session || !hasActiveSession(session.sessionId)) return res.status(401).json({ ok: false });
+    const relay = getRelay(session.sessionId);
+    if (!relay) return res.status(404).json({ ok: false });
+    res.setHeader("Cache-Control", "no-store");
+    const frame = relay.createPnlRequest();
+    return res.json({ ok: true, frame: frame?.toString("base64") ?? null });
+  });
 
   // Mirror the binary frames received by the actual DG page into the existing
   // relay. This does not create or authenticate another DG WebSocket.

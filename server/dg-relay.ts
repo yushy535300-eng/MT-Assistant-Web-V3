@@ -1,5 +1,6 @@
 import tls, { type TLSSocket } from "node:tls";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import { DG_PNL_REPORT_LIST, dgReportDay, isDgPnlReply, parseDgDailyPnl, type DgDailyPnl } from "../lib/dg-report";
 
 export type DgRoadResult = "莊" | "閒" | "和";
 export type DgTableSnapshot = {
@@ -40,6 +41,7 @@ type PublicBean = {
   type?: number;
   userName?: string;
   list?: string[];
+  dList?: number[];
   object?: string;
   table?: DgRawTable[];
 };
@@ -339,8 +341,8 @@ function parseTable(buf: Buffer): DgRawTable {
   return out;
 }
 
-function parsePublicBean(buf: Buffer): PublicBean {
-  const out: PublicBean = { list: [], table: [] };
+export function parsePublicBean(buf: Buffer): PublicBean {
+  const out: PublicBean = { list: [], table: [], dList: [] };
   let o = 0;
   while (o < buf.length) {
     const key = readVarint(buf, o); o = key.offset;
@@ -348,9 +350,16 @@ function parsePublicBean(buf: Buffer): PublicBean {
     if (wire === 0) {
       const v = readVarint(buf, o); o = v.offset;
       if (field === 1) out.cmd = n(v.value); else if (field === 3) out.codeId = n(v.value); else if (field === 4) out.lobbyId = n(v.value); else if (field === 6) out.tableId = n(v.value); else if (field === 7) out.seat = n(v.value); else if (field === 8) out.mid = n(v.value); else if (field === 10) out.type = n(v.value);
+    } else if (wire === 1 && field === 9) {
+      if (o + 8 > buf.length) throw new Error("truncated double");
+      out.dList!.push(buf.readDoubleLE(o)); o += 8;
     } else if (wire === 2) {
       const s = readLength(buf, o); o = s.offset; const part = buf.subarray(s.start, s.end);
       if (field === 2) out.token = part.toString("utf8");
+      else if (field === 9) {
+        if (part.length % 8) throw new Error("invalid packed doubles");
+        for (let p = 0; p < part.length; p += 8) out.dList!.push(part.readDoubleLE(p));
+      }
       else if (field === 5) out.gameNo = part.toString("utf8");
       else if (field === 11) out.userName = part.toString("utf8");
       else if (field === 12) out.list!.push(part.toString("utf8"));
@@ -369,7 +378,7 @@ function varint(value: number | bigint) {
 }
 function fieldVarint(field: number, value: number | bigint) { return Buffer.concat([varint((field << 3) | 0), varint(value)]); }
 function fieldString(field: number, value: string) { const b = Buffer.from(value, "utf8"); return Buffer.concat([varint((field << 3) | 2), varint(b.length), b]); }
-function encodePublicBean(cmd: number, encryptedToken: string, extra: { lobbyId?: number; gameNo?: string; tableId?: number; seat?: number; mid?: number; type?: number; object?: string } = {}) {
+function encodePublicBean(cmd: number, encryptedToken: string, extra: { lobbyId?: number; gameNo?: string; tableId?: number; seat?: number; mid?: number; type?: number; object?: string; list?: string[] } = {}) {
   const parts: Buffer[] = [fieldVarint(1, cmd), fieldString(2, encryptedToken)];
   if (extra.lobbyId != null) parts.push(fieldVarint(4, extra.lobbyId));
   if (extra.gameNo) parts.push(fieldString(5, extra.gameNo));
@@ -377,6 +386,7 @@ function encodePublicBean(cmd: number, encryptedToken: string, extra: { lobbyId?
   if (extra.seat != null && extra.seat >= 0) parts.push(fieldVarint(7, extra.seat));
   if (extra.mid != null) parts.push(fieldVarint(8, extra.mid));
   if (extra.type != null) parts.push(fieldVarint(10, extra.type));
+  if (extra.list) for (const value of extra.list) parts.push(fieldString(12, value));
   if (extra.object != null) parts.push(fieldString(14, extra.object));
   return Buffer.concat(parts);
 }
@@ -557,6 +567,22 @@ export class DgRelay {
   // Keep that newest road list temporarily instead of dropping it; otherwise
   // the UI can be exactly one hand behind DG at startup.
   private pendingRoads = new Map<number, string[]>();
+  private dailyPnl: DgDailyPnl | null = null;
+  private pnlRequest: { day: string; at: number } | null = null;
+  private lastPnlRequestAt = 0;
+  createPnlRequest(): Buffer | null {
+    const now = Date.now();
+    if (this.stopped || this.status !== "connected" || now - this.lastPnlRequestAt < 10000) return null;
+    if (this.pnlRequest && now - this.pnlRequest.at < 25000) return null;
+    this.pnlRequest = { day: dgReportDay(now), at: now };
+    this.lastPnlRequestAt = now;
+    return encodePublicBean(13, this.authToken(13), { type: 1, object: "1", list: DG_PNL_REPORT_LIST });
+  }
+  private requestDailyPnl() {
+    if (this.transportMode !== "raw" || !this.ws) return;
+    const frame = this.createPnlRequest();
+    if (frame) this.ws.sendBinary(frame);
+  }
   constructor(public readonly sessionId: string, public readonly gameUrl: string) {
     this.token = extractToken(gameUrl);
     this.launchUrl = gameUrl;
@@ -642,6 +668,7 @@ export class DgRelay {
     this.clients.add(client);
     this.sendTo(client, "status", { status: this.status, message: this.statusMessage });
     this.sendTo(client, "tables", this.tables());
+    this.sendTo(client, "pnl", this.dailyPnl?.day === dgReportDay() ? this.dailyPnl : null);
     return () => { this.clients.delete(client); this.touch(); };
   }
   private sendTo(client: SseClient, event: string, data: unknown) { try { client.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {} }
@@ -758,6 +785,13 @@ export class DgRelay {
     }
     let bean: PublicBean; try { bean = parsePublicBean(data); } catch { return; }
     const cmd = n(bean.cmd);
+    if (isDgPnlReply(bean)) {
+      const pending = this.pnlRequest;
+      this.pnlRequest = null;
+      const report = pending ? parseDgDailyPnl(bean, pending.day) : null;
+      if (report) { this.dailyPnl = report; this.broadcast("pnl", report); }
+      return;
+    }
     if (cmd === 10086 || cmd === 2 || cmd === 44) this.bootstrapFrames.set(cmd, Buffer.from(data));
     if (cmd === 10086) {
       if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
@@ -806,6 +840,7 @@ export class DgRelay {
       this.wsLastError = "";
       this.setStatus("connected", "已連線"); this.log(`驗證完成｜WSS=${(()=>{try{return new URL(this.wsUrl).hostname}catch{return this.wsUrl}})()}｜Origin=${this.origin}｜mode=${this.transportMode}`);
       if (this.transportMode === "raw") {
+        this.requestDailyPnl();
         this.send(45, { type: 1 }); this.send(2, { lobbyId: 5, type: 0 }); this.send(5011, { type: 0 });
         setTimeout(() => { if (!this.stopped) this.send(87, { type: 1 }); }, 80);
         setTimeout(() => { if (!this.stopped) this.send(24, { type: 2 }); }, 120);
@@ -816,6 +851,7 @@ export class DgRelay {
         this.keepaliveTimer = setInterval(() => {
           if (this.stopped) return;
           this.send(99);
+          this.requestDailyPnl();
           const now = Date.now();
           if (now - this.lastVendorPacketAt <= 9000 || now - this.lastSubscriptionRecoveryAt <= 9000) return;
           this.lastSubscriptionRecoveryAt = now;

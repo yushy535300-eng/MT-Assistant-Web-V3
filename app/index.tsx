@@ -38,6 +38,7 @@ import {
 } from "@/lib/road-render";
 import { connectDgLive, type DgTableData } from "@/lib/dg-live";
 import { collectConfirmedMtTableIds } from "@/lib/mt-table-membership";
+import { platformTodayPnl, type DgDailyPnl } from "@/lib/dg-report";
 
 type Result = RoadResult;
 type TableData = {
@@ -1258,6 +1259,8 @@ export default function HomeScreen(){
   useEffect(()=>{strategyRef.current=strategy},[strategy]);
   useEffect(()=>{baseBetRef.current=baseBet},[baseBet]);
   const [todayPnl,setTodayPnl]=useState<number|null>(null);
+  const [dgTodayPnl,setDgTodayPnl]=useState<DgDailyPnl|null>(null);
+  const activeTodayPnl=platformTodayPnl(activePlatform,todayPnl,dgTodayPnl);
   const todayPnlRef=useRef<number|null>(null);
   // Independent stop-loss reminder. It reads the official MT balance from the existing
   // authenticated game WebSocket and never changes the locked 今日輸贏 logic.
@@ -2415,6 +2418,7 @@ export default function HomeScreen(){
   // DG relay follows the automatically obtained background DG URL.
   useEffect(()=>{
     if(!accessGranted)return;
+    setDgTodayPnl(null);
     if(!dgGameUrl){setDgConnected(false);return;}
     let cancelled=false;
     try{dgControllerRef.current?.close()}catch{}
@@ -2422,6 +2426,7 @@ export default function HomeScreen(){
     setDgConnected(false);
     setDgStatus("連線中");
     connectDgLive(dgGameUrl,accessSessionId,{
+      onPnl:(report)=>{if(!cancelled)setDgTodayPnl(report)},
       onTables:(next:DgTableData[])=>{if(!cancelled)setDgTables(next as TableData[])},
       onStatus:(status,message)=>{
         if(cancelled)return;
@@ -2747,7 +2752,7 @@ export default function HomeScreen(){
     const glow=latest?resultColor(latest):"#5A6B78";
     const page1=<View {...pageSwipe.panHandlers} style={s.assistPage}>
       <View style={s.decisionRow}><View style={s.decisionBox}><Text style={s.smallLabel}>最近</Text><View style={s.latestLine}><View style={[s.glowDot,{backgroundColor:glow,shadowColor:glow}]}/><Text style={[s.latestText,{color:glow}]}>{latest??"—"}</Text></View></View><View style={s.decisionBox}><Text style={s.smallLabel}>牌型</Text><Text style={s.detectText}>{detectPattern(assistTable?.results??[])}</Text></View><View style={s.decisionBox}><View style={s.recommendHeader}><View style={s.recommendTitleConfidence}><Text style={s.smallLabel}>推薦下注</Text><View style={[s.signalDotSmall,{backgroundColor:assistConfidenceState.color,shadowColor:assistConfidenceState.color}]}/><Text numberOfLines={1} style={[s.confidenceText,{color:assistConfidenceState.color,textShadowColor:assistConfidenceState.color}]}>{assistConfidenceState.label}</Text></View><Pressable onPress={()=>{setStrategyLevel(0);appendEvent(`${strategy}已手動重置至第 1 階`)}} style={s.martinResetMini}><Text style={s.martinResetMiniText}>重置</Text></Pressable></View><Text style={[s.recommendText,{color:resultColor(recommendation)}]}>{recommendation} {nextAmount.toLocaleString()}</Text><View style={s.recommendMetaRow}><Text style={[s.microText,s.recommendStrategyMeta]}>{strategy}｜第 {strategyLevel+1} 階｜下一注 {nextAmount.toLocaleString()}</Text></View></View></View>
-      <View style={s.todayPnlBox}><Text style={s.smallLabel}>今日輸贏</Text><Text style={[s.todayPnlValue,{color:todayPnl===null?"#FFFFFF":todayPnl>0?"#4ED58B":todayPnl<0?"#FF6973":"#FFFFFF"}]}>{todayPnl===null?"—":`${todayPnl>0?"+":""}${todayPnl.toLocaleString()}`}</Text></View>
+      <View style={s.todayPnlBox}><Text style={s.smallLabel}>今日輸贏</Text><Text style={[s.todayPnlValue,{color:activeTodayPnl===null?"#FFFFFF":activeTodayPnl>0?"#4ED58B":activeTodayPnl<0?"#FF6973":"#FFFFFF"}]}>{activeTodayPnl===null?"—":`${activeTodayPnl>0?"+":""}${activeTodayPnl.toLocaleString()}`}</Text></View>
       <View style={s.aiBox}><View style={s.aiHead}><Text style={s.aiTitle}>AI分析</Text><Pressable style={({pressed}:any)=>[s.stopLossMiniBtn,pressed&&s.stopLossMiniBtnPressed]} onPress={openStopLossSettings}><Text style={s.stopLossMiniBtnText}>止損設定</Text></Pressable></View><Text style={s.aiText}>{analysisText(assistTable)}</Text></View>
     </View>;
     const page2=<View {...pageSwipe.panHandlers} style={s.assistPage}><View style={s.moneyGrid}><View style={s.fieldBox}><Text style={s.smallLabel}>目前本金</Text><TextInput keyboardType="numeric" value={String(bankroll)} onChangeText={v=>{const n=Math.max(0,Number(v)||0);setBankroll(n)}} style={s.moneyInput}/></View><View style={s.fieldBox}><Text style={s.smallLabel}>基本單注</Text><TextInput keyboardType="numeric" value={String(baseBet)} onChangeText={v=>setBaseBet(Math.max(0,Number(v)||0))} style={s.moneyInput}/></View><View style={s.fieldBox}><Text style={s.smallLabel}>下一注</Text><Text style={s.nextAmount}>{nextAmount.toLocaleString()}</Text></View></View><ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.strategyScroll} contentContainerStyle={s.strategyRow}>{strategies.map(x=><Pressable key={x} style={[s.strategyChip,strategy===x&&s.strategyChipActive]} onPress={()=>{setStrategy(x);setStrategyLevel(0)}}><Text style={[s.strategyChipText,strategy===x&&{color:"#fff"}]}>{x}</Text></Pressable>)}</ScrollView><View style={s.progressBox}><Text style={s.smallLabel}>策略進度</Text><Text style={s.progressText}>{strategy} · 第 {strategyLevel+1} 階　→　下一注 {nextAmount.toLocaleString()}</Text></View></View>;

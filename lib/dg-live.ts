@@ -1,3 +1,4 @@
+import { dgReportDay, type DgDailyPnl } from "./dg-report";
 export type DgRoadResult = "莊" | "閒" | "和";
 
 export type DgTableData = {
@@ -31,6 +32,7 @@ type DgCallbacks = {
   onTables: (tables: DgTableData[]) => void;
   onStatus?: (status: DgStatus, message?: string) => void;
   onEvent?: (message: string) => void;
+  onPnl?: (report: DgDailyPnl | null) => void;
 };
 
 type DgController = { close: () => void };
@@ -374,6 +376,11 @@ async function connectDgServerRelay(gameUrl: string, sessionId: string, callback
     if (closed) return;
     const next = jsonOf<DgTableData[]>(raw as MessageEvent, []);
     if (Array.isArray(next)) callbacks.onTables(next);
+  });
+  source.addEventListener("pnl", (raw: Event) => {
+    if (closed) return;
+    const report = jsonOf<DgDailyPnl | null>(raw as MessageEvent, null);
+    callbacks.onPnl?.(report && typeof report.value === "number" && Number.isFinite(report.value) && report.day === dgReportDay() ? report : null);
   });
   source.addEventListener("event", (raw: Event) => {
     if (closed) return;
