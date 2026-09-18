@@ -50,7 +50,8 @@ export function getApiTableId(source: any) {
 export function isMtBaccaratTable(source: any) {
   const tableId = getApiTableId(source);
   const tableType = String(source?.table_type ?? source?.tableType ?? source?.game_type ?? "").toUpperCase();
-  if (tableType) return tableType === "BAC" || tableType === "BACCARAT";
+  // BAG07/BAG08 are advertised as BAS in the captured MT /tables response.
+  if (tableType) return tableType === "BAC" || tableType === "BACCARAT" || tableType === "BAS";
   // Live table events do not always repeat table_type. These are the baccarat
   // prefixes observed in MT's authoritative /tables response.
   return /^(BAG|BAV|SBG)/.test(tableId);

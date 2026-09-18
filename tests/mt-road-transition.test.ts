@@ -12,11 +12,12 @@ describe("MT international road transition", () => {
     expect(source).not.toContain("applyLiveWait(reset,p,activeMtTableIds)");
   });
 
-  it("does not remove a live table after one incomplete tables snapshot", () => {
+  it("retains confirmed subscription membership without an expiry", () => {
     const source = fs.readFileSync(path.resolve(process.cwd(), "app/index.tsx"), "utf8");
-    expect(source).toContain("const missingMtTableSnapshots=new Map<string,number>()");
-    expect(source).toContain("return misses<2");
-    expect(source).toContain("missingMtTableSnapshots.delete(liveEventTableId)");
+    expect(source).toContain("collectConfirmedMtTableIds(confirmedMtTableIdsRef.current,filtered)");
+    expect(source).toContain("let activeMtTableIds:string[]=[...confirmedMtTableIdsRef.current]");
+    expect(source).not.toContain("mtTableLastSeenAt");
+    expect(source).not.toContain("missingMtTableSnapshots");
     expect(source).toContain("reconcileCurrentMtTables(c,filtered,retainedIds)");
   });
 });
