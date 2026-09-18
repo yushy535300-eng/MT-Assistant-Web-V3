@@ -820,15 +820,21 @@ function eventName(payload:any){
     : payload?.action?.name ?? payload?.action?.path ?? payload?.path ?? payload?.name ?? ""
 }
 function eventTables(payload:any):any[]|null{const c=[payload?.msg?.tables?.tables,payload?.msg?.tables,payload?.data?.tables?.tables,payload?.data?.tables,payload?.tables?.tables,payload?.tables];return c.find(Array.isArray)??null}
-function reconcileCurrentMtTables(current:TableData[],sources:any[]):TableData[]{
+function reconcileCurrentMtTables(current:TableData[],sources:any[],retainedIds:readonly string[]=[]):TableData[]{
   const seen=new Set<string>();
   const active=sources.filter(isMtBaccaratTable).filter(source=>{
     const id=getApiTableId(source);
     if(!id||seen.has(id))return false;
     seen.add(id);return true;
   });
-  const seeded=active.map(source=>{
-    const apiId=getApiTableId(source);
+  const activeById=new Map(active.map(source=>[getApiTableId(source),source]));
+  const keep=new Set([...activeById.keys(),...retainedIds]);
+  const orderedIds=[
+    ...current.map(table=>String(table.apiId??table.id).toUpperCase()).filter(id=>keep.has(id)),
+    ...active.map(getApiTableId).filter(id=>!current.some(table=>String(table.apiId??table.id).toUpperCase()===id)),
+  ];
+  const seeded=orderedIds.map(apiId=>{
+    const source=activeById.get(apiId);
     const existing=current.find(table=>(table.apiId??table.id)===apiId);
     if(existing)return existing;
     return {
@@ -1221,7 +1227,7 @@ export default function HomeScreen(){
   // WebSocket packets are processed immediately into this ref. React painting is
   // committed at most once per animation frame, so the socket frequency is NOT
   // reduced while drag gestures no longer fight dozens of synchronous renders.
-  const liveTablesRef=useRef<TableData[]>([]);
+  const liveTablesRef=useRef<TableData[]>(initialTables);
   const tablesFrameRef=useRef<number|null>(null);
   const updateLiveTables=(updater:(current:TableData[])=>TableData[])=>{
     const current=liveTablesRef.current;
@@ -1968,6 +1974,7 @@ export default function HomeScreen(){
     setSocket(ws);
     let authenticated=false;
     let activeMtTableIds:string[]=[];
+    const missingMtTableSnapshots=new Map<string,number>();
     let subscribedTableSignature="";
     const requestTables=(quiet=false)=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/tables",data:{gametype_id:3,game_id:1,room_id:1}}}));if(!quiet)appendEvent("已請求目前真人桌歷史牌局")}};
     const requestSvg=()=>authenticated&&ws.readyState===WebSocket.OPEN&&ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));
@@ -2238,7 +2245,18 @@ export default function HomeScreen(){
           refreshBetReportAfterSettlement(winTableId,p);
         }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();requestBalance();startDealerRefresh();startBalanceRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.endsWith("/tables")){
       const filtered=src.filter(isMtBaccaratTable);
-      activeMtTableIds=[...new Set(filtered.map(getApiTableId).filter(Boolean))];
+      const snapshotIds=[...new Set(filtered.map(getApiTableId).filter(Boolean))];
+      const snapshotIdSet=new Set(snapshotIds);
+      snapshotIds.forEach(id=>missingMtTableSnapshots.delete(id));
+      const retainedIds=liveTablesRef.current.map(table=>String(table.apiId??table.id).toUpperCase()).filter(id=>{
+        if(snapshotIdSet.has(id))return false;
+        const misses=(missingMtTableSnapshots.get(id)??0)+1;
+        missingMtTableSnapshots.set(id,misses);
+        // MT occasionally omits a live table from one /tables response. Require
+        // two consecutive authoritative misses before removing its card.
+        return misses<2;
+      });
+      activeMtTableIds=[...new Set([...snapshotIds,...retainedIds])];
       setMtSnapshotReady(true);
       updateLiveTables(c=>{
         // The first complete snapshot after every connection/reconnection is the
@@ -2248,18 +2266,20 @@ export default function HomeScreen(){
           reconnectingRef.current=false;
           reconnectCooldownUntilRef.current=Date.now()+8000;
           appendEvent("重新連線牌路確認完成");
-          return reconcileCurrentMtTables(c,filtered);
+          return reconcileCurrentMtTables(c,filtered,retainedIds);
         }
 
         // Same connection, same Shoe: reconcile in place. Never reconnect just because
         // a snapshot arrives out of order or is temporarily shorter.
-        return reconcileCurrentMtTables(c,filtered);
+        return reconcileCurrentMtTables(c,filtered,retainedIds);
       });
       subscribe();return}if(src&&name.endsWith("/tablesvg")){
         const filtered=src.filter(isMtBaccaratTable);
         updateLiveTables(c=>applyTablesSameShoe(c,filtered));
         return;
-      }if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>{const reset=resetRoadForNewShoePayload(c,p);return applyDealerRealtime(applyLiveShowWin(reset,p),p)});scheduleTablesRefresh(1200);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){
+      }if(name.includes("/show_win")){const liveEventTableId=String((p?.body??p?.msg??p?.data??{})?.table_id??"").toUpperCase();if(liveEventTableId)missingMtTableSnapshots.delete(liveEventTableId);const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>{const reset=resetRoadForNewShoePayload(c,p);return applyDealerRealtime(applyLiveShowWin(reset,p),p)});scheduleTablesRefresh(1200);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){
+          const liveEventTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"").toUpperCase();
+          if(liveEventTableId)missingMtTableSnapshots.delete(liveEventTableId);
           if(name.endsWith("/end")){
             const endTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"");
             refreshBetReportAfterSettlement(endTableId,p);
