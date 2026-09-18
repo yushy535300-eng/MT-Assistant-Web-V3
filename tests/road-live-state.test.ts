@@ -4,6 +4,7 @@ import {
   applyLiveShowWin,
   applyLiveTables,
   applyLiveWait,
+  isMtBaccaratTable,
   parseBeadPlate,
   type LiveRoadTable,
 } from "../lib/road-live-state";
@@ -46,14 +47,14 @@ describe("real-time baccarat road state", () => {
     expect(corrected[0].results).toEqual(["閒", "莊"]);
   });
 
-  it("uses server trend after it catches up and resets road at a new shoe", () => {
+  it("uses server trend after it catches up and does not trust show_win alone to reset a shoe", () => {
     const immediate = applyLiveShowWin([table()], { body: { shoe: 17035, round: 31, table_id: "BAG03", winner: 2 } });
     const caughtUp = applyLiveTables(immediate, [{ table_id: "BAG03", table_name: "03", shoe: "17035", round: "31", trend: { current_shoe: "17035", current_round: "31", bead_plate2: "0102" } }]);
     expect(caughtUp[0].results).toEqual(["閒", "莊"]);
 
     const nextShoe = applyLiveShowWin(caughtUp, { body: { shoe: 17036, round: 1, table_id: "BAG03", winner: 1 } });
-    expect(nextShoe[0].results).toEqual(["閒"]);
-    expect(nextShoe[0].shoe).toBe("17036");
+    expect(nextShoe[0].results).toEqual(["閒", "莊", "閒"]);
+    expect(nextShoe[0].shoe).toBe("17035");
   });
 
   it("updates BAG wait metadata, including the real red countdown, but ignores non-BAG events", () => {
@@ -80,5 +81,30 @@ describe("real-time baccarat road state", () => {
     expect(merged[0].name).toBe("中文");
     expect(merged[0].roomId).toBe("31");
     expect(merged[0].dealerPhoto).toBe("https://dealer.example/avatar.png");
+  });
+
+  it("accepts international BAC tables and updates their dealer and live road", () => {
+    const international: LiveRoadTable = {
+      ...table(), id: "BAV01", apiId: "BAV01", shoe: "—", round: 0, results: [], player: 0,
+    };
+    const merged = applyLiveTables([international], [{
+      table_id: "BAV01", table_type: "BAC", totalplayers: 96, room_id: 47,
+      dealer: { nick_name: "Sky", avatar_url: "https://dealer.example/sky.png" },
+      trend: { current_shoe: "20260918-8", current_round: 2, bead_plate2: "0102" },
+    }]);
+    expect(merged[0].name).toBe("Sky");
+    expect(merged[0].dealerPhoto).toBe("https://dealer.example/sky.png");
+    expect(merged[0].results).toEqual(["閒", "莊"]);
+
+    const won = applyLiveShowWin(merged, { body: { table_id: "BAV01", shoe: "20260918-8", round: 3, winner: 3 } });
+    expect(won[0].results).toEqual(["閒", "莊", "和"]);
+    const waited = applyLiveWait(won, { body: { table_id: "BAV01", round: 4, count: 18 } }, ["BAV01"]);
+    expect(waited[0].countdown).toBe(18);
+  });
+
+  it("identifies BAC membership from table_type while excluding non-baccarat tables", () => {
+    expect(isMtBaccaratTable({ table_id: "SBG01", table_type: "BAC" })).toBe(true);
+    expect(isMtBaccaratTable({ table_id: "BAV08" })).toBe(true);
+    expect(isMtBaccaratTable({ table_id: "DTG02", table_type: "DT" })).toBe(false);
   });
 });

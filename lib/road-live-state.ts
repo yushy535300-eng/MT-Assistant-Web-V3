@@ -44,7 +44,16 @@ export function parseBeadPlate(raw: unknown): RoadResult[] {
 }
 
 export function getApiTableId(source: any) {
-  return String(source?.table_id ?? source?.id ?? source?.room_id ?? "");
+  return String(source?.table_id ?? source?.id ?? "").toUpperCase();
+}
+
+export function isMtBaccaratTable(source: any) {
+  const tableId = getApiTableId(source);
+  const tableType = String(source?.table_type ?? source?.tableType ?? source?.game_type ?? "").toUpperCase();
+  if (tableType) return tableType === "BAC" || tableType === "BACCARAT";
+  // Live table events do not always repeat table_type. These are the baccarat
+  // prefixes observed in MT's authoritative /tables response.
+  return /^(BAG|BAV|SBG)/.test(tableId);
 }
 
 function stats(results: RoadResult[]) {
@@ -120,7 +129,7 @@ export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): 
 }
 
 export function applyLiveTables<T extends LiveRoadTable>(current: T[], sources: any[]): T[] {
-  const baccarat = sources.filter((source) => getApiTableId(source).startsWith("BAG"));
+  const baccarat = sources.filter(isMtBaccaratTable);
   return current.map((table) => {
     const expected = table.apiId ?? `BAG${table.id}`;
     const source = baccarat.find((item) => getApiTableId(item) === expected || String(item?.table_name ?? "") === table.id);
@@ -131,8 +140,8 @@ export function applyLiveTables<T extends LiveRoadTable>(current: T[], sources: 
 export function applyLiveShowWin<T extends LiveRoadTable>(current: T[], payload: any): T[] {
   const body = payload?.body ?? payload?.msg ?? payload?.data ?? {};
   const result = winnerToRoadResult(body?.winner);
-  const targetApiId = String(body?.table_id ?? "");
-  if (!result || !targetApiId.startsWith("BAG")) return current;
+  const targetApiId = String(body?.table_id ?? "").toUpperCase();
+  if (!result || !current.some((table) => (table.apiId ?? table.id) === targetApiId)) return current;
 
   return current.map((table) => {
     if ((table.apiId ?? `BAG${table.id}`) !== targetApiId) return table;
@@ -170,7 +179,7 @@ export function applyLiveShowWin<T extends LiveRoadTable>(current: T[], payload:
 
 export function applyLiveWait<T extends LiveRoadTable>(current: T[], payload: any, allowedIds: readonly string[]): T[] {
   const body = payload?.body ?? payload?.msg ?? payload?.data ?? {};
-  const targetApiId = String(body?.table_id ?? "");
+  const targetApiId = String(body?.table_id ?? "").toUpperCase();
   if (!allowedIds.includes(targetApiId)) return current;
   return current.map((table) => {
     if ((table.apiId ?? `BAG${table.id}`) !== targetApiId) return table;

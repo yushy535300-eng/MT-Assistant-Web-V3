@@ -24,6 +24,7 @@ import {
   applyLiveTables,
   applyLiveWait,
   getApiTableId,
+  isMtBaccaratTable,
   parseBeadPlate,
   winnerToRoadResult,
   type RoadResult,
@@ -51,7 +52,6 @@ type BetSide = "莊" | "閒" | "和";
 type BetRecord = { side: BetSide; result: Result; amount: number; pnl: number; at: number };
 type PendingBet = { tableId: string; side: BetSide; amount: number; resultKey?: string } | null;
 
-const baccaratTableIds = ["BAG01","BAG02","BAG03","BAG03A","BAG05","BAG06","BAG07","BAG08","BAG09","BAG10","BAG11","BAG12","BAG13","BAG13A","BAG15"];
 const dealerStreamUrls: Record<string,string> = {
   BAG01: "https://pull.bighit888.com/livestream/bag01-1.flv",
   BAG02: "https://pull.bighit888.com/livestream/bag02-1.flv",
@@ -93,11 +93,7 @@ function ensureMpegTs(){
   });
   return mpegTsLoaderPromise;
 }
-const initialTables: TableData[] = baccaratTableIds.map((apiId) => ({
-  id: apiId.replace(/^BAG0?/, ""), apiId, game: "百家樂", name: "—", players: "—",
-  roomId: "—", tableBadge: "—", shoe: "—", round: 0, banker: 0, player: 0, tie: 0,
-  results: [], trend: "",
-}));
+const initialTables: TableData[] = [];
 const dgPlaceholderDefs = [
   ["BAC001","RB01","60101"],["BAC002","RB02","60102"],["BAC003","RB03","60103"],["BAC004","RB04","60104"],["BAC005","RB05","60105"],
   ["TID348","S01","50101"],["TID349","S02","50102"],["TID350","S03","50103"],["TID351","S05","50104"],["TID352","S06","50105"],
@@ -787,8 +783,8 @@ function AccessScreen({onAuthenticated,notice}:{onAuthenticated:(sessionId:strin
 
 function applyDealerRealtime(current: TableData[], payload: any): TableData[] {
   const body = payload?.body ?? payload?.msg ?? payload?.data ?? payload ?? {};
-  const tableId = String(body?.table_id ?? body?.id ?? body?.room_id ?? "");
-  if (!tableId.startsWith("BAG")) return current;
+  const tableId = String(body?.table_id ?? body?.id ?? body?.room_id ?? "").toUpperCase();
+  if (!current.some((table) => (table.apiId ?? table.id) === tableId)) return current;
 
   const dealer = body?.dealer ?? body?.dealer_info ?? body?.dealerInfo ?? {};
   const dealerName =
@@ -817,6 +813,25 @@ function eventName(payload:any){
     : payload?.action?.name ?? payload?.action?.path ?? payload?.path ?? payload?.name ?? ""
 }
 function eventTables(payload:any):any[]|null{const c=[payload?.msg?.tables?.tables,payload?.msg?.tables,payload?.data?.tables?.tables,payload?.data?.tables,payload?.tables?.tables,payload?.tables];return c.find(Array.isArray)??null}
+function reconcileCurrentMtTables(current:TableData[],sources:any[]):TableData[]{
+  const seen=new Set<string>();
+  const active=sources.filter(isMtBaccaratTable).filter(source=>{
+    const id=getApiTableId(source);
+    if(!id||seen.has(id))return false;
+    seen.add(id);return true;
+  });
+  const seeded=active.map(source=>{
+    const apiId=getApiTableId(source);
+    const existing=current.find(table=>(table.apiId??table.id)===apiId);
+    if(existing)return existing;
+    return {
+      id:String(source?.table_name??apiId),apiId,game:"百家樂",name:"—",players:"—",
+      roomId:String(source?.room_id??"—"),tableBadge:String(source?.orderState??"—"),
+      shoe:"—",round:0,banker:0,player:0,tie:0,results:[],trend:"",live:false,
+    } as TableData;
+  });
+  return applyTablesSameShoe(seeded,active);
+}
 function extractMtUrlToken(value:string){try{return new URL(value.trim()).searchParams.get("token")?.trim()??""}catch{return value.trim().replace(/^token=/i,"")}}
 function readonlyConnectionUrl(value:string){
   if(!value)return "自動取得中";
@@ -1933,8 +1948,10 @@ export default function HomeScreen(){
     const ws=new WebSocket(wsUrl);
     socketRef.current=ws;
     setSocket(ws);
-    let authenticated=false,subscribed=false;
-    const requestTables=(quiet=false)=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/tables",data:{gametype_id:3,game_id:1,room_id:1}}}));if(!quiet)appendEvent("已請求 15 桌歷史牌局")}};
+    let authenticated=false;
+    let activeMtTableIds:string[]=[];
+    let subscribedTableSignature="";
+    const requestTables=(quiet=false)=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/tables",data:{gametype_id:3,game_id:1,room_id:1}}}));if(!quiet)appendEvent("已請求目前真人桌歷史牌局")}};
     const requestSvg=()=>authenticated&&ws.readyState===WebSocket.OPEN&&ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/gametype/*/game/*/room/*/tablesvg"}}));
     const requestBalance=()=>{
       if(!authenticated||ws.readyState!==WebSocket.OPEN)return;
@@ -1981,7 +1998,7 @@ export default function HomeScreen(){
       if(svgRefreshTimer)clearTimeout(svgRefreshTimer); svgRefreshTimer=null;
       if(subscribeTimer)clearTimeout(subscribeTimer); subscribeTimer=null;
     };
-    // Collapse bursts from 15 tables into one snapshot request.
+    // Collapse bursts from all currently available tables into one snapshot request.
     const scheduleTablesRefresh=(delay=700)=>{
       if(tablesRefreshTimer)clearTimeout(tablesRefreshTimer);
       tablesRefreshTimer=setTimeout(()=>{tablesRefreshTimer=null;if(isCurrentSocket())requestTables(true)},delay);
@@ -2080,10 +2097,9 @@ export default function HomeScreen(){
     const refreshDataSession=()=>{
       if(!isCurrentSocket()||!authenticated||ws.readyState!==WebSocket.OPEN)return;
       // Re-run post-auth DATA initialization on the SAME socket. Never reconnect/re-authenticate.
-      subscribed=false;
       requestTables(true);
       setTimeout(()=>{if(isCurrentSocket()&&authenticated)requestSvg()},25);
-      setTimeout(()=>{if(isCurrentSocket()&&authenticated)subscribe()},50);
+      setTimeout(()=>{if(isCurrentSocket()&&authenticated)subscribe(true)},50);
       setTimeout(()=>{if(isCurrentSocket()&&authenticated&&!betReportInFlight)requestBetReport()},80);
       setTimeout(()=>{if(isCurrentSocket()&&authenticated)requestBalance()},120);
       setTimeout(()=>{if(isCurrentSocket()&&authenticated&&!betReportInFlight)requestBetReport()},900);
@@ -2096,10 +2112,17 @@ export default function HomeScreen(){
     const startDealerRefresh=()=>{
       if(dealerRefreshTimer)clearInterval(dealerRefreshTimer);
       // Safety-net metadata refresh only. Live table events still update immediately.
-      // 10s avoids hammering /tables continuously for 15 tables.
+      // 10s keeps membership, dealer metadata and roads current without hammering /tables.
       dealerRefreshTimer=setInterval(()=>{if(isCurrentSocket())requestTables(true)},10000);
     };
-    const subscribe=()=>{if(authenticated&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/mulitple_join",data:{table_id:baccaratTableIds.join(",")}}}));subscribed=true;appendEvent("已訂閱 15 桌即時事件")}};
+    const subscribe=(force=false)=>{
+      if(!authenticated||ws.readyState!==WebSocket.OPEN||!activeMtTableIds.length)return;
+      const signature=activeMtTableIds.join(",");
+      if(!force&&signature===subscribedTableSignature)return;
+      ws.send(JSON.stringify({method:"GET",action:{name:"/api/v1/gametype/*/game/*/room/*/mulitple_join",data:{table_id:signature}}}));
+      subscribedTableSignature=signature;
+      appendEvent(`已訂閱目前 ${activeMtTableIds.length} 桌即時事件`);
+    };
     ws.onopen=()=>{if(!isCurrentSocket())return;appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
     ws.onmessage=e=>{if(!isCurrentSocket())return;try{
       const p=JSON.parse(e.data),name=eventName(p);
@@ -2195,8 +2218,9 @@ export default function HomeScreen(){
             setV38ByTable(v38ByTableRef.current);
           }
           refreshBetReportAfterSettlement(winTableId,p);
-        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();requestBalance();startDealerRefresh();startBalanceRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200);subscribeTimer=setTimeout(()=>{subscribeTimer=null;if(isCurrentSocket())subscribe()},400)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.includes("/tables")){
-      const filtered=src.filter(x=>baccaratTableIds.includes(getApiTableId(x)));
+        }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();requestBalance();startDealerRefresh();startBalanceRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.endsWith("/tables")){
+      const filtered=src.filter(isMtBaccaratTable);
+      activeMtTableIds=[...new Set(filtered.map(getApiTableId).filter(Boolean))];
       updateLiveTables(c=>{
         // The first complete snapshot after every connection/reconnection is the
         // confirmation source, exactly like a manual reconnect.
@@ -2205,19 +2229,23 @@ export default function HomeScreen(){
           reconnectingRef.current=false;
           reconnectCooldownUntilRef.current=Date.now()+8000;
           appendEvent("重新連線牌路確認完成");
-          return applyTablesSameShoe(c,filtered);
+          return reconcileCurrentMtTables(c,filtered);
         }
 
         // Same connection, same Shoe: reconcile in place. Never reconnect just because
         // a snapshot arrives out of order or is temporarily shorter.
-        return applyTablesSameShoe(c,filtered);
+        return reconcileCurrentMtTables(c,filtered);
       });
-      if(!subscribed)subscribe();return}if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>{const reset=resetRoadForNewShoePayload(c,p);return applyDealerRealtime(applyLiveShowWin(reset,p),p)});scheduleTablesRefresh(1200);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){
+      subscribe();return}if(src&&name.endsWith("/tablesvg")){
+        const filtered=src.filter(isMtBaccaratTable);
+        updateLiveTables(c=>applyTablesSameShoe(c,filtered));
+        return;
+      }if(name.includes("/show_win")){const actual=winnerToRoadResult((p?.body??p?.msg??p?.data??{})?.winner);if(actual)settlePending(actual,p);updateLiveTables(c=>{const reset=resetRoadForNewShoePayload(c,p);return applyDealerRealtime(applyLiveShowWin(reset,p),p)});scheduleTablesRefresh(1200);return}if(name.includes("/table/")&&(name.endsWith("/wait")||name.endsWith("/end"))){
           if(name.endsWith("/end")){
             const endTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"");
             refreshBetReportAfterSettlement(endTableId,p);
           }
-          updateLiveTables(c=>{const reset=resetRoadForNewShoePayload(c,p);return applyDealerRealtime(applyLiveWait(reset,p,baccaratTableIds),p)});return}}catch{}};
+          updateLiveTables(c=>{const reset=resetRoadForNewShoePayload(c,p);return applyDealerRealtime(applyLiveWait(reset,p,activeMtTableIds),p)});return}}catch{}};
     ws.onerror=()=>{if(!isCurrentSocket())return;setConnected(false);appendEvent("WebSocket 發生錯誤")};
     ws.onclose=()=>{
       clearSocketTimers();
@@ -2913,7 +2941,7 @@ export default function HomeScreen(){
       </View></View></Modal>
 
       <Modal visible={connectionOpen} transparent animationType="fade" onRequestClose={()=>setConnectionOpen(false)}><View style={s.modalShade}><View style={s.connectionModal}><View style={s.modalHead}><Text style={s.modalTitle}>牌路連線中心</Text><Pressable onPress={()=>setConnectionOpen(false)}><MaterialIcons name="close" size={22} color="#DDE8F0"/></Pressable></View><Text style={s.modalNote}>MT、DG 進入牌路主頁後會自動連線。下列網址只供顯示，使用者無法修改。DG 單工作階段：內建</Text><View style={s.connectionStatusRow}><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>MT</Text><Text style={[s.connectionStatusText,{color:connected?"#4BD693":"#FFB54D"}]}>{connected?"已連線":"連線中"}</Text></View><View style={s.connectionStatusCard}><Text style={s.fieldLabel}>DG</Text><Text style={[s.connectionStatusText,{color:dgConnected?"#4BD693":"#FFB54D"}]}>{dgConnected?"已連線":"連線中"}</Text></View></View><Text style={s.fieldLabel}>MT 即時牌路 WebSocket（固定）</Text><TextInput value={readonlyConnectionUrl(wsUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>MT 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(mtUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><Text style={s.fieldLabel}>DG 牌路授權網址（唯讀）</Text><TextInput value={readonlyConnectionUrl(dgGameUrl)} editable={false} selectTextOnFocus style={s.modalInput}/><View style={s.modalActions}><Pressable style={[s.actionBtn,{backgroundColor:"#2E7CEB"}]} onPress={()=>void connectRoadDashboard(true)}><MaterialIcons name="sync" size={15} color="#fff"/><Text style={s.btnText}>重新連線</Text></Pressable><Pressable style={[s.actionBtn,{backgroundColor:"#344553"}]} onPress={()=>setConnectionOpen(false)}><Text style={s.btnText}>完成</Text></Pressable></View></View></View></Modal>
-      <Modal visible={helpOpen} transparent animationType="fade" onRequestClose={()=>setHelpOpen(false)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>說明</Text><Pressable onPress={()=>setHelpOpen(false)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>主頁顯示 15 桌即時牌路。MT 懸浮輔助可左右滑動 3 頁：即時輔助、資金策略、輸贏統計。</Text></View></View></Modal>
+      <Modal visible={helpOpen} transparent animationType="fade" onRequestClose={()=>setHelpOpen(false)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>說明</Text><Pressable onPress={()=>setHelpOpen(false)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>主頁只顯示 MT 目前提供的真人桌並即時更新。MT 懸浮輔助可左右滑動 3 頁：即時輔助、資金策略、輸贏統計。</Text></View></View></Modal>
       <Modal visible={!!radarDetailTable} transparent animationType="fade" onRequestClose={()=>setRadarDetailId(null)}><View style={s.modalShade}><View style={s.radarDetailModal}><View style={s.modalHead}><View><Text style={s.radarKicker}>MT MATRIX · LIVE ROAD SNAPSHOT</Text><Text style={s.radarDetailTitle}>{radarDetailId} · 第 {radarDetailTable?.round??0} 局</Text></View><Pressable onPress={()=>setRadarDetailId(null)} style={s.radarClose}><MaterialIcons name="close" size={20} color="#DCEEFF"/></Pressable></View>{radarDetailTable?<><View style={s.radarDetailStats}><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前推薦</Text><Text style={[s.radarDetailValue,{color:resultColor(radarDetailDecision.side)}]}>{radarDetailDecision.side}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>信心度</Text><View style={s.radarDetailConfidence}><View style={[s.signalDot,{backgroundColor:confidenceState(radarDetailConfidence).color,shadowColor:confidenceState(radarDetailConfidence).color}]}/><Text style={[s.radarDetailValue,{color:confidenceState(radarDetailConfidence).color,marginTop:0}]}>{confidenceState(radarDetailConfidence).label}</Text></View></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>目前牌型</Text><Text numberOfLines={1} style={s.radarDetailValue}>{detectPattern(radarDetailTable.results)}</Text></View><View style={s.radarDetailStat}><Text style={s.radarDetailLabel}>莊／閒／和</Text><Text style={s.radarDetailValue}>{radarDetailTable.banker}／{radarDetailTable.player}／{radarDetailTable.tie}</Text></View></View><View style={[s.radarRoadWrap,{height:desktop?190:150}]}><RoadGrid table={radarDetailTable} desktop={desktop} transparent/></View><Text style={s.radarDetailNote}>{analysisText(radarDetailTable)}</Text></>:null}</View></View></Modal>
 
       <Modal visible={!!analysisTable} transparent animationType="fade" onRequestClose={()=>setAnalysisTable(null)}><View style={s.modalShade}><View style={s.smallModal}><View style={s.modalHead}><Text style={s.modalTitle}>百家樂 {analysisTable?.id} 分析</Text><Pressable onPress={()=>setAnalysisTable(null)}><MaterialIcons name="close" size={22} color="#fff"/></Pressable></View><Text style={s.helpText}>{analysisText(analysisTable??undefined)}</Text></View></View></Modal>
