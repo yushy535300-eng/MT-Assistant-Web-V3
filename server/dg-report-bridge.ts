@@ -29,6 +29,6 @@ function __pnlReceive(ws,event){
     if(bean.cmd===13&&bean.type===1&&JSON.stringify(bean.list)==='["","","11","1"]')event.stopImmediatePropagation();
   }catch{}
 }
-const __pnlTimer=setInterval(__pnlPoll,10000);
+const __pnlTimer=setInterval(__pnlPoll,2000);
 window.addEventListener('pagehide',()=>{clearInterval(__pnlTimer);__pnlSocket=null;},{once:true});
 `;

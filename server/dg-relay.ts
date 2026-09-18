@@ -572,8 +572,10 @@ export class DgRelay {
   private lastPnlRequestAt = 0;
   createPnlRequest(): Buffer | null {
     const now = Date.now();
-    if (this.stopped || this.status !== "connected" || now - this.lastPnlRequestAt < 10000) return null;
-    if (this.pnlRequest && now - this.pnlRequest.at < 25000) return null;
+    // The floating assistant needs to follow a settled hand closely. This is
+    // still one authenticated socket, but has a short read-only report cadence.
+    if (this.stopped || this.status !== "connected" || now - this.lastPnlRequestAt < 2000) return null;
+    if (this.pnlRequest && now - this.pnlRequest.at < 6000) return null;
     this.pnlRequest = { day: dgReportDay(now), at: now };
     this.lastPnlRequestAt = now;
     return encodePublicBean(13, this.authToken(13), { type: 1, object: "1", list: DG_PNL_REPORT_LIST });
@@ -885,6 +887,10 @@ export class DgRelay {
         this.map.set(tableId, { ...prev, results, ...counts, lastUpdated: Date.now(), lastResultKey: `${prev.shoe}:${prev.round}:${results.length}:${results.at(-1) || ""}` });
         this.pendingRoads.delete(tableId);
         this.emitTables();
+        // A full road push follows a completed hand. Ask the already connected
+        // DG session for the updated daily total immediately; the 2s gate above
+        // prevents bursts when the lobby sends duplicate road packets.
+        this.requestDailyPnl();
       }
     }
     if (bean.table?.length) {

@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import vm from "node:vm";
 import { dgReportDay, isDgPnlReply, parseDgDailyPnl, platformTodayPnl } from "../lib/dg-report";
 import { DgRelay, parsePublicBean } from "../server/dg-relay";
@@ -68,6 +70,14 @@ describe("DG daily report isolation", () => {
     expect(chunks.length).toBe(count);
     relay.ingestBridgeFrame(reply([500, 500, -999])); // duplicate has no pending request
     expect(chunks.length).toBe(count);
+  });
+  it("uses a two-second report cadence and immediately follows a new full road", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "server/dg-relay.ts"), "utf8");
+    const bridge = fs.readFileSync(path.resolve(process.cwd(), "server/dg-report-bridge.ts"), "utf8");
+    expect(source).toContain("now - this.lastPnlRequestAt < 2000");
+    expect(source).toContain("now - this.pnlRequest.at < 6000");
+    expect(source).toContain("this.requestDailyPnl();");
+    expect(bridge).toContain("setInterval(__pnlPoll,2000)");
   });
   it("polls only an authenticated existing browser socket and hides only assistant replies", async () => {
     const sent: unknown[] = [];
