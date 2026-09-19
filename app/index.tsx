@@ -2059,6 +2059,8 @@ export default function HomeScreen(){
     let reportSettlementTimer:ReturnType<typeof setTimeout>|null=null;
     let reportSettlementFollowupTimer:ReturnType<typeof setTimeout>|null=null;
     let svgRefreshTimer:ReturnType<typeof setTimeout>|null=null;
+    let pokerCardSyncTimer:ReturnType<typeof setTimeout>|null=null;
+    let pokerCardSyncRun=0;
     let subscribeTimer:ReturnType<typeof setTimeout>|null=null;
     let betReportInFlight=false;
     let betReportRequestAt=0;
@@ -2088,6 +2090,8 @@ export default function HomeScreen(){
       if(reportSyncTimer)clearTimeout(reportSyncTimer); reportSyncTimer=null;
       reportSyncActive=false;
       if(svgRefreshTimer)clearTimeout(svgRefreshTimer); svgRefreshTimer=null;
+      if(pokerCardSyncTimer)clearTimeout(pokerCardSyncTimer); pokerCardSyncTimer=null;
+      pokerCardSyncRun++;
       if(subscribeTimer)clearTimeout(subscribeTimer); subscribeTimer=null;
     };
     // Collapse bursts from all currently available tables into one snapshot request.
@@ -2098,6 +2102,25 @@ export default function HomeScreen(){
     const scheduleSvgRefresh=(delay=350)=>{
       if(svgRefreshTimer)clearTimeout(svgRefreshTimer);
       svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},delay);
+    };
+    // International rooms reveal one hand in several show_poker packets. On a
+    // busy/same-token session Safari can receive the first packet but miss a
+    // later delta. MT's tablesvg.game_data is the cumulative source, so sample
+    // it for the few seconds in which cards are being opened and merge every
+    // non-zero card slot. This feeds both V38 and Terminal Parity.
+    const startPokerCardSync=()=>{
+      const run=++pokerCardSyncRun;
+      if(pokerCardSyncTimer)clearTimeout(pokerCardSyncTimer);
+      const delays=[120,280,520,900,1450,2200,3200,4500,6200];
+      let index=0;
+      const next=()=>{
+        if(run!==pokerCardSyncRun||!isCurrentSocket()||!authenticated)return;
+        requestSvg();
+        if(index>=delays.length-1){pokerCardSyncTimer=null;return}
+        const wait=delays[++index]-delays[index-1];
+        pokerCardSyncTimer=setTimeout(next,wait);
+      };
+      pokerCardSyncTimer=setTimeout(next,delays[0]);
     };
 
     const reportPayload=()=>{
@@ -2251,6 +2274,10 @@ export default function HomeScreen(){
           v38ByTableRef.current={...v38ByTableRef.current,[parsed.tableId]:next};
           setV38ByTable(v38ByTableRef.current);
         }
+        // Do not depend on receiving every progressive show_poker delta.
+        // tablesvg snapshots complete the same round when a later delta is
+        // delivered only to MT's foreground socket.
+        startPokerCardSync();
       }
         if(name.includes("/api/v1/member/me/balance")){
           const points=Number(p?.msg?.user?.points??p?.body?.user?.points??p?.data?.user?.points??p?.msg?.points??p?.body?.points??p?.data?.points);
