@@ -1681,8 +1681,8 @@ export default function HomeScreen(){
     onMoveShouldSetPanResponder:(_,g)=>Math.abs(g.dx)>=2||Math.abs(g.dy)>=2,
     onPanResponderGrant:()=>{v38DraggingRef.current=true;v38Position.stopAnimation(()=>v38Position.extractOffset())},
     onPanResponderMove:(_,g)=>v38Position.setValue({x:g.dx,y:g.dy}),
-    onPanResponderRelease:()=>{v38Position.flattenOffset();clampV38Position();v38DraggingRef.current=false},
-    onPanResponderTerminate:()=>{v38Position.flattenOffset();clampV38Position();v38DraggingRef.current=false},
+    onPanResponderRelease:()=>{if(v38DraggingRef.current){v38Position.flattenOffset();clampV38Position();v38DraggingRef.current=false}},
+    onPanResponderTerminate:()=>{if(v38DraggingRef.current){v38Position.flattenOffset();clampV38Position();v38DraggingRef.current=false}},
     onPanResponderTerminationRequest:()=>false,
   }),[v38Position,width,height,desktop]);
 
@@ -1702,10 +1702,45 @@ export default function HomeScreen(){
     onMoveShouldSetPanResponder:(_,g)=>Math.abs(g.dx)>=2||Math.abs(g.dy)>=2,
     onPanResponderGrant:()=>{terminalParityDraggingRef.current=true;terminalParityPosition.stopAnimation(()=>terminalParityPosition.extractOffset())},
     onPanResponderMove:(_,g)=>terminalParityPosition.setValue({x:g.dx,y:g.dy}),
-    onPanResponderRelease:()=>{terminalParityPosition.flattenOffset();clampTerminalParityPosition();terminalParityDraggingRef.current=false},
-    onPanResponderTerminate:()=>{terminalParityPosition.flattenOffset();clampTerminalParityPosition();terminalParityDraggingRef.current=false},
+    onPanResponderRelease:()=>{if(terminalParityDraggingRef.current){terminalParityPosition.flattenOffset();clampTerminalParityPosition();terminalParityDraggingRef.current=false}},
+    onPanResponderTerminate:()=>{if(terminalParityDraggingRef.current){terminalParityPosition.flattenOffset();clampTerminalParityPosition();terminalParityDraggingRef.current=false}},
     onPanResponderTerminationRequest:()=>false,
   }),[terminalParityPosition,width,height,desktop]);
+
+  // React Native Web's PanResponder can miss its release event when the mouse
+  // leaves the drag header/window before the button is released. In that case
+  // the responder keeps consuming mouse movement and the floating panel appears
+  // glued to the cursor. Finish every desktop panel drag at the browser level.
+  useEffect(()=>{
+    if(Platform.OS!=="web"||typeof window==="undefined")return;
+    const finishDesktopFloatingDrag=()=>{
+      if(panelDraggingRef.current){
+        panelPosition.flattenOffset();
+        clampPanelPosition();
+        panelDraggingRef.current=false;
+      }
+      if(v38DraggingRef.current){
+        v38Position.flattenOffset();
+        clampV38Position();
+        v38DraggingRef.current=false;
+      }
+      if(terminalParityDraggingRef.current){
+        terminalParityPosition.flattenOffset();
+        clampTerminalParityPosition();
+        terminalParityDraggingRef.current=false;
+      }
+    };
+    window.addEventListener("pointerup",finishDesktopFloatingDrag,true);
+    window.addEventListener("pointercancel",finishDesktopFloatingDrag,true);
+    window.addEventListener("mouseup",finishDesktopFloatingDrag,true);
+    window.addEventListener("blur",finishDesktopFloatingDrag,true);
+    return()=>{
+      window.removeEventListener("pointerup",finishDesktopFloatingDrag,true);
+      window.removeEventListener("pointercancel",finishDesktopFloatingDrag,true);
+      window.removeEventListener("mouseup",finishDesktopFloatingDrag,true);
+      window.removeEventListener("blur",finishDesktopFloatingDrag,true);
+    };
+  },[panelPosition,v38Position,terminalParityPosition,width,height,desktop,panelMobileScale]);
 
   const clampRadarPosition=()=>{
     const launcherWidth=desktop?210:188;
