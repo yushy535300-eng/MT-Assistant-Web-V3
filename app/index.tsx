@@ -2113,12 +2113,10 @@ export default function HomeScreen(){
       let index=0;
       const next=()=>{
         if(run!==pokerCardSyncRun||!isCurrentSocket()||!authenticated)return;
-        // tablesvg's game_data exists only briefly on international tables and
-        // some responses contain an empty table list. Query both independent
-        // snapshot endpoints throughout the reveal window; either response can
-        // restore a show_poker delta missed while the foreground MT page is busy.
+        // Low-impact fallback only. The authoritative final international-room
+        // cards arrive through /summary and are consumed directly below, so do
+        // not repeatedly rejoin tables or flood the heavier /tables endpoint.
         requestSvg();
-        requestTables(true);
         if(index>=delays.length-1){pokerCardSyncTimer=null;return}
         const wait=delays[++index]-delays[index-1];
         pokerCardSyncTimer=setTimeout(next,wait);
@@ -2258,16 +2256,24 @@ export default function HomeScreen(){
     ws.onopen=()=>{if(!isCurrentSocket())return;appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
     ws.onmessage=e=>{if(!isCurrentSocket())return;try{
       const p=JSON.parse(e.data),name=eventName(p);
-      // V38 calculator listens passively to MT show_poker; it does not mutate the original assistant.
-      if(name.includes("/show_poker")){
+      // International MT rooms do not always publish the full hand through
+      // show_poker. In some rounds the missing Banker cards / final third card
+      // are supplied only by the settlement summary packet. Both packet types
+      // must feed the exact same per-table, per-shoe, per-round merge state.
+      const isPokerDelta=name.includes("/show_poker");
+      const isPokerSummary=name.includes("/summary");
+      if(isPokerDelta||isPokerSummary){
         const parsed=parseV38ShowPoker(p);
         if(parsed){
           const prev=v38ByTableRef.current[parsed.tableId];
-          const next=mergeV38PokerState(prev,parsed);
+          const merged=mergeV38PokerState(prev,parsed);
+          // summary is MT's authoritative final card snapshot. Mark it settled
+          // only after merging so settlement can never prevent late cards from
+          // filling their original six result slots.
+          const next=isPokerSummary?{...merged,settled:merged.complete}:merged;
           v38ByTableRef.current={...v38ByTableRef.current,[parsed.tableId]:next};
           setV38ByTable(v38ByTableRef.current);
         }
-        startPokerCardSync();
       }
         if(name.includes("/api/v1/member/me/balance")){
           const points=Number(p?.msg?.user?.points??p?.body?.user?.points??p?.data?.user?.points??p?.msg?.points??p?.body?.points??p?.data?.points);
