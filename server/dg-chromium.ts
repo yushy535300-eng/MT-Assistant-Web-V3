@@ -17,6 +17,17 @@ export type DgChromiumHooks = {
   onFailure?: (message: string) => void;
 };
 
+export type VendorBrowserHooks = {
+  sessionId: string;
+  gameUrl: string;
+  label: "AB" | "DB";
+  onLog: (message: string) => void;
+  onObject: (value: any) => void;
+  onFailure?: (message: string) => void;
+};
+
+export type VendorBrowserTransport = { stop: () => void };
+
 type CdpMessage = { id?: number; method?: string; params?: any; result?: any; error?: any; sessionId?: string };
 type RequestMeta = { url: string; type: string; method: string };
 
@@ -559,4 +570,79 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
   };
 
   return { stop, sendBinary };
+}
+
+// AB uses readable JSON frames, while DB decrypts its binary frames inside its
+// own page.  Running the genuine launch page is therefore the only stable way
+// to preserve rotating hosts, keys and tokens.  This bridge observes objects
+// after the vendor page has decoded them; it never stores a HAR token/key.
+export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Promise<VendorBrowserTransport> {
+  const executable = findChromeExecutable();
+  if (!executable) throw new Error('找不到 Chrome/Chromium；請確認 postinstall 已完成');
+  const launched = await launchChrome(executable, `${hooks.label.toLowerCase()}-${hooks.sessionId}`, hooks.onLog);
+  const cdp = new CdpClient(launched.wsUrl);
+  await cdp.ready();
+  const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+  const attached = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+  const pageSessionId = String(attached.sessionId || '');
+  if (!pageSessionId) throw new Error(`${hooks.label} Chromium target attach failed`);
+  let stopped = false;
+  let poll: ReturnType<typeof setInterval> | null = null;
+  const stop = () => {
+    if (stopped) return; stopped = true;
+    if (poll) clearInterval(poll);
+    try { cdp.close(); } catch {}
+    try { launched.child.kill('SIGTERM'); } catch {}
+    setTimeout(() => { try { if (!launched.child.killed) launched.child.kill('SIGKILL'); } catch {} }, 1200).unref?.();
+    try { fs.rmSync(launched.profile, { recursive: true, force: true }); } catch {}
+  };
+  launched.child.once('exit', (code, signal) => {
+    if (!stopped) hooks.onFailure?.(`${hooks.label} Chromium 意外結束 (code=${code}, signal=${signal})`);
+  });
+  await cdp.send('Network.enable', {}, pageSessionId);
+  await cdp.send('Page.enable', {}, pageSessionId);
+  await cdp.send('Runtime.enable', {}, pageSessionId);
+  await cdp.send('Network.setUserAgentOverride', { userAgent: NORMAL_CHROME_UA, acceptLanguage: 'zh-TW,zh;q=0.9', platform: 'Windows' }, pageSessionId);
+  const source = `(() => {
+    if (window.__MT_VENDOR_TAP__) return;
+    const q=[]; const seen=new WeakSet();
+    const keep=(v,depth=0)=>{
+      if(!v||typeof v!=='object'||depth>5)return;
+      if(seen.has(v))return; seen.add(v);
+      try{
+        const c=v.c, p=v.p;
+        if(typeof c==='string' || v.tableId!=null || v.gameId!=null || v.roads || v.roadmaps || v.gameCode || v.tableCode){
+          q.push(JSON.parse(JSON.stringify(v))); if(q.length>2000)q.splice(0,q.length-1500);
+        }
+        if(Array.isArray(v)){ for(let i=0;i<Math.min(v.length,250);i++)keep(v[i],depth+1); }
+        else for(const k of Object.keys(v).slice(0,120))keep(v[k],depth+1);
+      }catch{}
+    };
+    const parse=JSON.parse;
+    JSON.parse=function(){ const v=parse.apply(this,arguments); try{keep(v)}catch{} return v };
+    const NativeWS=window.WebSocket;
+    class TapWS extends NativeWS {
+      constructor(url,protocols){ if(arguments.length>1)super(url,protocols);else super(url);
+        this.addEventListener('message',e=>{try{if(typeof e.data==='string')keep(parse(e.data))}catch{}});
+      }
+    }
+    for(const k of ['CONNECTING','OPEN','CLOSING','CLOSED'])try{Object.defineProperty(TapWS,k,{value:NativeWS[k]})}catch{}
+    window.WebSocket=TapWS;
+    window.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep};
+  })();`;
+  await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source }, pageSessionId);
+  await cdp.send('Page.navigate', { url: hooks.gameUrl }, pageSessionId, 15000);
+  hooks.onLog(`${hooks.label} 真實頁面已啟動`);
+  let busy=false;
+  poll=setInterval(async()=>{
+    if(stopped||busy)return; busy=true;
+    try{
+      const out=await cdp.send('Runtime.evaluate',{expression:`window.__MT_VENDOR_TAP__?window.__MT_VENDOR_TAP__.drain():[]`,returnByValue:true},pageSessionId,8000);
+      const values=out?.result?.value;
+      if(Array.isArray(values))for(const value of values)hooks.onObject(value);
+    }catch(e:any){ if(!stopped)hooks.onLog(`${hooks.label} 解碼資料讀取重試：${safeText(e?.message||e,160)}`); }
+    finally{busy=false}
+  },120);
+  poll.unref?.();
+  return { stop };
 }

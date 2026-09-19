@@ -11,6 +11,7 @@ import { adminPage } from "../admin-page";
 import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
 import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken, sweepIdleDgRelays } from "../dg-relay";
 import { registerDgGameProxy } from "../dg-game-proxy";
+import { getVendorRelay, startVendorRelay, stopVendorRelay, sweepVendorRelays, type VendorKind } from "../vendor-relay";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,6 +36,25 @@ async function startServer() {
     if(result.stopped)console.log(`[DG cleanup] stopped=${result.stopped} active=${result.active}`);
   },60000);
   dgSweepTimer.unref?.();
+  const vendorSweepTimer=setInterval(()=>sweepVendorRelays(180000),60000);vendorSweepTimer.unref?.();
+
+  const vendorKind=(raw:any):VendorKind|null=>raw==="AB"||raw==="DB"?raw:null;
+  app.post("/api/vendor/start",async(req,res)=>{
+    const sessionId=String(req.body?.sessionId||""),kind=vendorKind(req.body?.kind),gameUrl=String(req.body?.gameUrl||"");
+    if(!hasActiveTrackerSession(sessionId))return res.status(401).json({ok:false,error:"session_invalid"});
+    if(!kind)return res.status(400).json({ok:false,error:"invalid_vendor"});
+    let u:URL;try{u=new URL(gameUrl)}catch{return res.status(400).json({ok:false,error:"invalid_game_url"})}
+    if(u.protocol!=="https:")return res.status(400).json({ok:false,error:"invalid_game_url"});
+    try{await startVendorRelay(sessionId,kind,u.toString());return res.json({ok:true})}catch(e:any){return res.status(502).json({ok:false,error:e?.message||"vendor_start_failed"})}
+  });
+  app.get("/api/vendor/stream",(req,res)=>{
+    const sessionId=String(req.query.sessionId||""),kind=vendorKind(req.query.kind);
+    if(!hasActiveTrackerSession(sessionId))return res.status(401).end();if(!kind)return res.status(400).end();
+    const relay=getVendorRelay(sessionId,kind);if(!relay)return res.status(404).end();
+    res.status(200);res.setHeader("Content-Type","text/event-stream; charset=utf-8");res.setHeader("Cache-Control","no-cache, no-transform");res.setHeader("Connection","keep-alive");res.setHeader("X-Accel-Buffering","no");(res as any).flushHeaders?.();
+    const off=relay.subscribe(res);const keep=setInterval(()=>{try{res.write(": keepalive\n\n")}catch{}},15000);let done=false;const close=()=>{if(done)return;done=true;clearInterval(keep);off()};req.once("close",close);res.once("close",close);res.once("finish",close);
+  });
+  app.post("/api/vendor/stop",(req,res)=>{const sessionId=String(req.body?.sessionId||""),kind=vendorKind(req.body?.kind);if(!kind)return res.status(400).json({ok:false});stopVendorRelay(sessionId,kind);return res.json({ok:true})});
 
   const adminSessions = new Set<string>();
   const getAdminToken = (req:any) => {
