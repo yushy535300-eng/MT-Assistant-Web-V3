@@ -2215,6 +2215,30 @@ export default function HomeScreen(){
       subscribedTableSignature=signature;
       appendEvent(`已訂閱目前 ${activeMtTableIds.length} 桌即時事件`);
     };
+    const ingestV38TableSnapshots=(sources:any[])=>{
+      let nextMap=v38ByTableRef.current;
+      let changed=false;
+      for(const source of sources){
+        const raw=source?.game_data??source?.gameData;
+        if(raw==null||String(raw).trim()===""||String(raw).trim()==="0")continue;
+        const parsed=parseV38ShowPoker({body:{
+          result:raw,
+          table_id:getApiTableId(source),
+          shoe:source?.shoe??source?.trend?.current_shoe,
+          round:source?.round??source?.trend?.current_round,
+        }});
+        if(!parsed)continue;
+        const prev=nextMap[parsed.tableId];
+        const next=mergeV38PokerState(prev,parsed);
+        // International tables publish the cumulative final card vector in
+        // tablesvg.game_data. Use it to complete/correct a missed show_poker.
+        if(!prev||next.result.join(",")!==prev.result.join(",")||next.complete!==prev.complete||next.round!==prev.round||next.shoe!==prev.shoe){
+          nextMap={...nextMap,[parsed.tableId]:next};
+          changed=true;
+        }
+      }
+      if(changed){v38ByTableRef.current=nextMap;setV38ByTable(nextMap)}
+    };
     ws.onopen=()=>{if(!isCurrentSocket())return;appendEvent("WebSocket 已連線，正在驗證");ws.send(JSON.stringify({method:"POST",action:{name:"/api/v1/authenticate",path:"/api/v1/authenticate"},body:{type:3,token:authToken}}))};
     ws.onmessage=e=>{if(!isCurrentSocket())return;try{
       const p=JSON.parse(e.data),name=eventName(p);
@@ -2334,12 +2358,14 @@ export default function HomeScreen(){
         // a snapshot arrives out of order or is temporarily shorter.
         return reconcileCurrentMtTables(c,filtered,retainedIds);
       });
+      ingestV38TableSnapshots(filtered);
       subscribe();return}if(src&&name.endsWith("/tablesvg")){
         const filtered=src.filter(isMtBaccaratTable);
         const retainedIds=collectConfirmedMtTableIds(confirmedMtTableIdsRef.current,filtered);
         confirmedMtTableIdsRef.current=retainedIds;
         activeMtTableIds=[...retainedIds];
         updateLiveTables(c=>reconcileCurrentMtTables(c,filtered,retainedIds));
+        ingestV38TableSnapshots(filtered);
         if(retainedIds.length)setMtSnapshotReady(true);
         subscribe();
         return;
