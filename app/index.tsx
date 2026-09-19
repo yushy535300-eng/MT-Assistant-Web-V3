@@ -1102,18 +1102,31 @@ function parseV38ShowPoker(payload:any):V38PokerState|null{
 }
 
 function mergeV38PokerState(previous:V38PokerState|undefined,incoming:V38PokerState):V38PokerState{
-  if(!previous||previous.tableId!==incoming.tableId||previous.shoe!==incoming.shoe||previous.round!==incoming.round)return incoming;
+  if(!previous||previous.tableId!==incoming.tableId)return incoming;
+  const previousHasShoe=!!previous.shoe&&previous.shoe!=="—";
+  const incomingHasShoe=!!incoming.shoe&&incoming.shoe!=="—";
+  const sameShoe=!previousHasShoe||!incomingHasShoe||previous.shoe===incoming.shoe;
+  const previousHasRound=previous.round>0,incomingHasRound=incoming.round>0;
+  const sameRound=!previousHasRound||!incomingHasRound||previous.round===incoming.round;
+  if(!sameShoe||!sameRound)return incoming;
   const size=Math.max(previous.result.length,incoming.result.length);
   const result=Array.from({length:size},(_,i)=>{
     const next=Number(incoming.result[i]);
-    return Number.isFinite(next)&&next>0?next:Number(previous.result[i])||0;
+    // Card slots use zero as "not included in this progressive packet".
+    // Metadata slots may legitimately be zero and are not used as cards.
+    if(i<6)return Number.isFinite(next)&&next>0?next:Number(previous.result[i])||0;
+    return Number.isFinite(next)?next:Number(previous.result[i])||0;
   });
   const player=[result[0],result[2],result[4]].map(mtCardRank).filter((x):x is string=>!!x);
   const banker=[result[1],result[3],result[5]].map(mtCardRank).filter((x):x is string=>!!x);
   const playerPoint=baccaratPoint(player),bankerPoint=baccaratPoint(banker);
   const {formulas,recommendation}=v38RawFormulas(banker,player);
-  return {...incoming,result,player,banker,playerPoint,bankerPoint,
-    complete:incoming.complete||previous.complete,settled:previous.settled,formulas,recommendation};
+  const complete=player.length>=2&&banker.length>=2;
+  return {...incoming,
+    shoe:incomingHasShoe?incoming.shoe:previous.shoe,
+    round:incomingHasRound?incoming.round:previous.round,
+    result,player,banker,playerPoint,bankerPoint,complete,
+    settled:previous.settled,formulas,recommendation};
 }
 
 function parseDgV38Poker(table:DgTableData):V38PokerState|null{
