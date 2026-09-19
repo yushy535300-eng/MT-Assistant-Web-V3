@@ -1034,6 +1034,24 @@ function baccaratCardValue(card:string){
   return Number.isFinite(n)&&n>=2&&n<=9?n:0;
 }
 function baccaratPoint(cards:string[]){return cards.reduce((sum,c)=>sum+baccaratCardValue(c),0)%10}
+function isBaccaratPokerComplete(player:string[],banker:string[]){
+  if(player.length<2||banker.length<2)return false;
+  const playerInitial=baccaratPoint(player.slice(0,2)),bankerInitial=baccaratPoint(banker.slice(0,2));
+  if(playerInitial>=8||bankerInitial>=8)return true;
+  const playerDraws=playerInitial<=5;
+  if(playerDraws&&player.length<3)return false;
+  const bankerDraws=(()=>{
+    if(!playerDraws)return bankerInitial<=5;
+    const third=baccaratCardValue(player[2]);
+    if(bankerInitial<=2)return true;
+    if(bankerInitial===3)return third!==8;
+    if(bankerInitial===4)return third>=2&&third<=7;
+    if(bankerInitial===5)return third>=4&&third<=7;
+    if(bankerInitial===6)return third===6||third===7;
+    return false;
+  })();
+  return !bankerDraws||banker.length>=3;
+}
 function v38RawFormulas(banker:string[],player:string[]){
   const sum=[...banker,...player].reduce((n,c)=>n+baccaratCardValue(c),0);
   const pb=baccaratPoint(banker),pp=baccaratPoint(player);
@@ -1048,16 +1066,13 @@ function v38RawFormulas(banker:string[],player:string[]){
   return {formulas,recommendation:(b===p?"觀望":b>p?"莊":"閒") as V38Side};
 }
 function v38PacketRoots(payload:any):any[]{
-  const roots:any[]=[];
-  const queue=[payload];
-  const seen=new Set<any>();
+  const roots:any[]=[],queue=[payload],seen=new Set<any>();
   while(queue.length&&roots.length<24){
     const value=queue.shift();
     if(!value||typeof value!=="object"||seen.has(value))continue;
     seen.add(value);roots.push(value);
     for(const key of ["body","msg","data","span","payload","game","poker"]){
-      const child=value?.[key];
-      if(child&&typeof child==="object")queue.push(child);
+      const child=value?.[key];if(child&&typeof child==="object")queue.push(child);
     }
   }
   return roots;
@@ -1065,17 +1080,13 @@ function v38PacketRoots(payload:any):any[]{
 function normalizeV38Result(raw:any):number[]|null{
   if(Array.isArray(raw))return raw.map((x:any)=>Number(x));
   if(typeof raw==="string"){
-    const value=raw.trim();
-    if(!value)return null;
+    const value=raw.trim();if(!value)return null;
     try{return normalizeV38Result(JSON.parse(value))}catch{}
     const values=value.split(/[^0-9.-]+/).filter(Boolean).map(Number);
     return values.length?values:null;
   }
-  if(raw&&typeof raw==="object"){
-    for(const key of ["result","cards","card","values","poker"]){
-      const value=normalizeV38Result(raw[key]);
-      if(value?.length)return value;
-    }
+  if(raw&&typeof raw==="object")for(const key of ["result","cards","card","values","poker"]){
+    const value=normalizeV38Result(raw[key]);if(value?.length)return value;
   }
   return null;
 }
@@ -1085,8 +1096,6 @@ function parseV38ShowPoker(payload:any):V38PokerState|null{
   const metaRoot=roots.find(x=>x?.table_id!=null||x?.tableId!=null)||cardRoot;
   const result=normalizeV38Result(cardRoot?.result);
   const tableId=String(metaRoot?.table_id??metaRoot?.tableId??cardRoot?.table_id??cardRoot?.tableId??"").toUpperCase();
-  // MT packets are progressive. Some rooms send only 4-6 card slots and add
-  // the optional point fields later, so a ten-slot requirement drops rounds.
   if(!tableId||!result||result.length<4)return null;
   const player=[result[0],result[2],result[4]].map(mtCardRank).filter((x):x is string=>!!x);
   const banker=[result[1],result[3],result[5]].map(mtCardRank).filter((x):x is string=>!!x);
@@ -1098,35 +1107,25 @@ function parseV38ShowPoker(payload:any):V38PokerState|null{
   const {formulas,recommendation}=v38RawFormulas(banker,player);
   const shoeRoot=roots.find(x=>x?.shoe!=null),roundRoot=roots.find(x=>x?.round!=null);
   return {tableId,shoe:String(shoeRoot?.shoe??"—"),round:Number(roundRoot?.round)||0,result,player,banker,
-    playerPoint:calculatedPlayer,bankerPoint:calculatedBanker,complete:pointsAgree,settled:false,updatedAt:Date.now(),formulas,recommendation};
+    playerPoint:calculatedPlayer,bankerPoint:calculatedBanker,complete:pointsAgree&&isBaccaratPokerComplete(player,banker),settled:false,updatedAt:Date.now(),formulas,recommendation};
 }
-
 function mergeV38PokerState(previous:V38PokerState|undefined,incoming:V38PokerState):V38PokerState{
   if(!previous||previous.tableId!==incoming.tableId)return incoming;
-  const previousHasShoe=!!previous.shoe&&previous.shoe!=="—";
-  const incomingHasShoe=!!incoming.shoe&&incoming.shoe!=="—";
+  const previousHasShoe=!!previous.shoe&&previous.shoe!=="—",incomingHasShoe=!!incoming.shoe&&incoming.shoe!=="—";
   const sameShoe=!previousHasShoe||!incomingHasShoe||previous.shoe===incoming.shoe;
   const previousHasRound=previous.round>0,incomingHasRound=incoming.round>0;
-  const sameRound=!previousHasRound||!incomingHasRound||previous.round===incoming.round;
-  if(!sameShoe||!sameRound)return incoming;
+  if(!sameShoe||(previousHasRound&&incomingHasRound&&previous.round!==incoming.round))return incoming;
   const size=Math.max(previous.result.length,incoming.result.length);
   const result=Array.from({length:size},(_,i)=>{
     const next=Number(incoming.result[i]);
-    // Card slots use zero as "not included in this progressive packet".
-    // Metadata slots may legitimately be zero and are not used as cards.
-    if(i<6)return Number.isFinite(next)&&next>0?next:Number(previous.result[i])||0;
-    return Number.isFinite(next)?next:Number(previous.result[i])||0;
+    return i<6?(Number.isFinite(next)&&next>0?next:Number(previous.result[i])||0):(Number.isFinite(next)?next:Number(previous.result[i])||0);
   });
   const player=[result[0],result[2],result[4]].map(mtCardRank).filter((x):x is string=>!!x);
   const banker=[result[1],result[3],result[5]].map(mtCardRank).filter((x):x is string=>!!x);
   const playerPoint=baccaratPoint(player),bankerPoint=baccaratPoint(banker);
   const {formulas,recommendation}=v38RawFormulas(banker,player);
-  const complete=player.length>=2&&banker.length>=2;
-  return {...incoming,
-    shoe:incomingHasShoe?incoming.shoe:previous.shoe,
-    round:incomingHasRound?incoming.round:previous.round,
-    result,player,banker,playerPoint,bankerPoint,complete,
-    settled:previous.settled,formulas,recommendation};
+  return {...incoming,shoe:incomingHasShoe?incoming.shoe:previous.shoe,round:incomingHasRound?incoming.round:previous.round,
+    result,player,banker,playerPoint,bankerPoint,complete:isBaccaratPokerComplete(player,banker),settled:previous.settled,formulas,recommendation};
 }
 
 function parseDgV38Poker(table:DgTableData):V38PokerState|null{
@@ -1140,7 +1139,7 @@ function parseDgV38Poker(table:DgTableData):V38PokerState|null{
     const banker=bankerIds.map(mtCardRank).filter((x):x is string=>!!x);
     const playerPoint=baccaratPoint(player),bankerPoint=baccaratPoint(banker);
     const result=[playerIds[0]??0,bankerIds[0]??0,playerIds[1]??0,bankerIds[1]??0,playerIds[2]??0,bankerIds[2]??0,0,0,playerPoint,bankerPoint];
-    const complete=player.length>=2&&banker.length>=2;
+    const complete=isBaccaratPokerComplete(player,banker);
     const {formulas,recommendation}=v38RawFormulas(banker,player);
     return {tableId:table.apiId,shoe:table.shoe,round:table.round,result,player,banker,playerPoint,bankerPoint,complete,settled:false,updatedAt:Date.now(),formulas,recommendation};
   }catch{return null}
@@ -2059,6 +2058,8 @@ export default function HomeScreen(){
     let reportSettlementTimer:ReturnType<typeof setTimeout>|null=null;
     let reportSettlementFollowupTimer:ReturnType<typeof setTimeout>|null=null;
     let svgRefreshTimer:ReturnType<typeof setTimeout>|null=null;
+    let pokerCardSyncTimer:ReturnType<typeof setTimeout>|null=null;
+    let pokerCardSyncRun=0;
     let subscribeTimer:ReturnType<typeof setTimeout>|null=null;
     let betReportInFlight=false;
     let betReportRequestAt=0;
@@ -2088,6 +2089,8 @@ export default function HomeScreen(){
       if(reportSyncTimer)clearTimeout(reportSyncTimer); reportSyncTimer=null;
       reportSyncActive=false;
       if(svgRefreshTimer)clearTimeout(svgRefreshTimer); svgRefreshTimer=null;
+      if(pokerCardSyncTimer)clearTimeout(pokerCardSyncTimer); pokerCardSyncTimer=null;
+      pokerCardSyncRun++;
       if(subscribeTimer)clearTimeout(subscribeTimer); subscribeTimer=null;
     };
     // Collapse bursts from all currently available tables into one snapshot request.
@@ -2098,6 +2101,20 @@ export default function HomeScreen(){
     const scheduleSvgRefresh=(delay=350)=>{
       if(svgRefreshTimer)clearTimeout(svgRefreshTimer);
       svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},delay);
+    };
+    const startPokerCardSync=()=>{
+      const run=++pokerCardSyncRun;
+      if(pokerCardSyncTimer)clearTimeout(pokerCardSyncTimer);
+      const delays=[120,280,520,900,1400,2000,2700,3500,4400,5400,6500,7700,9000,10500,12200,14100,16200,18500];
+      let index=0;
+      const next=()=>{
+        if(run!==pokerCardSyncRun||!isCurrentSocket()||!authenticated)return;
+        requestSvg();
+        if(index>=delays.length-1){pokerCardSyncTimer=null;return}
+        const wait=delays[++index]-delays[index-1];
+        pokerCardSyncTimer=setTimeout(next,wait);
+      };
+      pokerCardSyncTimer=setTimeout(next,delays[0]);
     };
 
     const reportPayload=()=>{
@@ -2216,25 +2233,15 @@ export default function HomeScreen(){
       appendEvent(`已訂閱目前 ${activeMtTableIds.length} 桌即時事件`);
     };
     const ingestV38TableSnapshots=(sources:any[])=>{
-      let nextMap=v38ByTableRef.current;
-      let changed=false;
+      let nextMap=v38ByTableRef.current,changed=false;
       for(const source of sources){
         const raw=source?.game_data??source?.gameData;
         if(raw==null||String(raw).trim()===""||String(raw).trim()==="0")continue;
-        const parsed=parseV38ShowPoker({body:{
-          result:raw,
-          table_id:getApiTableId(source),
-          shoe:source?.shoe??source?.trend?.current_shoe,
-          round:source?.round??source?.trend?.current_round,
-        }});
+        const parsed=parseV38ShowPoker({body:{result:raw,table_id:getApiTableId(source),shoe:source?.shoe??source?.trend?.current_shoe,round:source?.round??source?.trend?.current_round}});
         if(!parsed)continue;
-        const prev=nextMap[parsed.tableId];
-        const next=mergeV38PokerState(prev,parsed);
-        // International tables publish the cumulative final card vector in
-        // tablesvg.game_data. Use it to complete/correct a missed show_poker.
+        const prev=nextMap[parsed.tableId],next=mergeV38PokerState(prev,parsed);
         if(!prev||next.result.join(",")!==prev.result.join(",")||next.complete!==prev.complete||next.round!==prev.round||next.shoe!==prev.shoe){
-          nextMap={...nextMap,[parsed.tableId]:next};
-          changed=true;
+          nextMap={...nextMap,[parsed.tableId]:next};changed=true;
         }
       }
       if(changed){v38ByTableRef.current=nextMap;setV38ByTable(nextMap)}
@@ -2251,6 +2258,7 @@ export default function HomeScreen(){
           v38ByTableRef.current={...v38ByTableRef.current,[parsed.tableId]:next};
           setV38ByTable(v38ByTableRef.current);
         }
+        startPokerCardSync();
       }
         if(name.includes("/api/v1/member/me/balance")){
           const points=Number(p?.msg?.user?.points??p?.body?.user?.points??p?.data?.user?.points??p?.msg?.points??p?.body?.points??p?.data?.points);
@@ -2326,6 +2334,7 @@ export default function HomeScreen(){
           return;
         }
         if(name.endsWith("/show_win")||name.includes("/show_win")){
+          startPokerCardSync();
           const winTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"").toUpperCase();
           if(winTableId&&v38ByTableRef.current[winTableId]){
             const old=v38ByTableRef.current[winTableId];
@@ -2336,10 +2345,7 @@ export default function HomeScreen(){
           refreshBetReportAfterSettlement(winTableId,p);
         }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();requestBalance();startDealerRefresh();startBalanceRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.endsWith("/tables")){
       const filtered=src.filter(isMtBaccaratTable);
-      // /tables is MT's authoritative current membership snapshot. Replacing
-      // the subscription set here prevents removed Taiwan-hall ids from being
-      // accumulated together with international-hall ids indefinitely.
-      const retainedIds=[...new Set(filtered.map(getApiTableId).filter(Boolean))];
+      const retainedIds=collectConfirmedMtTableIds(confirmedMtTableIdsRef.current,filtered);
       confirmedMtTableIdsRef.current=retainedIds;
       activeMtTableIds=[...retainedIds];
       setMtSnapshotReady(true);
