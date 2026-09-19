@@ -4,6 +4,7 @@
   "private": true,
   "main": "expo-router/entry",
   "scripts": {
+    "postinstall": "node scripts/ensure-chromium.mjs",
     "dev": "concurrently -k \"pnpm dev:server\" \"pnpm dev:web\"",
     "dev:server": "cross-env NODE_ENV=development tsx watch server/_core/index.ts",
     "dev:web": "cross-env EXPO_USE_METRO_WORKSPACE_ROOT=1 npx expo start --web --port 8081",

@@ -603,6 +603,16 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   await cdp.send('Page.enable', {}, pageSessionId);
   await cdp.send('Runtime.enable', {}, pageSessionId);
   await cdp.send('Network.setUserAgentOverride', { userAgent: NORMAL_CHROME_UA, acceptLanguage: 'zh-TW,zh;q=0.9', platform: 'Windows' }, pageSessionId);
+  // AB frames are plain JSON. Observe them at the DevTools network layer as
+  // well as inside the page, because a vendor may create its WebSocket in a
+  // worker where a window-level WebSocket wrapper cannot see it.
+  cdp.onEvent((message) => {
+    if (stopped || message.sessionId !== pageSessionId) return;
+    if (message.method !== 'Network.webSocketFrameReceived') return;
+    const response = message.params?.response || {};
+    if (Number(response.opcode) !== 1 || typeof response.payloadData !== 'string') return;
+    try { hooks.onObject(JSON.parse(response.payloadData)); } catch {}
+  });
   const source = `(() => {
     if (window.__MT_VENDOR_TAP__) return;
     const q=[]; const seen=new WeakSet();

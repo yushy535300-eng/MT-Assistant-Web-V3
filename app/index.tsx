@@ -230,6 +230,54 @@ const dgPlaceholderTables: TableData[] = dgPlaceholderDefs.map(
     live: false,
   }),
 );
+
+// Vendor table shells are deliberately independent from the live connection.
+// A failed/slow relay must never collapse the dashboard into an empty page.
+// AB ids/categories come from the captured getGameHall snapshot; DB publishes
+// category totals in its lobby, so stable category slots are used until the
+// decoded live snapshot replaces them.
+const vendorPlaceholder = (apiId: string, category: string): TableData => ({
+  id: apiId,
+  apiId,
+  game: "百家樂",
+  name: "—",
+  players: "—",
+  roomId: apiId,
+  tableBadge: apiId,
+  shoe: "—",
+  round: 0,
+  banker: 0,
+  player: 0,
+  tie: 0,
+  results: [],
+  trend: "",
+  live: false,
+  category,
+});
+const abPlaceholderGroups: Record<string, string[]> = {
+  一般: ["B201", "B202", "B203", "B219", "B220", "B501", "B502", "B503", "B504", "B505", "B506", "B507", "B601", "B602", "B603", "B604", "B605", "B618"],
+  快速: ["Q201", "Q202", "Q204", "Q501", "Q502", "Q601", "Q701", "Q702"],
+  免佣: ["C201", "C202", "C501", "C701"],
+  保險: ["IB201", "IB202"],
+  VIP: ["V911", "V912", "V971", "V972"],
+};
+const abPlaceholderTables = Object.entries(abPlaceholderGroups).flatMap(
+  ([category, ids]) => ids.map((id) => vendorPlaceholder(id, category)),
+);
+const dbPlaceholderCounts: Record<string, number> = {
+  一般: 21,
+  終極: 47,
+  完美: 3,
+  共贏: 2,
+  包桌: 2,
+  電投: 10,
+};
+const dbPlaceholderTables = Object.entries(dbPlaceholderCounts).flatMap(
+  ([category, count]) =>
+    Array.from({ length: count }, (_, index) =>
+      vendorPlaceholder(`DB-${category}-${String(index + 1).padStart(3, "0")}`, category),
+    ),
+);
 const lineContactUrl = "https://line.me/ti/p/k2pkYGXGL3";
 const threadsUrl = "https://www.threads.com/@uss0857?igshid=NTc4MTIwNjQ2YQ==";
 const tzRegisterUrl = "https://shy9453.tz6868.cc";
@@ -1266,11 +1314,9 @@ async function getGameLoginUrlFromPlatform(
         String(data?.message ?? data?.msg ?? `取得 ${providerName} 授權失敗`),
       );
 
-    // Different TZ/OFA gateways do not always return game_url in exactly the
-    // same field/shape. Prefer a real absolute HTTPS URL that actually carries
-    // the one-time game token. This also avoids forwarding a relative
-    // /ddnewpc/direct1.html URL to the Node relay (which previously surfaced as
-    // DG invalid_game_url).
+    // Different providers use different one-time credentials: MT/DG use
+    // `token`, AB uses `sessionId`, and DB uses an encrypted `params` payload.
+    // Requiring `token` for every provider prevented AB/DB from ever starting.
     const rawCandidates: any[] = [
       data?.data?.game_url,
       data?.data?.url,
@@ -1290,7 +1336,13 @@ async function getGameLoginUrlFromPlatform(
     for (const candidate of cleaned) {
       try {
         const u = new URL(candidate);
-        if (u.protocol === "https:" && u.searchParams.get("token")) {
+        const credentialOk =
+          provider === "AB01"
+            ? !!u.searchParams.get("sessionId")
+            : provider === "YABOZR"
+              ? !!u.searchParams.get("params")
+              : !!u.searchParams.get("token");
+        if (u.protocol === "https:" && credentialOk) {
           gameUrl = u.toString();
           break;
         }
@@ -1314,7 +1366,7 @@ async function getGameLoginUrlFromPlatform(
         } catch {}
       }
     }
-    if (!gameUrl) throw new Error(`找不到 ${providerName} Token`);
+    if (!gameUrl) throw new Error(`找不到 ${providerName} 有效授權網址`);
     return gameUrl;
   } finally {
     clearTimeout(timeout);
@@ -2558,6 +2610,10 @@ export default function HomeScreen() {
   const [vendorConnected, setVendorConnected] = useState<
     Record<VendorKind, boolean>
   >({ AB: false, DB: false });
+  const [vendorStatus, setVendorStatus] = useState<Record<VendorKind, string>>({
+    AB: "未連線",
+    DB: "未連線",
+  });
   const [vendorPnl, setVendorPnl] = useState<Record<VendorKind, number | null>>(
     { AB: null, DB: null },
   );
@@ -2613,9 +2669,13 @@ export default function HomeScreen() {
         ? dgTables
         : dgPlaceholderTables
       : activePlatform === "AB"
-        ? vendorTables.AB
+        ? vendorTables.AB.length
+          ? vendorTables.AB
+          : abPlaceholderTables
         : activePlatform === "DB"
-          ? vendorTables.DB
+          ? vendorTables.DB.length
+            ? vendorTables.DB
+            : dbPlaceholderTables
           : mtSnapshotReady
             ? mtTables
             : initialTables;
@@ -4598,6 +4658,7 @@ export default function HomeScreen() {
     const platformToken = platformTokenRef.current;
     if (!platformToken) return;
     setVendorConnected((v) => ({ ...v, [kind]: false }));
+    setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
     getVendorLoginUrlFromPlatform(loginPlatform, platformToken, kind)
       .then((url) => {
         if (cancelled) return null;
@@ -4618,11 +4679,21 @@ export default function HomeScreen() {
               }));
           },
           onStatus: (status, message) => {
-            if (!cancelled)
+            if (!cancelled) {
               setVendorConnected((v) => ({
                 ...v,
                 [kind]: status === "connected",
               }));
+              setVendorStatus((v) => ({
+                ...v,
+                [kind]:
+                  status === "connected"
+                    ? "已連線"
+                    : status === "error"
+                      ? "連線失敗"
+                      : "連線中",
+              }));
+            }
             if (message && !cancelled && status === "error")
               appendEvent(message);
           },
@@ -4637,10 +4708,12 @@ export default function HomeScreen() {
         else vendorControllersRef.current[kind] = controller;
       })
       .catch((e: any) => {
-        if (!cancelled)
+        if (!cancelled) {
+          setVendorStatus((v) => ({ ...v, [kind]: "連線失敗" }));
           appendEvent(
             `${kind === "AB" ? "歐博" : "DB"} 自動連線失敗：${e?.message || e}`,
           );
+        }
       });
     return () => {
       cancelled = true;
@@ -4820,6 +4893,7 @@ export default function HomeScreen() {
     vendorControllersRef.current = {};
     setVendorTables({ AB: [], DB: [] });
     setVendorConnected({ AB: false, DB: false });
+    setVendorStatus({ AB: "未連線", DB: "未連線" });
     setVendorPnl({ AB: null, DB: null });
     setVendorUrls({ AB: "", DB: "" });
     setDgConnected(false);
@@ -6235,7 +6309,11 @@ export default function HomeScreen() {
                     { color: activeConnected ? "#4BD693" : "#FFB54D" },
                   ]}
                 >
-                  {activeConnected ? "已連線" : "連線中"}
+                  {activePlatform === "AB" || activePlatform === "DB"
+                    ? vendorStatus[activePlatform]
+                    : activeConnected
+                      ? "已連線"
+                      : "連線中"}
                 </Text>
               </View>
               <View
