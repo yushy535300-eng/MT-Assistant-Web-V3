@@ -45,7 +45,8 @@ async function startServer() {
     if(!kind)return res.status(400).json({ok:false,error:"invalid_vendor"});
     let u:URL;try{u=new URL(gameUrl)}catch{return res.status(400).json({ok:false,error:"invalid_game_url"})}
     if(u.protocol!=="https:")return res.status(400).json({ok:false,error:"invalid_game_url"});
-    try{await startVendorRelay(sessionId,kind,u.toString());return res.json({ok:true})}catch(e:any){return res.status(502).json({ok:false,error:e?.message||"vendor_start_failed"})}
+    console.log(`[Vendor API] start｜kind=${kind}｜host=${u.hostname}｜session=${sessionId.slice(0,8)}`);
+    try{await startVendorRelay(sessionId,kind,u.toString());return res.json({ok:true})}catch(e:any){console.error(`[Vendor API] start failed｜kind=${kind}｜${e?.message||e}`);return res.status(502).json({ok:false,error:e?.message||"vendor_start_failed"})}
   });
   app.get("/api/vendor/stream",(req,res)=>{
     const sessionId=String(req.query.sessionId||""),kind=vendorKind(req.query.kind);

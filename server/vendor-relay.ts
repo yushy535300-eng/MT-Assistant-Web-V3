@@ -47,13 +47,15 @@ class VendorRelay{
     this.transport=await startVendorBrowserTransport({sessionId:this.key,gameUrl:this.gameUrl,label:this.kind,
       onLog:m=>this.event(m),onObject:o=>this.handle(o),onFailure:m=>this.setStatus("error",m)});
     this.setStatus("connecting",`${this.kind} 已開啟，等待桌台資料`);
+    const wait=setTimeout(()=>{if(!this.stopped&&!this.map.size)this.setStatus("error",`${this.kind} 背景頁面已開啟，但 20 秒內未收到可解析的桌台資料`)},20000);
+    wait.unref?.();
   }
   subscribe(res:Sink){this.lastTouch=Date.now();this.clients.add(res);this.send(res,"status",{status:this.status,message:this.message});this.send(res,"tables",this.tables());this.send(res,"pnl",this.pnl);return()=>{this.clients.delete(res);this.lastTouch=Date.now()}}
   age(){return this.clients.size?0:Date.now()-this.lastTouch} stop(){this.stopped=true;this.transport?.stop();this.clients.clear();}
   private send(c:Sink,event:string,data:any){try{c.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)}catch{}}
   private broadcast(event:string,data:any){for(const c of this.clients)this.send(c,event,data)}
-  private event(message:string){this.broadcast("event",{message:`${this.kind} ${message}`})}
-  private setStatus(status:string,message:string){this.status=status;this.message=message;this.broadcast("status",{status,message})}
+  private event(message:string){console.log(`[Vendor ${this.kind}][${this.key.slice(0,8)}] ${message}`);this.broadcast("event",{message:`${this.kind} ${message}`})}
+  private setStatus(status:string,message:string){this.status=status;this.message=message;console.log(`[Vendor ${this.kind}][${this.key.slice(0,8)}] status=${status}｜${message}`);this.broadcast("status",{status,message})}
   private tables(){return [...this.map.values()].sort((a,b)=>a.apiId.localeCompare(b.apiId,undefined,{numeric:true}))}
   private emit(){this.setStatus("connected",`${this.kind} 已同步 ${this.map.size} 桌`);this.broadcast("tables",this.tables())}
   private handle(root:any){

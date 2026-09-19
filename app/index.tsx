@@ -2614,6 +2614,10 @@ export default function HomeScreen() {
     AB: "未連線",
     DB: "未連線",
   });
+  const [vendorMessage, setVendorMessage] = useState<Record<VendorKind, string>>({
+    AB: "尚未啟動",
+    DB: "尚未啟動",
+  });
   const [vendorPnl, setVendorPnl] = useState<Record<VendorKind, number | null>>(
     { AB: null, DB: null },
   );
@@ -4659,6 +4663,7 @@ export default function HomeScreen() {
     if (!platformToken) return;
     setVendorConnected((v) => ({ ...v, [kind]: false }));
     setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
+    setVendorMessage((v) => ({ ...v, [kind]: "正在取得平台授權並啟動即時牌路" }));
     getVendorLoginUrlFromPlatform(loginPlatform, platformToken, kind)
       .then((url) => {
         if (cancelled) return null;
@@ -4693,6 +4698,10 @@ export default function HomeScreen() {
                       ? "連線失敗"
                       : "連線中",
               }));
+              setVendorMessage((v) => ({
+                ...v,
+                [kind]: message || (status === "connected" ? "即時桌台同步完成" : "等待桌台資料"),
+              }));
             }
             if (message && !cancelled && status === "error")
               appendEvent(message);
@@ -4710,6 +4719,10 @@ export default function HomeScreen() {
       .catch((e: any) => {
         if (!cancelled) {
           setVendorStatus((v) => ({ ...v, [kind]: "連線失敗" }));
+          setVendorMessage((v) => ({
+            ...v,
+            [kind]: String(e?.message || e || "未知錯誤"),
+          }));
           appendEvent(
             `${kind === "AB" ? "歐博" : "DB"} 自動連線失敗：${e?.message || e}`,
           );
@@ -4894,6 +4907,7 @@ export default function HomeScreen() {
     setVendorTables({ AB: [], DB: [] });
     setVendorConnected({ AB: false, DB: false });
     setVendorStatus({ AB: "未連線", DB: "未連線" });
+    setVendorMessage({ AB: "尚未啟動", DB: "尚未啟動" });
     setVendorPnl({ AB: null, DB: null });
     setVendorUrls({ AB: "", DB: "" });
     setDgConnected(false);
@@ -6644,9 +6658,7 @@ export default function HomeScreen() {
                 </Pressable>
               </View>
               <Text style={s.modalNote}>
-                MT、DG
-                進入牌路主頁後會自動連線。下列網址只供顯示，使用者無法修改。DG
-                單工作階段：內建
+                MT、DG、歐博、DB 進入牌路主頁後會自動連線。下列網址只供顯示，使用者無法修改。
               </Text>
               <View style={s.connectionStatusRow}>
                 <View style={s.connectionStatusCard}>
@@ -6671,6 +6683,20 @@ export default function HomeScreen() {
                     {dgConnected ? "已連線" : "連線中"}
                   </Text>
                 </View>
+                <View style={s.connectionStatusCard}>
+                  <Text style={s.fieldLabel}>歐博</Text>
+                  <Text style={[s.connectionStatusText, { color: vendorConnected.AB ? "#4BD693" : vendorStatus.AB === "連線失敗" ? "#EF626A" : "#FFB54D" }]}>
+                    {vendorStatus.AB}
+                  </Text>
+                  <Text style={s.vendorDiagnosticText}>{vendorMessage.AB}</Text>
+                </View>
+                <View style={s.connectionStatusCard}>
+                  <Text style={s.fieldLabel}>DB</Text>
+                  <Text style={[s.connectionStatusText, { color: vendorConnected.DB ? "#4BD693" : vendorStatus.DB === "連線失敗" ? "#EF626A" : "#FFB54D" }]}>
+                    {vendorStatus.DB}
+                  </Text>
+                  <Text style={s.vendorDiagnosticText}>{vendorMessage.DB}</Text>
+                </View>
               </View>
               <Text style={s.fieldLabel}>MT 即時牌路 WebSocket（固定）</Text>
               <TextInput
@@ -6693,6 +6719,16 @@ export default function HomeScreen() {
                 selectTextOnFocus
                 style={s.modalInput}
               />
+              <Text style={s.fieldLabel}>歐博牌路授權網址（唯讀）</Text>
+              <TextInput value={readonlyConnectionUrl(vendorUrls.AB)} editable={false} selectTextOnFocus style={s.modalInput} />
+              <Text style={s.fieldLabel}>DB 牌路授權網址（唯讀）</Text>
+              <TextInput value={readonlyConnectionUrl(vendorUrls.DB)} editable={false} selectTextOnFocus style={s.modalInput} />
+              <Text style={s.fieldLabel}>最新連線紀錄</Text>
+              <View style={s.logBox}>
+                <Text style={s.logText}>
+                  {events.length ? events.slice(-8).reverse().join("\n") : "尚無連線紀錄"}
+                </Text>
+              </View>
               <View style={s.modalActions}>
                 <Pressable
                   style={[s.actionBtn, { backgroundColor: "#2E7CEB" }]}
@@ -8937,6 +8973,7 @@ const s = StyleSheet.create({
     marginTop: 4,
   },
   logText: { color: "#B8C8D2", fontSize: 8, lineHeight: 13 },
+  vendorDiagnosticText: { color: "#91A7B8", fontSize: 8, lineHeight: 12, marginTop: 4 },
   helpText: { color: "#D2DDE4", fontSize: 11, lineHeight: 18 },
   mtOverlay: {
     ...StyleSheet.absoluteFillObject,
