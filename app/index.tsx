@@ -1124,6 +1124,10 @@ function mergeV38PokerState(previous:V38PokerState|undefined,incoming:V38PokerSt
   const banker=[result[1],result[3],result[5]].map(mtCardRank).filter((x):x is string=>!!x);
   const playerPoint=baccaratPoint(player),bankerPoint=baccaratPoint(banker);
   const {formulas,recommendation}=v38RawFormulas(banker,player);
+  // Card reception and settlement are deliberately independent. MT international
+  // rooms reveal one baccarat hand through several show_poker packets. show_win
+  // can race the last card packet, so a settled flag must never freeze or erase a
+  // later non-zero slot belonging to the same table/shoe/round.
   return {...incoming,shoe:incomingHasShoe?incoming.shoe:previous.shoe,round:incomingHasRound?incoming.round:previous.round,
     result,player,banker,playerPoint,bankerPoint,complete:isBaccaratPokerComplete(player,banker),settled:previous.settled,formulas,recommendation};
 }
@@ -2109,7 +2113,12 @@ export default function HomeScreen(){
       let index=0;
       const next=()=>{
         if(run!==pokerCardSyncRun||!isCurrentSocket()||!authenticated)return;
+        // tablesvg's game_data exists only briefly on international tables and
+        // some responses contain an empty table list. Query both independent
+        // snapshot endpoints throughout the reveal window; either response can
+        // restore a show_poker delta missed while the foreground MT page is busy.
         requestSvg();
+        requestTables(true);
         if(index>=delays.length-1){pokerCardSyncTimer=null;return}
         const wait=delays[++index]-delays[index-1];
         pokerCardSyncTimer=setTimeout(next,wait);
@@ -2336,12 +2345,10 @@ export default function HomeScreen(){
         if(name.endsWith("/show_win")||name.includes("/show_win")){
           startPokerCardSync();
           const winTableId=String(p?.table_id??p?.data?.table_id??p?.body?.table_id??"").toUpperCase();
-          if(winTableId&&v38ByTableRef.current[winTableId]){
-            const old=v38ByTableRef.current[winTableId];
-            const settled={...old,settled:old.complete};
-            v38ByTableRef.current={...v38ByTableRef.current,[winTableId]:settled};
-            setV38ByTable(v38ByTableRef.current);
-          }
+          // Do not seal the poker state here. show_win may arrive before the
+          // final international-room show_poker delta (most often the Banker's
+          // third card). The hand remains mergeable until another shoe/round is
+          // observed; recommendation dedupe is handled separately.
           refreshBetReportAfterSettlement(winTableId,p);
         }if(name==="/api/v1/authenticate"){if(Number(p?.err)===0){authenticated=true;setConnected(true);appendEvent("authenticate 成功");requestTables();requestBalance();startDealerRefresh();startBalanceRefresh();startBetReportRefresh();startDataSessionRefresh();svgRefreshTimer=setTimeout(()=>{svgRefreshTimer=null;if(isCurrentSocket())requestSvg()},200)}else{setConnected(false);appendEvent("authenticate 失敗")}return}const src=eventTables(p);if(src&&name.endsWith("/tables")){
       const filtered=src.filter(isMtBaccaratTable);
