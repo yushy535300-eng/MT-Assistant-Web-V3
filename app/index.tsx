@@ -1012,8 +1012,10 @@ function TableCard({
     <View
       style={[s.tableCard, desktop && s.tableCardDesktop, dg && s.tableCardDg]}
     >
-      <View style={[s.tableHead, dg && s.tableHeadDg]}>
-        <View style={s.row}>
+      <View
+        style={[s.tableHead, !desktop && s.tableHeadMobile, dg && s.tableHeadDg]}
+      >
+        <View style={[s.row, !desktop && s.tableHeadRowMobile]}>
           <Text style={s.game}>百家樂</Text>
           <Text style={[s.tableId, dg && s.tableIdDg]}>{table.id}</Text>
           <MaterialIcons name="person" size={12} color="#fff" />
@@ -1023,7 +1025,7 @@ function TableCard({
             updatedAt={table.countdownUpdatedAt}
           />
         </View>
-        <View style={s.row}>
+        <View style={[s.row, !desktop && s.tableHeadRowMobile]}>
           <Text style={[s.statText, { color: "#F35762" }]}>
             莊 {table.banker}
           </Text>
@@ -2463,6 +2465,7 @@ export default function HomeScreen() {
   const { width, height } = useWindowDimensions();
   const desktop = width >= 1000;
   const tablet = width >= 700 && width < 1000;
+  const phone = width < 600;
   const orbSize = desktop
     ? Math.max(68, Math.min(90, width * 0.045))
     : tablet
@@ -4647,28 +4650,28 @@ export default function HomeScreen() {
     };
   }, [accessGranted, accessSessionId, dgGameUrl, dgConnectEpoch]);
 
-  // 歐博 / DB 採懶載入：第一次切到平台才取得該平台一次性網址並啟動
-  // 真實頁面解碼。分類只在既有快照上篩選，不會重登或清空牌路。
+  // 登入成功後立即在背景依序啟動歐博與 DB。平台分頁只切換畫面，
+  // 不再觸發另一組登入/relay，避免使用者看到空框後才開始等待連線。
   useEffect(() => {
-    if (
-      !accessGranted ||
-      !accessSessionId ||
-      (activePlatform !== "AB" && activePlatform !== "DB")
-    )
-      return;
-    const kind = activePlatform as VendorKind;
-    if (vendorControllersRef.current[kind]) return;
+    if (!accessGranted || !accessSessionId) return;
     let cancelled = false;
     const platformToken = platformTokenRef.current;
     if (!platformToken) return;
-    setVendorConnected((v) => ({ ...v, [kind]: false }));
-    setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
-    setVendorMessage((v) => ({ ...v, [kind]: "正在取得平台授權並啟動即時牌路" }));
-    getVendorLoginUrlFromPlatform(loginPlatform, platformToken, kind)
-      .then((url) => {
-        if (cancelled) return null;
+
+    const startOne = async (kind: VendorKind) => {
+      if (cancelled || vendorControllersRef.current[kind]) return;
+      setVendorConnected((v) => ({ ...v, [kind]: false }));
+      setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
+      setVendorMessage((v) => ({ ...v, [kind]: "登入後自動取得授權並連線" }));
+      try {
+        const url = await getVendorLoginUrlFromPlatform(
+          loginPlatform,
+          platformToken,
+          kind,
+        );
+        if (cancelled) return;
         setVendorUrls((v) => ({ ...v, [kind]: url }));
-        return connectVendorLive(kind, url, accessSessionId, {
+        const controller = await connectVendorLive(kind, url, accessSessionId, {
           onTables: (next: VendorTableData[]) => {
             if (!cancelled)
               setVendorTables((v) => ({ ...v, [kind]: next as TableData[] }));
@@ -4710,13 +4713,9 @@ export default function HomeScreen() {
             if (!cancelled && message) appendEvent(message);
           },
         });
-      })
-      .then((controller) => {
-        if (!controller) return;
         if (cancelled) controller.close();
         else vendorControllersRef.current[kind] = controller;
-      })
-      .catch((e: any) => {
+      } catch (e: any) {
         if (!cancelled) {
           setVendorStatus((v) => ({ ...v, [kind]: "連線失敗" }));
           setVendorMessage((v) => ({
@@ -4727,11 +4726,23 @@ export default function HomeScreen() {
             `${kind === "AB" ? "歐博" : "DB"} 自動連線失敗：${e?.message || e}`,
           );
         }
-      });
+      }
+    };
+
+    void (async () => {
+      // Render 資源有限，依序啟動可避免兩個 Chromium 同一秒搶記憶體。
+      await startOne("AB");
+      if (!cancelled) await startOne("DB");
+    })();
+
     return () => {
       cancelled = true;
+      for (const kind of ["AB", "DB"] as VendorKind[]) {
+        try { vendorControllersRef.current[kind]?.close(); } catch {}
+        delete vendorControllersRef.current[kind];
+      }
     };
-  }, [accessGranted, accessSessionId, activePlatform, loginPlatform]);
+  }, [accessGranted, accessSessionId, loginPlatform]);
 
   // 如果 DG 原生遊戲把背景 relay 踢掉：先用「同一個已取得的 DG token」
   // 重掛一次背景 relay，不再呼叫 DGLI/login 取得第二組 token。這樣可避免
@@ -6234,6 +6245,7 @@ export default function HomeScreen() {
           style={[
             s.topbar,
             !desktop ? s.topbarMobile : null,
+            phone ? s.topbarPhone : null,
             activePlatform === "DG" && s.topbarDg,
           ]}
         >
@@ -6260,7 +6272,7 @@ export default function HomeScreen() {
               )}
             </View>
           </View>
-          <View style={s.row}>
+          <View style={[s.row, !desktop && s.topbarActionsMobile]}>
             <Pressable style={s.lineBtn} onPress={openLineContact}>
               <View style={s.lineLogo}>
                 <Text style={s.lineLogoText}>LINE</Text>
@@ -6308,7 +6320,13 @@ export default function HomeScreen() {
                   : "即時桌況 · 牌路分析 · 荷官同步"}
               </Text>
             </View>
-            <View style={[s.overStats, !desktop && s.overStatsMobile]}>
+            <View
+              style={[
+                s.overStats,
+                !desktop && s.overStatsMobile,
+                phone && s.overStatsPhone,
+              ]}
+            >
               <View
                 style={[
                   s.overStat,
@@ -6341,34 +6359,36 @@ export default function HomeScreen() {
                   平台 · 可用 {availableTableCount} 桌
                 </Text>
                 <View style={s.platformSwitch}>
-                  {(["MT", "DG", "AB", "DB"] as PlatformKey[]).map((p) => (
-                    <Pressable
-                      key={p}
-                      onPress={() => {
-                        setActivePlatform(p);
-                        setActiveCategory("一般");
-                      }}
-                      style={[
-                        s.platformTab,
-                        activePlatform === p &&
-                          (p === "DG"
-                            ? s.platformTabDgActive
-                            : s.platformTabMtActive),
-                      ]}
-                    >
-                      <Text
+                  <View style={s.platformTabsGrid}>
+                    {(["MT", "DG", "AB", "DB"] as PlatformKey[]).map((p) => (
+                      <Pressable
+                        key={p}
+                        onPress={() => {
+                          setActivePlatform(p);
+                          setActiveCategory("一般");
+                        }}
                         style={[
-                          s.platformTabText,
+                          s.platformTab,
                           activePlatform === p &&
                             (p === "DG"
-                              ? s.platformTabTextDgActive
-                              : s.platformTabTextActive),
+                              ? s.platformTabDgActive
+                              : s.platformTabMtActive),
                         ]}
                       >
-                        {p === "AB" ? "歐博" : p}
-                      </Text>
-                    </Pressable>
-                  ))}
+                        <Text
+                          style={[
+                            s.platformTabText,
+                            activePlatform === p &&
+                              (p === "DG"
+                                ? s.platformTabTextDgActive
+                                : s.platformTabTextActive),
+                          ]}
+                        >
+                          {p === "AB" ? "歐博" : p}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
                   <Pressable
                     disabled={!hasEnteredGame || walletTransferBusy}
                     onPress={confirmTransferAll}
@@ -7010,6 +7030,18 @@ const s = StyleSheet.create({
   },
   topbarDg: { backgroundColor: "#110E08", borderBottomColor: "#8B6B2E" },
   topbarMobile: { minHeight: 64, paddingHorizontal: 10 },
+  topbarPhone: {
+    paddingTop: 8,
+    paddingBottom: 8,
+    flexDirection: "column",
+    alignItems: "stretch",
+    gap: 8,
+  },
+  topbarActionsMobile: {
+    width: "100%",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+  },
   brandMobileStack: { alignItems: "flex-start" },
   brandIcon: {
     width: 34,
@@ -7084,6 +7116,7 @@ const s = StyleSheet.create({
   overSub: { color: "#7894A8", fontSize: 9, marginTop: 3 },
   overStats: { flexDirection: "row", gap: 8 },
   overStatsMobile: { width: "100%", gap: 6 },
+  overStatsPhone: { flexDirection: "column" },
   overStat: {
     minWidth: 112,
     borderWidth: 1,
@@ -7096,8 +7129,8 @@ const s = StyleSheet.create({
   overStatMobile: { flex: 1, minWidth: 0, padding: 8 },
   overValue: { color: "#fff", fontSize: 13, fontWeight: "900", marginTop: 4 },
   platformSwitch: {
-    flexDirection: "row",
-    alignItems: "center",
+    flexDirection: "column",
+    alignItems: "stretch",
     marginTop: 5,
     padding: 2,
     borderRadius: 6,
@@ -7105,8 +7138,14 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(130,151,166,.22)",
   },
+  platformTabsGrid: {
+    width: "100%",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 4,
+  },
   platformTab: {
-    minWidth: 42,
+    width: "calc(50% - 2px)" as any,
     height: 23,
     paddingHorizontal: 10,
     borderRadius: 4,
@@ -7133,7 +7172,7 @@ const s = StyleSheet.create({
   platformTabTextDgActive: { color: "#FFF2C9" },
   walletReturnBtn: {
     height: 23,
-    marginLeft: 4,
+    marginTop: 4,
     paddingHorizontal: 8,
     borderRadius: 4,
     borderWidth: 1,
@@ -7195,6 +7234,17 @@ const s = StyleSheet.create({
     alignItems: "center",
     borderBottomWidth: 1,
     borderBottomColor: "#27485E",
+  },
+  tableHeadMobile: {
+    height: 52,
+    paddingVertical: 4,
+    flexDirection: "column",
+    alignItems: "stretch",
+    justifyContent: "space-between",
+  },
+  tableHeadRowMobile: {
+    width: "100%",
+    justifyContent: "space-between",
   },
   tableHeadDg: { backgroundColor: "#171208", borderBottomColor: "#785B27" },
   game: { color: "#EAF6FF", fontSize: 9, fontWeight: "700" },
