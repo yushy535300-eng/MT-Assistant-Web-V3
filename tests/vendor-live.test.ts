@@ -1,6 +1,6 @@
 import {describe,expect,it} from "vitest";
 import {abCategory,abPoker,abRank,abRoad,abRoadFromCards,dbCategory,dbDecodeBeatPlate,dbFlattenPacket,dbResolveCategory,ingestDbPackets} from "../server/vendor-relay";
-import {pickLaunchUrl} from "../server/vendor-launch";
+import {pickLaunchUrl,preferDbVueUrl} from "../server/vendor-launch";
 
 describe("歐博 HAR 協議",()=>{
   it("以路紙內的莊閒點數判定勝負",()=>{
@@ -72,5 +72,8 @@ describe("歐博／DB 啟動網址",()=>{
     expect(pickLaunchUrl({
       data:{game_url:"https://pc.jhui100.com/play?params=xyz"},
     },"DB")).toContain("params=xyz");
+  });
+  it("DB Egret 大廳改走 H5 play 頁",()=>{
+    expect(preferDbVueUrl("https://pc.jhui100.com:2053/egret/hall?params=abc")).toBe("https://pc.jhui100.com/play?params=abc");
   });
 });

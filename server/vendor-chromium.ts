@@ -4,6 +4,7 @@ import path from 'node:path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 
 const NORMAL_CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
+const DB_H5_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const DG_HOST_RE = /(?:^|\.)(?:kindlestone\.com|taxyss\.com|ywjxi\.com|20299999\.com|dingdangmail\.com)$/i;
 
 export type DgChromiumTransport = { stop: () => void; sendBinary: (data: Buffer) => Promise<boolean> };
@@ -587,11 +588,17 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
 export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Promise<VendorBrowserTransport> {
   const executable = findChromeExecutable();
   if (!executable) throw new Error('找不到 Chrome/Chromium；請確認 postinstall 已完成');
+  const dbH5 = hooks.label === 'DB';
+  const ua = dbH5 ? DB_H5_UA : NORMAL_CHROME_UA;
   const launched = await launchChrome(
     executable,
     `${hooks.label.toLowerCase()}-${hooks.sessionId}`,
     hooks.onLog,
-    ['--timezone=Asia/Taipei', '--lang=zh-TW'],
+    [
+      '--timezone=Asia/Taipei',
+      '--lang=zh-TW',
+      ...(dbH5 ? [`--user-agent=${DB_H5_UA}`, '--window-size=390,844'] : []),
+    ],
   );
   const cdp = new CdpClient(launched.wsUrl);
   await cdp.ready();
@@ -725,7 +732,7 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     await cdp.send('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:true,flatten:true},sessionId).catch(()=>{});
     await cdp.send('Page.addScriptToEvaluateOnNewDocument',{source},sessionId).catch(()=>{});
     await cdp.send('Runtime.evaluate',{expression:source},sessionId,8000).catch(()=>{});
-    await cdp.send('Network.setUserAgentOverride',{userAgent:NORMAL_CHROME_UA,acceptLanguage:'zh-TW,zh;q=0.9,en;q=0.8',platform:'Windows'},sessionId).catch(()=>{});
+    await cdp.send('Network.setUserAgentOverride',{userAgent:ua,acceptLanguage:'zh-TW,zh;q=0.9,en;q=0.8',platform:dbH5?'iPhone':'Windows'},sessionId).catch(()=>{});
     await cdp.send('Network.setExtraHTTPHeaders',{headers:{'Accept-Language':'zh-TW,zh;q=0.9,en;q=0.8'}},sessionId).catch(()=>{});
     await cdp.send('Runtime.runIfWaitingForDebugger',{},sessionId).catch(()=>{});
     hooks.onLog(`監聽目標已安裝｜session=${sessionId.slice(0,8)}`);

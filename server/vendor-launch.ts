@@ -26,10 +26,24 @@ export function pickLaunchUrl(data: any, kind: VendorKind) {
       const u = new URL(candidate);
       const credentialOk =
         kind === "AB" ? !!u.searchParams.get("sessionId") : !!u.searchParams.get("params");
-      if (u.protocol === "https:" && credentialOk) return u.toString();
+      if (u.protocol === "https:" && credentialOk) {
+        return kind === "DB" ? preferDbVueUrl(u.toString()) : u.toString();
+      }
     } catch {}
   }
   throw new Error(`找不到 ${providerName} 有效授權網址`);
+}
+
+export function preferDbVueUrl(url: string) {
+  try {
+    const u = new URL(url);
+    if (!/egret/i.test(u.pathname)) return u.toString();
+    u.pathname = "/play";
+    if (u.port === "2053") u.port = "";
+    return u.toString();
+  } catch {
+    return url;
+  }
 }
 
 export async function fetchVendorLaunchUrl(opts: {
@@ -54,8 +68,8 @@ export async function fetchVendorLaunchUrl(opts: {
         game_return_url: base,
         game_kind: "",
         game_type: "",
-        device: "Desktop",
-        game_device: "Desktop",
+        device: opts.kind === "DB" ? "Mobile" : "Desktop",
+        game_device: opts.kind === "DB" ? "Mobile" : "Desktop",
       }),
       signal: controller.signal,
     });

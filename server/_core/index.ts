@@ -64,7 +64,7 @@ async function startServer() {
       return res.status(502).json({ok:false,error:e?.message||"vendor_start_failed"});
     }
   });
-  app.get("/api/vendor/stream",(req,res)=>{
+  app.get("/api/vendor/stream",async(req,res)=>{
     const sessionId=String(req.query.sessionId||""),kind=vendorKind(req.query.kind);
     if(!(await requireTrackerSession(sessionId)))return res.status(401).end();if(!kind)return res.status(400).end();
     const relay=getVendorRelay(sessionId,kind);if(!relay)return res.status(404).end();
