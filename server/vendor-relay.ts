@@ -52,7 +52,8 @@ export function abPoker(raw:any){
   return player||banker?JSON.stringify({player,banker}):undefined;
 }
 function abLooksLikeCard(value:any){
-  const s=String(value??"");
+  const s=String(value??"").trim();
+  if(!s||s==="-1"||s==="-2"||s==="0")return false;
   return /^\d{3}$/.test(s) || /^(?:[Aa]|[Jj]|[Qq]|[Kk]|10|[1-9])$/.test(s);
 }
 export function abCardGrid(raw:any):any[][]|null{
@@ -65,8 +66,10 @@ export function abCardGrid(raw:any):any[][]|null{
     return null;
   }
   if(Array.isArray(raw)&&raw.length>=2&&Array.isArray(raw[0])&&Array.isArray(raw[1])){
-    const player=raw[0].filter(abLooksLikeCard);
-    const banker=raw[1].filter(abLooksLikeCard);
+    const baccaratRows=raw.filter((row)=>Array.isArray(row)&&row.length<=3);
+    const rows=baccaratRows.length>=2?baccaratRows.slice(0,2):raw;
+    const player=rows[0].filter(abLooksLikeCard);
+    const banker=rows[1].filter(abLooksLikeCard);
     if(player.length||banker.length)return [player,banker];
   }
   if(raw&&typeof raw==="object"){
@@ -277,7 +280,7 @@ class VendorRelay{
     this.transport=await startVendorBrowserTransport({sessionId:this.key,gameUrl:this.gameUrl,label:this.kind,
       onLog:m=>this.event(m),onObject:o=>this.handle(o),onFailure:m=>this.setStatus("error",m)});
     this.setStatus("connecting",`${this.kind} 已開啟，等待桌台資料`);
-    const wait=setTimeout(()=>{if(!this.stopped&&!this.map.size)this.setStatus("error",`${this.kind} 背景頁面已開啟，但 45 秒內未收到可解析的桌台資料`)},45000);
+    const wait=setTimeout(()=>{if(!this.stopped&&!this.map.size)this.setStatus("error",`${this.kind} 背景頁面已開啟，但尚未收到可解析的桌台資料`)},this.kind==="DB"?90000:45000);
     wait.unref?.();
   }
   subscribe(res:Sink){this.lastTouch=Date.now();this.clients.add(res);this.send(res,"status",{status:this.status,message:this.message});this.send(res,"tables",this.tables());this.send(res,"pnl",this.pnl);return()=>{this.clients.delete(res);this.lastTouch=Date.now()}}
@@ -285,7 +288,10 @@ class VendorRelay{
   private send(c:Sink,event:string,data:any){try{c.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)}catch{}}
   private broadcast(event:string,data:any){for(const c of this.clients)this.send(c,event,data)}
   private event(message:string){console.log(`[Vendor ${this.kind}][${this.key.slice(0,8)}] ${message}`);this.broadcast("event",{message:`${this.kind} ${message}`})}
-  private setStatus(status:string,message:string){this.status=status;this.message=message;console.log(`[Vendor ${this.kind}][${this.key.slice(0,8)}] status=${status}｜${message}`);this.broadcast("status",{status,message})}
+  private setStatus(status:string,message:string){
+    if(this.status===status&&this.message===message)return;
+    this.status=status;this.message=message;console.log(`[Vendor ${this.kind}][${this.key.slice(0,8)}] status=${status}｜${message}`);this.broadcast("status",{status,message});
+  }
   private tables(){return [...this.map.values()].sort((a,b)=>a.apiId.localeCompare(b.apiId,undefined,{numeric:true}))}
   private emit(){
     if(!this.map.size)return;
@@ -318,8 +324,14 @@ class VendorRelay{
   }
   private abApplyCards(id:any, raw:any, round?:number){
     const hit=this.abGet(id); if(!hit)return false;
-    const poker=abPoker(raw); if(!poker&&round==null)return false;
+    const poker=abPoker(raw);
     const nextRound=n(round)||hit.table.round;
+    const newRound=nextRound!==hit.table.round;
+    if(!poker&&round==null)return false;
+    if(newRound&&!poker){
+      this.map.set(hit.key,{...hit.table,round:nextRound,poker:undefined,lastResultKey:undefined,lastUpdated:Date.now()});
+      return true;
+    }
     const outcome=abRoadFromCards(raw);
     const resultKey=outcome?`${nextRound}:${outcome}`:hit.table.lastResultKey;
     let results=hit.table.results,banker=hit.table.banker,player=hit.table.player,tie=hit.table.tie;
@@ -353,7 +365,7 @@ class VendorRelay{
       }this.emit();return;
     }
     if(/rawcards|pushrawcards|pushpoker|showcards/i.test(cmd)){
-      if(this.abApplyCards(p.A??p.AA??p.tableId??p.D,p.B??p.XX??p.cards??p.poker,p.E??p.CC??p.round))this.emit();
+      if(this.abApplyCards(p.A??p.AA??p.BB??p.tableId??p.D,p.B??p.XX??p.cards??p.poker,p.E??p.CC??p.round))this.emit();
       return;
     }
     if(cmd==="pushPayoutInfo"){

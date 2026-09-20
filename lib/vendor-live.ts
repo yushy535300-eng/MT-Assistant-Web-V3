@@ -25,7 +25,7 @@ export async function connectVendorLive(
   source.addEventListener("pnl",(e:any)=>{try{const x=JSON.parse(e.data);cb.onPnl?.(typeof x==="number"?x:null)}catch{}});
   source.addEventListener("settlement",(e:any)=>{try{cb.onSettlement?.(JSON.parse(e.data))}catch{}});
   source.addEventListener("event",(e:any)=>{try{cb.onEvent?.(JSON.parse(e.data)?.message||"")}catch{}});
-  source.onerror=()=>cb.onStatus?.("error",`${kind} 即時資料暫時中斷`);
+  source.onerror=()=>{ if(source.readyState===EventSource.CLOSED) cb.onStatus?.("error",`${kind} 即時資料暫時中斷`); };
   return{
     host:String(data?.host||""),
     close(){source.close();void fetch("/api/vendor/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({kind,sessionId})}).catch(()=>{})},

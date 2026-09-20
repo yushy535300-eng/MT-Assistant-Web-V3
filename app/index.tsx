@@ -2369,7 +2369,16 @@ function mergeV38PokerState(
   };
 }
 
-function parsePokerFace(token: string): string | null {
+function tableIdKeys(table: { id?: string; apiId?: string; tableBadge?: string; roomId?: string }) {
+  return [table.apiId, table.id, table.tableBadge, table.roomId]
+    .map((x) => String(x ?? "").trim())
+    .filter((x) => x && x !== "undefined");
+}
+function tableMatchesAssistId(table: { id?: string; apiId?: string; tableBadge?: string; roomId?: string }, assistId: string) {
+  const want = String(assistId ?? "").trim();
+  if (!want) return false;
+  return tableIdKeys(table).includes(want);
+}
   const value = String(token || "").trim().toUpperCase();
   if (!value) return null;
   if (value === "A" || value === "J" || value === "Q" || value === "K") return value;
@@ -2660,6 +2669,10 @@ export default function HomeScreen() {
     activeCategory !== "所有"
       ? allActiveTables.filter((t) => (t.category || "一般") === activeCategory)
       : allActiveTables;
+  const assistPool: TableData[] =
+    activePlatform === "AB" || activePlatform === "DB"
+      ? allActiveTables
+      : tables;
   const availableTableCount =
     activePlatform === "DG"
       ? dgTables.length
@@ -2829,9 +2842,9 @@ export default function HomeScreen() {
   // roomMenuTables is only a frozen dropdown snapshot and must never drive dealer display.
   const assistTable = useMemo(
     () =>
-      tables.find((t) => (t.apiId ?? `BAG${t.id}`) === assistTableId) ??
-      tables[0],
-    [tables, assistTableId],
+      assistPool.find((t) => tableMatchesAssistId(t, assistTableId)) ??
+      assistPool[0],
+    [assistPool, assistTableId],
   );
   const latest = assistTable?.results.at(-1);
   const recommendation = recommendSide(assistTable?.results ?? []);
@@ -2843,7 +2856,7 @@ export default function HomeScreen() {
   const assistConfidenceState = confidenceState(assistConfidence);
   const radarSignals = useMemo(
     () =>
-      tables.map((table) => {
+      assistPool.map((table) => {
         const results = table.results ?? [];
         const ready = roadSides(results).length >= 3;
         const decision = roadDecision(results);
@@ -2858,7 +2871,7 @@ export default function HomeScreen() {
           confidence,
         };
       }),
-    [tables],
+    [assistPool],
   );
   const bestRadar = radarSignals
     .filter((x) => x.ready)
@@ -2868,7 +2881,7 @@ export default function HomeScreen() {
       null,
     );
   const radarDetailTable = radarDetailId
-    ? (tables.find((t) => (t.apiId ?? `BAG${t.id}`) === radarDetailId) ?? null)
+    ? (assistPool.find((t) => tableMatchesAssistId(t, radarDetailId)) ?? null)
     : null;
   const radarDetailDecision = roadDecision(radarDetailTable?.results ?? []);
   const radarDetailConfidence = radarDetailTable
@@ -4823,6 +4836,8 @@ export default function HomeScreen() {
       };
       if (table.id) nextMap[table.id] = nextMap[parsed.tableId];
       if (table.apiId) nextMap[table.apiId] = nextMap[parsed.tableId];
+      if ((table as any).tableBadge) nextMap[String((table as any).tableBadge)] = nextMap[parsed.tableId];
+      if (table.roomId) nextMap[table.roomId] = nextMap[parsed.tableId];
       changed = true;
     }
     if (changed) {
@@ -4832,12 +4847,10 @@ export default function HomeScreen() {
   }, [activePlatform, dgTables, vendorTables]);
 
   useEffect(() => {
-    const exists = tables.some(
-      (t) => (t.apiId ?? `BAG${t.id}`) === assistTableId,
-    );
-    if (!exists && tables.length)
-      setAssistTableId(tables[0].apiId ?? tables[0].id);
-  }, [activePlatform, tables.length]);
+    const exists = assistPool.some((t) => tableMatchesAssistId(t, assistTableId));
+    if (!exists && assistPool.length)
+      setAssistTableId(assistPool[0].apiId ?? assistPool[0].id);
+  }, [activePlatform, assistPool.length]);
   const stopConnection = () => {
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -5647,7 +5660,7 @@ export default function HomeScreen() {
                 setRoomDropdownOpen(false);
               } else {
                 setRoomMenuTables(
-                  tables.map((t) => ({ ...t, results: [...t.results] })),
+                  assistPool.map((t) => ({ ...t, results: [...t.results] })),
                 );
                 roomDropdownOpenRef.current = true;
                 setRoomDropdownOpen(true);
@@ -5703,9 +5716,8 @@ export default function HomeScreen() {
                 }}
               >
                 {roomMenuTables.map((t) => {
-                  const id = t.apiId ?? `BAG${t.id}`;
-                  // Confidence is read from the live radar signal, not the frozen room-menu snapshot.
-                  const liveSignal = radarSignals.find((x) => x.id === id);
+                  const id = t.apiId ?? t.id;
+                  const liveSignal = radarSignals.find((x) => tableMatchesAssistId(t, x.id));
                   const roomReady = liveSignal?.ready ?? false;
                   const roomState = confidenceState(
                     liveSignal?.confidence ?? 0,
@@ -5725,7 +5737,7 @@ export default function HomeScreen() {
                       }}
                     >
                       <View style={s.roomDropdownLeft}>
-                        <Text style={s.roomDropdownText}>{id}</Text>
+                        <Text style={s.roomDropdownText}>{id}{t.tableBadge && t.tableBadge !== id ? ` · ${t.tableBadge}` : ""}</Text>
                         <Text numberOfLines={1} style={s.roomDropdownDealer}>
                           荷官 {t.name || "—"}
                         </Text>
@@ -5788,7 +5800,13 @@ export default function HomeScreen() {
     insideMt?: boolean;
   }) => {
     if (!terminalParityOpen) return null;
-    const data = v38ByTable[assistTableId];
+    const data =
+      v38ByTable[assistTableId] ||
+      (assistTable
+        ? tableIdKeys(assistTable)
+            .map((id) => v38ByTable[id])
+            .find(Boolean)
+        : undefined);
     // Preserve MT's actual deal order: P1, B1, P2, B2, optional P3, optional B3.
     const dealt: string[] = [];
     if (data) {
@@ -5874,7 +5892,13 @@ export default function HomeScreen() {
 
   const V38Calculator = ({ insideMt = false }: { insideMt?: boolean }) => {
     if (!v38Open) return null;
-    const data = v38ByTable[assistTableId];
+    const data =
+      v38ByTable[assistTableId] ||
+      (assistTable
+        ? tableIdKeys(assistTable)
+            .map((id) => v38ByTable[id])
+            .find(Boolean)
+        : undefined);
     const sideColor = (x: V38Side) =>
       x === "莊" ? "#EF4E57" : x === "閒" ? "#2879E5" : "#A7B5BF";
     const status = !activeConnected
@@ -6376,7 +6400,7 @@ export default function HomeScreen() {
                       key={p}
                       onPress={() => {
                         setActivePlatform(p);
-                        setActiveCategory(p === "DB" ? "所有" : "一般");
+                        setActiveCategory("所有");
                       }}
                       style={[
                         s.platformTab,

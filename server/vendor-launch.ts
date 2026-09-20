@@ -37,9 +37,12 @@ export function pickLaunchUrl(data: any, kind: VendorKind) {
 export function preferDbVueUrl(url: string) {
   try {
     const u = new URL(url);
-    if (!/egret/i.test(u.pathname)) return u.toString();
-    u.pathname = "/play";
-    if (u.port === "2053") u.port = "";
+    if (/egret\/hall/i.test(u.pathname) && /jhui100\.com$/i.test(u.hostname)) return u.toString();
+    if (/jhui100\.com$/i.test(u.hostname)) {
+      const next = new URL("https://pc.jhui100.com:2053/egret/hall");
+      next.search = u.search;
+      return next.toString();
+    }
     return u.toString();
   } catch {
     return url;
@@ -68,8 +71,8 @@ export async function fetchVendorLaunchUrl(opts: {
         game_return_url: base,
         game_kind: "",
         game_type: "",
-        device: opts.kind === "DB" ? "Mobile" : "Desktop",
-        game_device: opts.kind === "DB" ? "Mobile" : "Desktop",
+        device: "Desktop",
+        game_device: "Desktop",
       }),
       signal: controller.signal,
     });

@@ -17,8 +17,13 @@ describe("歐博 HAR 協議",()=>{
     expect(abCategory(301)).toBe("其他");
   });
   it("完整牌面後才判定勝負",()=>{
-    expect(abRoadFromCards([["409","202"],["403","201"]])).toBe("閒");
+    expect(abRoadFromCards([["409","202"],["403","201"]])).toBe(null);
     expect(abRoadFromCards([["303"],["306","112"]])).toBe(null);
+    expect(abRoadFromCards([["304","411"],["110","404","111"]])).toBe("和");
+  });
+  it("B201 實包把 -2 當未發牌並讀出閒莊",()=>{
+    expect(abPoker([["-2","-2"],["-2","-2"]])).toBe(undefined);
+    expect(abPoker([["304","411"],["110","404","111"]])).toBe(JSON.stringify({player:"4-J",banker:"10-4-J"}));
   });
 });
 
@@ -68,12 +73,15 @@ describe("歐博／DB 啟動網址",()=>{
       data:{url:"https://www.ab8888.games/entry?sessionId=abc123"},
     },"AB")).toContain("sessionId=abc123");
   });
-  it("DB 接受加密 params",()=>{
+  it("DB 接受加密 params 並改走 Egret 大廳",()=>{
+    expect(pickLaunchUrl({
+      data:{game_url:"https://pc.jhui100.com/play?params=xyz"},
+    },"DB")).toContain("pc.jhui100.com:2053/egret/hall");
     expect(pickLaunchUrl({
       data:{game_url:"https://pc.jhui100.com/play?params=xyz"},
     },"DB")).toContain("params=xyz");
   });
-  it("DB Egret 大廳改走 H5 play 頁",()=>{
-    expect(preferDbVueUrl("https://pc.jhui100.com:2053/egret/hall?params=abc")).toBe("https://pc.jhui100.com/play?params=abc");
+  it("已是 Egret 大廳的網址不改寫",()=>{
+    expect(preferDbVueUrl("https://pc.jhui100.com:2053/egret/hall?params=abc")).toBe("https://pc.jhui100.com:2053/egret/hall?params=abc");
   });
 });
