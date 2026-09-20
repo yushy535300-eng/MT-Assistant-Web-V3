@@ -2848,6 +2848,20 @@ export default function HomeScreen() {
       assistPool[0],
     [assistPool, assistTableId],
   );
+  const liveV38 = useMemo(() => {
+    if (activePlatform !== "MT" && assistTable) {
+      const parsed = parseDgV38Poker(assistTable as DgTableData);
+      if (parsed) return parsed;
+    }
+    return (
+      v38ByTable[assistTableId] ||
+      (assistTable
+        ? tableIdKeys(assistTable)
+            .map((id) => v38ByTable[id])
+            .find(Boolean)
+        : undefined)
+    );
+  }, [activePlatform, assistTable, assistTableId, v38ByTable]);
   const latest = assistTable?.results.at(-1);
   const recommendation = recommendSide(assistTable?.results ?? []);
   const assistDecision = roadDecision(assistTable?.results ?? []);
@@ -4821,13 +4835,21 @@ export default function HomeScreen() {
     const nextMap = { ...v38ByTableRef.current };
     for (const table of pokerTables as DgTableData[]) {
       const parsed = parseDgV38Poker(table);
-      if (!parsed) continue;
-      const prev = nextMap[parsed.tableId];
+      const keys = tableIdKeys(table);
+      if (!parsed) {
+        if (keys.some((k) => nextMap[k])) {
+          for (const k of keys) delete nextMap[k];
+          changed = true;
+        }
+        continue;
+      }
+      const prev = nextMap[parsed.tableId] || keys.map((k) => nextMap[k]).find(Boolean);
       const same =
         prev &&
         prev.shoe === parsed.shoe &&
         prev.round === parsed.round &&
-        prev.result.join(",") === parsed.result.join(",");
+        prev.player.join(",") === parsed.player.join(",") &&
+        prev.banker.join(",") === parsed.banker.join(",");
       if (same) continue;
       nextMap[parsed.tableId] = {
         ...parsed,
@@ -5119,6 +5141,7 @@ export default function HomeScreen() {
     }
   };
   const action = (kind: string, table: TableData) => {
+    setAssistTableId(table.apiId ?? table.id);
     if (kind === "平台") void openCurrentPlatform(table);
     else if (kind === "分析") setAnalysisTable(table);
     else notify(`已關注百家樂 ${table.id}`);
@@ -5802,21 +5825,24 @@ export default function HomeScreen() {
     insideMt?: boolean;
   }) => {
     if (!terminalParityOpen) return null;
-    const data =
-      v38ByTable[assistTableId] ||
-      (assistTable
-        ? tableIdKeys(assistTable)
-            .map((id) => v38ByTable[id])
-            .find(Boolean)
-        : undefined);
-    // Preserve MT's actual deal order: P1, B1, P2, B2, optional P3, optional B3.
+    const data = liveV38;
     const dealt: string[] = [];
     if (data) {
-      const r = data.result;
-      [0, 1, 2, 3, 4, 5].forEach((i) => {
-        const rank = mtCardRank(r[i]);
-        if (rank) dealt.push(rank);
-      });
+      if (activePlatform === "MT") {
+        const r = data.result;
+        [0, 1, 2, 3, 4, 5].forEach((i) => {
+          const rank = mtCardRank(r[i]);
+          if (rank) dealt.push(rank);
+        });
+      } else {
+        const player = data.player || [];
+        const banker = data.banker || [];
+        const n = Math.max(player.length, banker.length);
+        for (let i = 0; i < n; i++) {
+          if (player[i]) dealt.push(player[i]);
+          if (banker[i]) dealt.push(banker[i]);
+        }
+      }
     }
     const calc = terminalParityResult(dealt);
     const ready = !!data?.complete;
@@ -5894,13 +5920,7 @@ export default function HomeScreen() {
 
   const V38Calculator = ({ insideMt = false }: { insideMt?: boolean }) => {
     if (!v38Open) return null;
-    const data =
-      v38ByTable[assistTableId] ||
-      (assistTable
-        ? tableIdKeys(assistTable)
-            .map((id) => v38ByTable[id])
-            .find(Boolean)
-        : undefined);
+    const data = liveV38;
     const sideColor = (x: V38Side) =>
       x === "莊" ? "#EF4E57" : x === "閒" ? "#2879E5" : "#A7B5BF";
     const status = !activeConnected
