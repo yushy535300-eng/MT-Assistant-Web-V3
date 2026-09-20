@@ -1,5 +1,5 @@
 import type { Response } from "express";
-import { startVendorBrowserTransport, type VendorBrowserTransport } from "./dg-chromium";
+import { startVendorBrowserTransport, type VendorBrowserTransport } from "./vendor-chromium";
 
 export type VendorKind = "AB" | "DB";
 type Road = "莊" | "閒" | "和";
@@ -37,9 +37,32 @@ export function abCategory(code:any){
   return ({101:"一般",103:"快速",104:"免佣",110:"保險",111:"VIP"} as any)[n(code)]||"其他";
 }
 export function dbCategory(value:any){const s=String(value??"");if(/終極|ultimate/i.test(s))return"終極";if(/完美|perfect/i.test(s))return"完美";if(/共贏|cowin|co-win/i.test(s))return"共贏";if(/包桌|private/i.test(s))return"包桌";if(/電投|electronic/i.test(s))return"電投";return"一般"}
+const DB_BACCARAT_CATEGORIES:Record<number,string>={2002:"極速",2001:"經典",2003:"完美",2004:"共享",2005:"包桌",2038:"電投"};
+export function dbBaccaratCategory(gameTypeId:any){return DB_BACCARAT_CATEGORIES[n(gameTypeId)]||""}
+export function dbDecodeBeatPlate(encoded:any):Road[]{
+  if(typeof encoded!=="string"||!encoded)return[];
+  try{
+    const bytes=Buffer.from(encoded,"base64");
+    const bits=[...bytes].map(v=>v.toString(2).padStart(8,"0")).join("");
+    let pointer=0;const take=(size:number)=>{const value=parseInt(bits.slice(pointer,pointer+size),2);pointer+=size;return value};
+    take(8);const rows=take(8),columns=take(8),total=rows*columns;
+    if(!rows||!columns||total>5000)return[];
+    const roads:Road[]=[];
+    for(let index=0;index<total&&pointer+5<=bits.length;index++){
+      const occupied=take(1);
+      if(!occupied){take(4);continue}
+      const result=take(2);take(2); // pair bits are not needed by the main-page road.
+      if(result===0)roads.push("閒");
+      else if(result===1||result===3)roads.push("莊"); // result 3 is banker-six.
+      else if(result===2)roads.push("和");
+    }
+    return roads;
+  }catch{return[]}
+}
 
 class VendorRelay{
   private clients=new Set<Sink>(); private map=new Map<string,VendorTable>();
+  private dbRaw=new Map<string,any>();
   private transport:VendorBrowserTransport|null=null; private status="connecting"; private message="啟動中";
   private pnl:number|null=null; private stopped=false; private lastTouch=Date.now();
   constructor(readonly key:string,readonly kind:VendorKind,readonly gameUrl:string){}
@@ -92,21 +115,41 @@ class VendorRelay{
   private handleDb(root:any){
     const pnlCandidate=root?.totalWinLoss??root?.todayWinLoss??root?.netWinLoss??root?.data?.totalWinLoss??root?.data?.todayWinLoss??root?.data?.netWinLoss;
     if(pnlCandidate!==undefined&&Number.isFinite(Number(pnlCandidate))){this.pnl=Number(pnlCandidate);this.broadcast("pnl",this.pnl)}
-    const visit=(v:any,depth=0)=>{
-      if(!v||typeof v!=="object"||depth>6)return;
-      const gameId=n(v.gameId??v.game_id??v.gameType??v.game_type);
-      const id=text(v.fms,v.tableCode,v.table_code,v.tableName,v.table_name,v.tableId,v.table_id);
-      const roads=v.roads??v.roadmaps??v.roadMap??v.results??v.resultList;
-      if(id&&(gameId===1||/^(?:BAC|B|J)\w+/i.test(id))&&Array.isArray(roads)){
-        const old=this.map.get(id);const rr=roads.map((x:any)=>{
-          const z=String(x?.result??x?.winner??x?.code??x).toLowerCase();
-          if(z.includes("bank")||z==="1"||z==="莊")return"莊";if(z.includes("play")||z==="2"||z==="閒")return"閒";if(z.includes("tie")||z==="3"||z==="和")return"和";return null;
-        }).filter(Boolean) as Road[];const c=count(rr);
-        const category=dbCategory(text(v.categoryName,v.category,v.gameMode,v.tableType));
-        this.map.set(id,{id,apiId:id,game:"百家樂",name:text(v.dealer?.name,v.dealerName,v.dealer_name,old?.name,"—"),players:text(v.onlineCount,v.online_count,old?.players,"—"),countdown:n(v.countDown??v.countdown??old?.countdown),countdownUpdatedAt:Date.now(),roomId:text(v.tableName,v.table_name,id),tableBadge:text(v.tableId,v.table_id,id),shoe:text(v.shoeId,v.shoe_id,v.shoe,old?.shoe,"—"),round:n(v.playId??v.round??v.roundNo??old?.round),banker:c.莊,player:c.閒,tie:c.和,results:rr,trend:"",live:true,lastUpdated:Date.now(),category});
+    let changed=false;
+    const save=(value:any,forcedId?:string)=>{
+      const id=text(forcedId,value?.tableId,value?.table_id);if(!id)return;
+      const previousRaw=this.dbRaw.get(id)||{};
+      const merged={...previousRaw,...value,tableOnline:{...(previousRaw.tableOnline||{}),...(value?.tableOnline||{})},roadPaper:{...(previousRaw.roadPaper||{}),...(value?.roadPaper||{})}};
+      this.dbRaw.set(id,merged);
+      const category=dbBaccaratCategory(merged.gameTypeId);if(!category)return;
+      const old=this.map.get(id);
+      let rr=dbDecodeBeatPlate(merged.roadPaper?.beatPlateRoad);
+      if(!rr.length&&Array.isArray(merged.results))rr=merged.results.map((x:any)=>{
+        const z=String(x?.result??x?.winner??x?.code??x).toLowerCase();
+        if(z.includes("bank")||z==="1"||z==="莊")return"莊";if(z.includes("play")||z==="0"||z==="閒")return"閒";if(z.includes("tie")||z==="2"||z==="和")return"和";return null;
+      }).filter(Boolean) as Road[];
+      if(!rr.length&&old)rr=old.results;
+      const summary=Array.isArray(merged.bootReport?.items)?merged.bootReport.items:[];
+      const summaryCount=(point:number,fallback:number)=>n(summary.find((x:any)=>n(x?.betPointId)===point)?.winCount??fallback);
+      const counted=count(rr);
+      const serverTime=n(merged.serverTime),endTime=n(merged.countdownEndTime);
+      const calculatedCountdown=endTime&&serverTime?Math.max(0,Math.ceil((endTime-serverTime)/1000)):0;
+      this.map.set(id,{id:`DB-${id}`,apiId:id,game:"百家樂",name:text(merged.dealerName,merged.dealer?.name,old?.name,"—"),players:text(merged.tableOnline?.onlineNumber,merged.onlineCount,old?.players,"—"),countdown:n(calculatedCountdown||merged.countDown||merged.countdown||old?.countdown),countdownUpdatedAt:Date.now(),roomId:id,tableBadge:id,shoe:text(merged.bootNo,merged.shoeId,old?.shoe,"—"),round:n(merged.roundNo??merged.roundId??old?.round),banker:summaryCount(3001,counted.莊),player:summaryCount(3002,counted.閒),tie:summaryCount(3003,counted.和),results:rr,trend:"",live:true,dealerPhoto:text(merged.dealerPic,merged.dealerPicTable,merged.phonePicTable,old?.dealerPhoto)||undefined,lastUpdated:Date.now(),category});
+      changed=true;
+    };
+    const visit=(value:any,depth=0)=>{
+      if(value==null||depth>12)return;
+      if(typeof value==="string"){
+        const trimmed=value.trim();if(!trimmed||!(trimmed.startsWith("{")||trimmed.startsWith("[")))return;
+        try{visit(JSON.parse(trimmed),depth+1)}catch{}return;
       }
-      if(Array.isArray(v))for(const x of v.slice(0,500))visit(x,depth+1);else for(const x of Object.values(v).slice(0,200))visit(x,depth+1);
-    };visit(root);if(this.map.size)this.emit();
+      if(Array.isArray(value)){for(const item of value.slice(0,3000))visit(item,depth+1);return}
+      if(typeof value!=="object")return;
+      if(value.gameTableMap&&typeof value.gameTableMap==="object")for(const [id,table] of Object.entries(value.gameTableMap))save(table,id);
+      if(value.tableId!=null&&(value.gameTypeId!=null||this.dbRaw.has(String(value.tableId))))save(value);
+      for(const child of Object.values(value).slice(0,500))visit(child,depth+1);
+    };
+    visit(root);if(changed)this.emit();
   }
 }
 

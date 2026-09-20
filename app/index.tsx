@@ -265,11 +265,11 @@ const abPlaceholderTables = Object.entries(abPlaceholderGroups).flatMap(
   ([category, ids]) => ids.map((id) => vendorPlaceholder(id, category)),
 );
 const dbPlaceholderCounts: Record<string, number> = {
-  一般: 21,
-  終極: 47,
-  完美: 3,
-  共贏: 2,
-  包桌: 2,
+  極速: 141,
+  經典: 54,
+  完美: 6,
+  共享: 4,
+  包桌: 4,
   電投: 10,
 };
 const dbPlaceholderTables = Object.entries(dbPlaceholderCounts).flatMap(
@@ -4647,24 +4647,19 @@ export default function HomeScreen() {
     };
   }, [accessGranted, accessSessionId, dgGameUrl, dgConnectEpoch]);
 
-  // 歐博 / DB 採懶載入：第一次切到平台才取得該平台一次性網址並啟動
-  // 真實頁面解碼。分類只在既有快照上篩選，不會重登或清空牌路。
+  // 登入牌路主頁後，歐博與 DB 各自取得授權並在獨立背景頁啟動。
+  // 平台按鈕只切換顯示內容，不負責建立連線，因此不必先點進遊戲。
   useEffect(() => {
-    if (
-      !accessGranted ||
-      !accessSessionId ||
-      (activePlatform !== "AB" && activePlatform !== "DB")
-    )
-      return;
-    const kind = activePlatform as VendorKind;
-    if (vendorControllersRef.current[kind]) return;
+    if (!accessGranted || !accessSessionId) return;
     let cancelled = false;
     const platformToken = platformTokenRef.current;
     if (!platformToken) return;
-    setVendorConnected((v) => ({ ...v, [kind]: false }));
-    setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
-    setVendorMessage((v) => ({ ...v, [kind]: "正在取得平台授權並啟動即時牌路" }));
-    getVendorLoginUrlFromPlatform(loginPlatform, platformToken, kind)
+    const startKind = (kind: VendorKind) => {
+      if (vendorControllersRef.current[kind]) return;
+      setVendorConnected((v) => ({ ...v, [kind]: false }));
+      setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
+      setVendorMessage((v) => ({ ...v, [kind]: "正在取得平台授權並啟動即時牌路" }));
+      getVendorLoginUrlFromPlatform(loginPlatform, platformToken, kind)
       .then((url) => {
         if (cancelled) return null;
         setVendorUrls((v) => ({ ...v, [kind]: url }));
@@ -4728,10 +4723,13 @@ export default function HomeScreen() {
           );
         }
       });
+    };
+    startKind("AB");
+    startKind("DB");
     return () => {
       cancelled = true;
     };
-  }, [accessGranted, accessSessionId, activePlatform, loginPlatform]);
+  }, [accessGranted, accessSessionId, loginPlatform]);
 
   // 如果 DG 原生遊戲把背景 relay 踢掉：先用「同一個已取得的 DG token」
   // 重掛一次背景 relay，不再呼叫 DGLI/login 取得第二組 token。這樣可避免
@@ -6346,7 +6344,7 @@ export default function HomeScreen() {
                       key={p}
                       onPress={() => {
                         setActivePlatform(p);
-                        setActiveCategory("一般");
+                        setActiveCategory(p === "DB" ? "極速" : "一般");
                       }}
                       style={[
                         s.platformTab,
@@ -6369,30 +6367,30 @@ export default function HomeScreen() {
                       </Text>
                     </Pressable>
                   ))}
-                  <Pressable
-                    disabled={!hasEnteredGame || walletTransferBusy}
-                    onPress={confirmTransferAll}
+                </View>
+                <Pressable
+                  disabled={!hasEnteredGame || walletTransferBusy}
+                  onPress={confirmTransferAll}
+                  style={[
+                    s.walletReturnBtn,
+                    (!hasEnteredGame || walletTransferBusy) &&
+                      s.walletReturnBtnDisabled,
+                  ]}
+                >
+                  <MaterialIcons
+                    name="account-balance-wallet"
+                    size={15}
+                    color={hasEnteredGame ? "#FFF1C6" : "#71808B"}
+                  />
+                  <Text
                     style={[
-                      s.walletReturnBtn,
-                      (!hasEnteredGame || walletTransferBusy) &&
-                        s.walletReturnBtnDisabled,
+                      s.walletReturnText,
+                      !hasEnteredGame && s.walletReturnTextDisabled,
                     ]}
                   >
-                    <MaterialIcons
-                      name="account-balance-wallet"
-                      size={13}
-                      color={hasEnteredGame ? "#FFF1C6" : "#71808B"}
-                    />
-                    <Text
-                      style={[
-                        s.walletReturnText,
-                        !hasEnteredGame && s.walletReturnTextDisabled,
-                      ]}
-                    >
-                      {walletTransferBusy ? "轉回中" : "一鍵轉回"}
-                    </Text>
-                  </Pressable>
-                </View>
+                    {walletTransferBusy ? "轉回中" : "一鍵轉回原平台"}
+                  </Text>
+                </Pressable>
               </View>
             </View>
           </View>
@@ -6404,7 +6402,7 @@ export default function HomeScreen() {
             >
               {(activePlatform === "AB"
                 ? ["一般", "快速", "免佣", "保險", "VIP", "所有"]
-                : ["一般", "終極", "完美", "共贏", "包桌", "電投", "所有"]
+                : ["極速", "經典", "完美", "共享", "包桌", "電投", "所有"]
               ).map((category) => (
                 <Pressable
                   key={category}
@@ -6437,12 +6435,21 @@ export default function HomeScreen() {
               s.cardsGrid,
               desktop && s.cardsGridDesktop,
               desktop && s.cardsGridDesktopCentered,
+              !desktop && activePlatform === "DB" && s.cardsGridDbMobile,
             ]}
           >
             {tables.map((t) => (
               <View
                 key={t.apiId}
-                style={desktop ? s.cardWrapDesktop : s.cardWrap}
+                style={
+                  desktop
+                    ? activePlatform === "AB" || activePlatform === "DB"
+                      ? s.cardWrapVendorDesktop
+                      : s.cardWrapDesktop
+                    : activePlatform === "DB"
+                      ? s.cardWrapDbMobile
+                      : s.cardWrap
+                }
               >
                 <MemoTableCard
                   table={t}
@@ -7082,7 +7089,7 @@ const s = StyleSheet.create({
     marginTop: 2,
   },
   overSub: { color: "#7894A8", fontSize: 9, marginTop: 3 },
-  overStats: { flexDirection: "row", gap: 8 },
+  overStats: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
   overStatsMobile: { width: "100%", gap: 6 },
   overStat: {
     minWidth: 112,
@@ -7097,7 +7104,10 @@ const s = StyleSheet.create({
   overValue: { color: "#fff", fontSize: 13, fontWeight: "900", marginTop: 4 },
   platformSwitch: {
     flexDirection: "row",
+    flexWrap: "wrap",
     alignItems: "center",
+    width: 184,
+    gap: 4,
     marginTop: 5,
     padding: 2,
     borderRadius: 6,
@@ -7106,9 +7116,9 @@ const s = StyleSheet.create({
     borderColor: "rgba(130,151,166,.22)",
   },
   platformTab: {
-    minWidth: 42,
-    height: 23,
-    paddingHorizontal: 10,
+    width: 86,
+    height: 27,
+    paddingHorizontal: 8,
     borderRadius: 4,
     alignItems: "center",
     justifyContent: "center",
@@ -7132,10 +7142,10 @@ const s = StyleSheet.create({
   platformTabTextActive: { color: "#EAF8FF" },
   platformTabTextDgActive: { color: "#FFF2C9" },
   walletReturnBtn: {
-    height: 23,
-    marginLeft: 4,
-    paddingHorizontal: 8,
-    borderRadius: 4,
+    height: 31,
+    marginTop: 7,
+    paddingHorizontal: 12,
+    borderRadius: 6,
     borderWidth: 1,
     borderColor: "#9B7530",
     backgroundColor: "#241A0A",
@@ -7149,7 +7159,7 @@ const s = StyleSheet.create({
     backgroundColor: "#151A1F",
     opacity: 0.62,
   },
-  walletReturnText: { color: "#FFF1C6", fontSize: 8, fontWeight: "900" },
+  walletReturnText: { color: "#FFF1C6", fontSize: 10, fontWeight: "900" },
   walletReturnTextDisabled: { color: "#71808B" },
   categorySwitch: { gap: 6, paddingBottom: 9 },
   categoryTab: { height: 28, minWidth: 58, paddingHorizontal: 12, borderRadius: 6, borderWidth: 1, borderColor: "#304F65", backgroundColor: "#0B1925", alignItems: "center", justifyContent: "center" },
@@ -7166,9 +7176,12 @@ const s = StyleSheet.create({
   listHint: { color: "#73899A", fontSize: 8 },
   cardsGrid: { width: "100%", alignSelf: "center" },
   cardsGridDesktop: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  cardsGridDbMobile: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   cardsGridDesktopCentered: { maxWidth: 1280 },
   cardWrap: { width: "100%" },
   cardWrapDesktop: { width: "calc(50% - 5px)" as any, maxWidth: 635 },
+  cardWrapVendorDesktop: { width: "calc(33.333% - 7px)" as any },
+  cardWrapDbMobile: { width: "calc(50% - 3px)" as any },
   tableCard: {
     backgroundColor: "#08111A",
     borderWidth: 1,
