@@ -27,19 +27,64 @@ export function abRank(card:any){
   const s=String(card??""); if(!/^\d{3}$/.test(s))return 0;
   const rank=n(s.slice(1)); return rank>=10?10:rank;
 }
+export function abFace(card:any){
+  const s=String(card??"");
+  if(s==="-1"||s==="0"||s==="")return "";
+  if(!/^\d{3}$/.test(s)){
+    const t=s.trim().toUpperCase();
+    if(["A","J","Q","K"].includes(t))return t;
+    const rank=n(t); if(rank===1)return "A"; if(rank>=2&&rank<=10)return String(rank);
+    if(rank===11)return "J"; if(rank===12)return "Q"; if(rank===13)return "K";
+    return "";
+  }
+  const rank=n(s.slice(1));
+  if(rank===1)return "A";
+  if(rank===11)return "J";
+  if(rank===12)return "Q";
+  if(rank===13)return "K";
+  if(rank>=2&&rank<=10)return String(rank);
+  return "";
+}
 export function abPoker(raw:any){
-  if(!Array.isArray(raw)||raw.length<2)return undefined;
-  const side=(x:any)=>Array.isArray(x)?x.map(abRank).filter(Boolean).slice(0,3).join("-"):"";
-  const player=side(raw[0]),banker=side(raw[1]);
+  const grid=abCardGrid(raw); if(!grid)return undefined;
+  const side=(x:any[])=>x.map(abFace).filter(Boolean).slice(0,3).join("-");
+  const player=side(grid[0]),banker=side(grid[1]);
   return player||banker?JSON.stringify({player,banker}):undefined;
+}
+function abLooksLikeCard(value:any){
+  const s=String(value??"");
+  return /^\d{3}$/.test(s) || /^(?:[Aa]|[Jj]|[Qq]|[Kk]|10|[1-9])$/.test(s);
+}
+export function abCardGrid(raw:any):any[][]|null{
+  if(!raw)return null;
+  if(typeof raw==="string"){
+    const trimmed=raw.trim();
+    if((trimmed.startsWith("{")||trimmed.startsWith("["))){
+      try{return abCardGrid(JSON.parse(trimmed))}catch{return null}
+    }
+    return null;
+  }
+  if(Array.isArray(raw)&&raw.length>=2&&Array.isArray(raw[0])&&Array.isArray(raw[1])){
+    const player=raw[0].filter(abLooksLikeCard);
+    const banker=raw[1].filter(abLooksLikeCard);
+    if(player.length||banker.length)return [player,banker];
+  }
+  if(raw&&typeof raw==="object"){
+    const player=raw.player??raw.Player??raw.P??raw.idle;
+    const banker=raw.banker??raw.Banker??raw.B??raw.bank;
+    if(Array.isArray(player)||Array.isArray(banker)){
+      return [Array.isArray(player)?player:[],Array.isArray(banker)?banker:[]];
+    }
+  }
+  return null;
 }
 export function abCategory(code:any){
   return ({101:"一般",103:"快速",104:"免佣",110:"保險",111:"VIP"} as any)[n(code)]||"其他";
 }
 export function abHands(raw:any){
-  if(!Array.isArray(raw)||raw.length<2)return null;
-  const side=(x:any)=>Array.isArray(x)?x.map(abRank).filter((v)=>v>0).slice(0,3):[];
-  const player=side(raw[0]),banker=side(raw[1]);
+  const grid=abCardGrid(raw); if(!grid)return null;
+  const side=(x:any[])=>x.map(abRank).filter((v)=>v>0).slice(0,3);
+  const player=side(grid[0]),banker=side(grid[1]);
   if(player.length<2||banker.length<2)return null;
   const point=(cards:number[])=>cards.reduce((s,v)=>s+(v>=10?0:v),0)%10;
   return {player,banker,playerPoint:point(player),bankerPoint:point(banker)};
@@ -125,41 +170,64 @@ class VendorRelay{
       this.event(`真實百家樂桌解析完成｜${this.map.size} 桌`);
     }
   }
+  private abGet(id:any){
+    const s=String(id??"");
+    if(!s||s==="undefined")return undefined;
+    const direct=this.map.get(s);
+    if(direct)return {key:s,table:direct};
+    for(const [k,t] of this.map){
+      if(t.apiId===s||t.id===s||t.tableBadge===s||t.roomId===s)return {key:k,table:t};
+    }
+    return undefined;
+  }
+  private abApplyCards(id:any, raw:any, round?:number){
+    const hit=this.abGet(id); if(!hit)return false;
+    const poker=abPoker(raw); if(!poker&&round==null)return false;
+    const nextRound=n(round)||hit.table.round;
+    const outcome=abRoadFromCards(raw);
+    const resultKey=outcome?`${nextRound}:${outcome}`:hit.table.lastResultKey;
+    let results=hit.table.results,banker=hit.table.banker,player=hit.table.player,tie=hit.table.tie;
+    if(outcome&&resultKey!==hit.table.lastResultKey){
+      results=[...hit.table.results,outcome];
+      const c=count(results);banker=c.莊;player=c.閒;tie=c.和;
+    }
+    this.map.set(hit.key,{...hit.table,round:nextRound,poker:poker||hit.table.poker,results,banker,player,tie,lastResultKey:resultKey,lastUpdated:Date.now()});
+    return true;
+  }
   private handleAb(o:any){
     if(n(o?.code)===0&&Array.isArray(o?.data?.C)&&o.data.C.some((x:any)=>x?.JJ!==undefined&&x?.CC)){
       const total=Number(o.data.I??o.data.M);
       if(Number.isFinite(total)){this.pnl=total;this.broadcast("pnl",total)}
     }
-    const cmd=String(o?.c||""); const p=o?.p||{};
+    const cmd=String(o?.c||o?.cmd||o?.method||""); const p=o?.p||o?.payload||o?.data||{};
     if(cmd==="getGameHall"&&Array.isArray(p.D)){
       for(const r of p.D){
         const cat=abCategory(r?.DD);if(cat==="其他")continue;
         const id=text(r?.BB,r?.AA);const roads=(r?.WW3?.[0]||[]).map(abRoad).filter(Boolean) as Road[];const c=count(roads);
-        this.map.set(String(r.AA),{id,apiId:id,game:"百家樂",name:text(r?.II,"—"),players:"—",countdown:n(r?.HH?.BB),countdownUpdatedAt:Date.now(),roomId:id,tableBadge:String(r?.AA),shoe:"—",round:n(r?.HH?.CC),banker:c.莊,player:c.閒,tie:c.和,results:roads,trend:"",live:true,streamUrl:r?.Z16?String(r.Z16):undefined,lastUpdated:Date.now(),category:cat});
+        const poker=abPoker(r?.XX)||abPoker(r?.YY)||abPoker(r?.B)||abPoker(r?.HH?.XX)||abPoker(r?.HH?.B);
+        this.map.set(String(r.AA),{id,apiId:id,game:"百家樂",name:text(r?.II,"—"),players:"—",countdown:n(r?.HH?.BB),countdownUpdatedAt:Date.now(),roomId:id,tableBadge:String(r?.AA),shoe:text(r?.HH?.AA,r?.shoe,"—"),round:n(r?.HH?.CC),banker:c.莊,player:c.閒,tie:c.和,results:roads,trend:"",live:true,streamUrl:r?.Z16?String(r.Z16):undefined,poker,lastUpdated:Date.now(),category:cat});
       }this.emit();return;
     }
     if(cmd==="pushGameStatus"&&Array.isArray(p.A)){
-      for(const s of p.A){const prev=this.map.get(String(s.AA));if(!prev)continue;this.map.set(String(s.AA),{...prev,countdown:n(s.BB),countdownUpdatedAt:Date.now(),round:n(s.CC)||prev.round,lastUpdated:Date.now()})}this.emit();return;
+      for(const s of p.A){
+        const hit=this.abGet(s.AA)||this.abGet(s.BB);if(!hit)continue;
+        this.map.set(hit.key,{...hit.table,countdown:n(s.BB),countdownUpdatedAt:Date.now(),round:n(s.CC)||hit.table.round,lastUpdated:Date.now()});
+        const cards=s.XX||s.YY||s.B||s.F;
+        if(abPoker(cards))this.abApplyCards(hit.key,cards,s.CC);
+      }this.emit();return;
     }
-    if(cmd==="pushRawCards"){
-      const prev=this.map.get(String(p.A));if(!prev)return;
-      const poker=abPoker(p.B)||prev.poker;
-      const round=n(p.E)||prev.round;
-      const outcome=abRoadFromCards(p.B);
-      const key=outcome?`${round}:${outcome}`:prev.lastResultKey;
-      let results=prev.results,banker=prev.banker,player=prev.player,tie=prev.tie;
-      if(outcome&&key!==prev.lastResultKey){
-        results=[...prev.results,outcome];
-        const c=count(results);banker=c.莊;player=c.閒;tie=c.和;
-      }
-      this.map.set(String(p.A),{...prev,round,poker,results,banker,player,tie,lastResultKey:key,lastUpdated:Date.now()});
-      this.emit();return;
+    if(/rawcards|pushrawcards|pushpoker|showcards/i.test(cmd)){
+      if(this.abApplyCards(p.A??p.AA??p.tableId??p.D,p.B??p.XX??p.cards??p.poker,p.E??p.CC??p.round))this.emit();
+      return;
     }
     if(cmd==="pushPayoutInfo"){
-      // Current user is the VIP=23 entry. Z is balance, L is this bet's P/L;
-      // report endpoint remains authoritative for daily total when available.
       const i=Array.isArray(p.V)?p.V.findIndex((x:any)=>n(x)===23):-1;
       if(i>=0&&Array.isArray(p.L?.[i]))this.broadcast("settlement",{pnl:p.L[i].reduce((a:number,x:any)=>a+n(x),0),tableId:p.D});
+      this.abApplyCards(p.D??p.A,p.B??p.XX,p.E);
+      return;
+    }
+    if(!cmd){
+      if(this.abApplyCards(o.A??o.AA??o.tableId,o.B??o.XX??o.cards,o.E??o.round))this.emit();
     }
   }
   private handleDb(root:any){

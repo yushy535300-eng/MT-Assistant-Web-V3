@@ -10,7 +10,7 @@ describe("歐博 HAR 協議",()=>{
   });
   it("保留雙方最多三張牌並把十與人頭牌算零點",()=>{
     expect(abRank("412")).toBe(10);
-    expect(abPoker([["303","401","412"],["306","112","-1"]])).toBe(JSON.stringify({player:"3-1-10",banker:"6-10"}));
+    expect(abPoker([["303","401","412"],["306","112","-1"]])).toBe(JSON.stringify({player:"3-A-Q",banker:"6-Q"}));
   });
   it("只留下已確認的百家桌類別",()=>{
     expect([101,103,104,110,111].map(abCategory)).toEqual(["一般","快速","免佣","保險","VIP"]);

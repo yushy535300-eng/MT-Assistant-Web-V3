@@ -2369,32 +2369,44 @@ function mergeV38PokerState(
   };
 }
 
+function parsePokerFace(token: string): string | null {
+  const value = String(token || "").trim().toUpperCase();
+  if (!value) return null;
+  if (value === "A" || value === "J" || value === "Q" || value === "K") return value;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (n > 13) return mtCardRank(n);
+  if (n === 1) return "A";
+  if (n === 11) return "J";
+  if (n === 12) return "Q";
+  if (n === 13) return "K";
+  return String(n);
+}
+
 function parseDgV38Poker(table: DgTableData): V38PokerState | null {
   if (!table?.poker) return null;
   try {
     const poker = JSON.parse(table.poker);
-    const playerIds = String(poker?.player ?? "")
+    const player = String(poker?.player ?? "")
       .split("-")
-      .map(Number)
-      .filter((n) => Number.isFinite(n) && n > 0)
+      .map(parsePokerFace)
+      .filter((x): x is string => !!x)
       .slice(0, 3);
-    const bankerIds = String(poker?.banker ?? "")
+    const banker = String(poker?.banker ?? "")
       .split("-")
-      .map(Number)
-      .filter((n) => Number.isFinite(n) && n > 0)
+      .map(parsePokerFace)
+      .filter((x): x is string => !!x)
       .slice(0, 3);
-    if (!playerIds.length && !bankerIds.length) return null;
-    const player = playerIds.map(mtCardRank).filter((x): x is string => !!x);
-    const banker = bankerIds.map(mtCardRank).filter((x): x is string => !!x);
+    if (!player.length && !banker.length) return null;
     const playerPoint = baccaratPoint(player),
       bankerPoint = baccaratPoint(banker);
     const result = [
-      playerIds[0] ?? 0,
-      bankerIds[0] ?? 0,
-      playerIds[1] ?? 0,
-      bankerIds[1] ?? 0,
-      playerIds[2] ?? 0,
-      bankerIds[2] ?? 0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
       0,
       0,
       playerPoint,
@@ -4808,6 +4820,8 @@ export default function HomeScreen() {
             ? !!prev.settled
             : false,
       };
+      if (table.id) nextMap[table.id] = nextMap[parsed.tableId];
+      if (table.apiId) nextMap[table.apiId] = nextMap[parsed.tableId];
       changed = true;
     }
     if (changed) {
