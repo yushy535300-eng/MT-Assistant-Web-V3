@@ -28,11 +28,6 @@ export type VendorBrowserHooks = {
 
 export type VendorBrowserTransport = { stop: () => void };
 
-type SharedVendorChrome = { chrome: LaunchedChrome; refs: number };
-const sharedVendorChromes = new Map<string, SharedVendorChrome>();
-const sharedVendorChromeStarts = new Map<string, Promise<SharedVendorChrome>>();
-const sharedVendorRootTargets = new Set<string>();
-
 type CdpMessage = { id?: number; method?: string; params?: any; result?: any; error?: any; sessionId?: string };
 type RequestMeta = { url: string; type: string; method: string };
 
@@ -260,52 +255,6 @@ async function takeWarmOrLaunchChrome(executable: string, sessionId: string, onL
     return chrome;
   }
   return launchChrome(executable, sessionId, onLog);
-}
-
-async function acquireVendorChrome(executable: string, rawSessionId: string, onLog: (message: string) => void) {
-  // Keep AB and DB in isolated Chromium processes. Their pages create popup,
-  // iframe and worker targets without a reliable openerId; sharing one browser
-  // allowed both relays to attach to the same target and cross-read sessions.
-  const key = rawSessionId;
-  let shared = sharedVendorChromes.get(key);
-  if (!shared || !chromeAlive(shared.chrome)) {
-    let pending = sharedVendorChromeStarts.get(key);
-    if (!pending) {
-      pending = launchChrome(executable, `vendor-${key}`, message => onLog(`獨立瀏覽器｜${message}`))
-        .then(chrome => {
-          const entry: SharedVendorChrome = { chrome, refs: 0 };
-          sharedVendorChromes.set(key, entry);
-          chrome.child.once('exit', () => {
-            if (sharedVendorChromes.get(key) === entry) sharedVendorChromes.delete(key);
-          });
-          return entry;
-        })
-        .finally(() => sharedVendorChromeStarts.delete(key));
-      sharedVendorChromeStarts.set(key, pending);
-    }
-    shared = await pending;
-  } else {
-    onLog(`沿用同平台 Chromium｜pid=${shared.chrome.child.pid}`);
-  }
-  shared.refs++;
-  let released = false;
-  return {
-    launched: shared.chrome,
-    release: () => {
-      if (released) return;
-      released = true;
-      const current = sharedVendorChromes.get(key);
-      if (!current) return;
-      current.refs = Math.max(0, current.refs - 1);
-      if (current.refs > 0) return;
-      sharedVendorChromes.delete(key);
-      try { current.chrome.child.kill('SIGTERM'); } catch {}
-      setTimeout(() => {
-        try { if (!current.chrome.child.killed) current.chrome.child.kill('SIGKILL'); } catch {}
-      }, 1200).unref?.();
-      try { fs.rmSync(current.chrome.profile, { recursive: true, force: true }); } catch {}
-    },
-  };
 }
 
 export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<DgChromiumTransport> {
@@ -630,33 +579,22 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
 export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Promise<VendorBrowserTransport> {
   const executable = findChromeExecutable();
   if (!executable) throw new Error('找不到 Chrome/Chromium；請確認 postinstall 已完成');
-  const shared = await acquireVendorChrome(executable, hooks.sessionId, hooks.onLog);
-  const launched = shared.launched;
+  const launched = await launchChrome(executable, `${hooks.label.toLowerCase()}-${hooks.sessionId}`, hooks.onLog);
   const cdp = new CdpClient(launched.wsUrl);
   await cdp.ready();
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
-  sharedVendorRootTargets.add(String(targetId));
   const attached = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   const pageSessionId = String(attached.sessionId || '');
   if (!pageSessionId) throw new Error(`${hooks.label} Chromium target attach failed`);
   let stopped = false;
   let poll: ReturnType<typeof setInterval> | null = null;
-  let targetPoll: ReturnType<typeof setInterval> | null = null;
-  const targetSessions = new Map<string,string>([[String(targetId),pageSessionId]]);
-  const relatedTargets = new Set<string>([String(targetId)]);
-  const executionContexts = new Map<string,Set<number>>();
-  const vendorRequests = new Map<string,{url:string;type:string}>();
-  const loggedWsHosts = new Set<string>();
   const stop = () => {
     if (stopped) return; stopped = true;
     if (poll) clearInterval(poll);
-    if (targetPoll) clearInterval(targetPoll);
-    void (async () => {
-      try { await cdp.send('Target.closeTarget', { targetId }, undefined, 3000); } catch {}
-      sharedVendorRootTargets.delete(String(targetId));
-      try { cdp.close(); } catch {}
-      shared.release();
-    })();
+    try { cdp.close(); } catch {}
+    try { launched.child.kill('SIGTERM'); } catch {}
+    setTimeout(() => { try { if (!launched.child.killed) launched.child.kill('SIGKILL'); } catch {} }, 1200).unref?.();
+    try { fs.rmSync(launched.profile, { recursive: true, force: true }); } catch {}
   };
   launched.child.once('exit', (code, signal) => {
     if (!stopped) hooks.onFailure?.(`${hooks.label} Chromium 意外結束 (code=${code}, signal=${signal})`);
@@ -669,49 +607,7 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   // well as inside the page, because a vendor may create its WebSocket in a
   // worker where a window-level WebSocket wrapper cannot see it.
   cdp.onEvent((message) => {
-    if (stopped || !message.sessionId || ![...targetSessions.values()].includes(message.sessionId)) return;
-    if(message.method==='Runtime.executionContextCreated'){
-      const context=message.params?.context,id=Number(context?.id);
-      if(Number.isFinite(id)&&context?.auxData?.isDefault!==false){
-        const set=executionContexts.get(message.sessionId)||new Set<number>();set.add(id);executionContexts.set(message.sessionId,set);
-      }
-      return;
-    }
-    if(message.method==='Runtime.executionContextDestroyed'){
-      executionContexts.get(message.sessionId)?.delete(Number(message.params?.executionContextId));return;
-    }
-    if(message.method==='Runtime.executionContextsCleared'){
-      executionContexts.delete(message.sessionId);return;
-    }
-    if(message.method==='Network.requestWillBeSent'){
-      const p=message.params||{},id=String(p.requestId||'');
-      if(id)vendorRequests.set(`${message.sessionId}:${id}`,{url:String(p.request?.url||''),type:String(p.type||'')});
-      return;
-    }
-    if(message.method==='Network.webSocketCreated'){
-      try{
-        const u=new URL(String(message.params?.url||'')),key=`${u.host}${u.pathname}`;
-        if(key&&!loggedWsHosts.has(key)){loggedWsHosts.add(key);hooks.onLog(`${hooks.label} 偵測到即時 WebSocket｜${key}`)}
-      }catch{}
-      return;
-    }
-    if(message.method==='Network.responseReceived'){
-      const p=message.params||{},id=String(p.requestId||''),key=`${message.sessionId}:${id}`;
-      const meta=vendorRequests.get(key),mime=String(p.response?.mimeType||'');
-      if(meta)vendorRequests.set(key,{...meta,type:['XHR','Fetch'].includes(meta.type)&&/json/i.test(mime)?'JSON':''});
-      return;
-    }
-    if(message.method==='Network.loadingFinished'){
-      const id=String(message.params?.requestId||''),key=`${message.sessionId}:${id}`,meta=vendorRequests.get(key);
-      vendorRequests.delete(key);
-      if(meta?.type==='JSON')void cdp.send('Network.getResponseBody',{requestId:id},message.sessionId,5000).then(body=>{
-        try{hooks.onObject(JSON.parse(String(body?.body||'')))}catch{}
-      }).catch(()=>{});
-      return;
-    }
-    if(message.method==='Network.loadingFailed'){
-      vendorRequests.delete(`${message.sessionId}:${String(message.params?.requestId||'')}`);return;
-    }
+    if (stopped || message.sessionId !== pageSessionId) return;
     if (message.method !== 'Network.webSocketFrameReceived') return;
     const response = message.params?.response || {};
     if (Number(response.opcode) !== 1 || typeof response.payloadData !== 'string') return;
@@ -740,106 +636,23 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
         this.addEventListener('message',e=>{try{if(typeof e.data==='string')keep(parse(e.data))}catch{}});
       }
     }
-    const clone=(v,depth=0,local=new WeakSet())=>{
-      if(v==null||typeof v==='string'||typeof v==='number'||typeof v==='boolean')return v;
-      if(typeof v!=='object'||depth>6||local.has(v))return undefined;
-      local.add(v);
-      if(Array.isArray(v))return v.slice(0,500).map(x=>clone(x,depth+1,local));
-      const out={};
-      for(const k of Object.keys(v).slice(0,180)){
-        if(k.startsWith('__')||/^(?:parent|root|appContext|vnode|subTree|effect|scope)$/i.test(k))continue;
-        try{const x=clone(v[k],depth+1,local);if(x!==undefined)out[k]=x}catch{}
-      }
-      return out;
-    };
-    const harvest=()=>{
-      const components=new Set();
-      try{
-        for(const el of Array.from(document.querySelectorAll('*')).slice(0,4000)){
-          let c=el.__vueParentComponent||el.__vue__;
-          for(let i=0;c&&i<8;i++,c=c.parent)components.add(c);
-        }
-        let added=0;
-        for(const c of components){
-          if(added>=80)break;
-          for(const state of [c.props,c.setupState,c.data,c.ctx]){
-            if(!state||typeof state!=='object')continue;
-            const keys=Object.keys(state);
-            if(!keys.some(k=>/(?:table|game|road|shoe|dealer|play|list|ting|data|item)/i.test(k)))continue;
-            try{const x=clone(state);if(x&&Object.keys(x).length){q.push(x);added++}}catch{}
-          }
-        }
-        if(q.length>2000)q.splice(0,q.length-1500);
-      }catch{}
-    };
     for(const k of ['CONNECTING','OPEN','CLOSING','CLOSED'])try{Object.defineProperty(TapWS,k,{value:NativeWS[k]})}catch{}
     window.WebSocket=TapWS;
-    window.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep,harvest};
+    window.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep};
   })();`;
-
-  const instrumentTarget = async (childTargetId:string,sessionId:string,type:string) => {
-    try { await cdp.send('Network.enable', {}, sessionId, 5000); } catch {}
-    try { await cdp.send('Runtime.enable', {}, sessionId, 5000); } catch {}
-    try { await cdp.send('Network.setUserAgentOverride', { userAgent: NORMAL_CHROME_UA, acceptLanguage: 'zh-TW,zh;q=0.9', platform: 'Windows' }, sessionId, 5000); } catch {}
-    if(['page','iframe','webview'].includes(type)){
-      try { await cdp.send('Page.enable', {}, sessionId, 5000); } catch {}
-      try { await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source }, sessionId, 5000); } catch {}
-      // A popup may already have loaded before we attach. Install the tap in
-      // its current document as well, rather than waiting for another reload.
-      try { await cdp.send('Runtime.evaluate', { expression: source }, sessionId, 5000); } catch {}
-    }
-    hooks.onLog(`${hooks.label} 已接管子執行環境｜type=${type}｜target=${childTargetId.slice(0,8)}`);
-  };
-
-  let scanningTargets=false;
-  const scanRelatedTargets=async()=>{
-    if(stopped||scanningTargets)return;scanningTargets=true;
-    try{
-      const result=await cdp.send('Target.getTargets',{},undefined,5000);
-      const infos=Array.isArray(result?.targetInfos)?result.targetInfos:[];
-      let changed=true;
-      while(changed){
-        changed=false;
-        for(const info of infos){
-          const id=String(info?.targetId||''),type=String(info?.type||'');
-          if(!id||relatedTargets.has(id)||sharedVendorRootTargets.has(id))continue;
-          if(!['page','iframe','webview','worker','shared_worker'].includes(type))continue;
-          // OOPIF/worker targets may not expose openerId. This Chromium is
-          // dedicated to AB/DB, so every non-root execution target is relevant.
-          relatedTargets.add(id);changed=true;
-          try{
-            const a=await cdp.send('Target.attachToTarget',{targetId:id,flatten:true},undefined,5000);
-            const sid=String(a?.sessionId||'');if(!sid)continue;
-            targetSessions.set(id,sid);
-            await instrumentTarget(id,sid,type);
-          }catch(e:any){if(!stopped)hooks.onLog(`${hooks.label} 子分頁接管重試：${safeText(e?.message||e,140)}`)}
-        }
-      }
-    }catch(e:any){if(!stopped)hooks.onLog(`${hooks.label} 子分頁掃描重試：${safeText(e?.message||e,140)}`)}
-    finally{scanningTargets=false}
-  };
   await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source }, pageSessionId);
   await cdp.send('Page.navigate', { url: hooks.gameUrl }, pageSessionId, 15000);
   hooks.onLog(`${hooks.label} 真實頁面已啟動`);
-  void scanRelatedTargets();
-  targetPoll=setInterval(()=>void scanRelatedTargets(),1000);
-  targetPoll.unref?.();
   let busy=false;
   poll=setInterval(async()=>{
     if(stopped||busy)return; busy=true;
     try{
-      for(const sessionId of targetSessions.values()){
-        const ids=[...(executionContexts.get(sessionId)||[])];
-        const contexts=ids.length?ids:[undefined];
-        for(const contextId of contexts)try{
-          const out=await cdp.send('Runtime.evaluate',{expression:`typeof window!=='undefined'&&window.__MT_VENDOR_TAP__?(${hooks.label === "DB" ? "window.__MT_VENDOR_TAP__.harvest()," : ""}window.__MT_VENDOR_TAP__.drain()):[]`,contextId,returnByValue:true},sessionId,5000);
-          const values=out?.result?.value;
-          if(Array.isArray(values))for(const value of values)hooks.onObject(value);
-        }catch{}
-      }
+      const out=await cdp.send('Runtime.evaluate',{expression:`window.__MT_VENDOR_TAP__?window.__MT_VENDOR_TAP__.drain():[]`,returnByValue:true},pageSessionId,8000);
+      const values=out?.result?.value;
+      if(Array.isArray(values))for(const value of values)hooks.onObject(value);
     }catch(e:any){ if(!stopped)hooks.onLog(`${hooks.label} 解碼資料讀取重試：${safeText(e?.message||e,160)}`); }
     finally{busy=false}
-  },250);
+  },120);
   poll.unref?.();
   return { stop };
 }

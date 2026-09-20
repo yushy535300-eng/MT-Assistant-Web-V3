@@ -265,11 +265,11 @@ const abPlaceholderTables = Object.entries(abPlaceholderGroups).flatMap(
   ([category, ids]) => ids.map((id) => vendorPlaceholder(id, category)),
 );
 const dbPlaceholderCounts: Record<string, number> = {
-  極速: 141,
-  經典: 54,
-  完美: 6,
-  共享: 4,
-  包桌: 4,
+  一般: 21,
+  終極: 47,
+  完美: 3,
+  共贏: 2,
+  包桌: 2,
   電投: 10,
 };
 const dbPlaceholderTables = Object.entries(dbPlaceholderCounts).flatMap(
@@ -1012,10 +1012,8 @@ function TableCard({
     <View
       style={[s.tableCard, desktop && s.tableCardDesktop, dg && s.tableCardDg]}
     >
-      <View
-        style={[s.tableHead, !desktop && s.tableHeadMobile, dg && s.tableHeadDg]}
-      >
-        <View style={[s.row, !desktop && s.tableHeadRowMobile]}>
+      <View style={[s.tableHead, dg && s.tableHeadDg]}>
+        <View style={s.row}>
           <Text style={s.game}>百家樂</Text>
           <Text style={[s.tableId, dg && s.tableIdDg]}>{table.id}</Text>
           <MaterialIcons name="person" size={12} color="#fff" />
@@ -1025,7 +1023,7 @@ function TableCard({
             updatedAt={table.countdownUpdatedAt}
           />
         </View>
-        <View style={[s.row, !desktop && s.tableHeadRowMobile]}>
+        <View style={s.row}>
           <Text style={[s.statText, { color: "#F35762" }]}>
             莊 {table.banker}
           </Text>
@@ -2465,7 +2463,6 @@ export default function HomeScreen() {
   const { width, height } = useWindowDimensions();
   const desktop = width >= 1000;
   const tablet = width >= 700 && width < 1000;
-  const phone = width < 600;
   const orbSize = desktop
     ? Math.max(68, Math.min(90, width * 0.045))
     : tablet
@@ -3968,8 +3965,7 @@ export default function HomeScreen() {
         },
         body: {
           begin_at: `${day}T00:00:00.000Z`,
-          // MT 官方頁送出的第一頁索引是 0；送 1 在部分帳號會直接回空陣列。
-          cur: 0,
+          cur: 1,
           end_at: `${day}T23:59:59.000Z`,
           room_id: 1,
           s: 8,
@@ -4651,28 +4647,28 @@ export default function HomeScreen() {
     };
   }, [accessGranted, accessSessionId, dgGameUrl, dgConnectEpoch]);
 
-  // 登入成功後立即在背景依序啟動歐博與 DB。平台分頁只切換畫面，
-  // 不再觸發另一組登入/relay，避免使用者看到空框後才開始等待連線。
+  // 歐博 / DB 採懶載入：第一次切到平台才取得該平台一次性網址並啟動
+  // 真實頁面解碼。分類只在既有快照上篩選，不會重登或清空牌路。
   useEffect(() => {
-    if (!accessGranted || !accessSessionId) return;
+    if (
+      !accessGranted ||
+      !accessSessionId ||
+      (activePlatform !== "AB" && activePlatform !== "DB")
+    )
+      return;
+    const kind = activePlatform as VendorKind;
+    if (vendorControllersRef.current[kind]) return;
     let cancelled = false;
     const platformToken = platformTokenRef.current;
     if (!platformToken) return;
-
-    const startOne = async (kind: VendorKind) => {
-      if (cancelled || vendorControllersRef.current[kind]) return;
-      setVendorConnected((v) => ({ ...v, [kind]: false }));
-      setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
-      setVendorMessage((v) => ({ ...v, [kind]: "登入後自動取得授權並連線" }));
-      try {
-        const url = await getVendorLoginUrlFromPlatform(
-          loginPlatform,
-          platformToken,
-          kind,
-        );
-        if (cancelled) return;
+    setVendorConnected((v) => ({ ...v, [kind]: false }));
+    setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
+    setVendorMessage((v) => ({ ...v, [kind]: "正在取得平台授權並啟動即時牌路" }));
+    getVendorLoginUrlFromPlatform(loginPlatform, platformToken, kind)
+      .then((url) => {
+        if (cancelled) return null;
         setVendorUrls((v) => ({ ...v, [kind]: url }));
-        const controller = await connectVendorLive(kind, url, accessSessionId, {
+        return connectVendorLive(kind, url, accessSessionId, {
           onTables: (next: VendorTableData[]) => {
             if (!cancelled)
               setVendorTables((v) => ({ ...v, [kind]: next as TableData[] }));
@@ -4714,9 +4710,13 @@ export default function HomeScreen() {
             if (!cancelled && message) appendEvent(message);
           },
         });
+      })
+      .then((controller) => {
+        if (!controller) return;
         if (cancelled) controller.close();
         else vendorControllersRef.current[kind] = controller;
-      } catch (e: any) {
+      })
+      .catch((e: any) => {
         if (!cancelled) {
           setVendorStatus((v) => ({ ...v, [kind]: "連線失敗" }));
           setVendorMessage((v) => ({
@@ -4727,23 +4727,11 @@ export default function HomeScreen() {
             `${kind === "AB" ? "歐博" : "DB"} 自動連線失敗：${e?.message || e}`,
           );
         }
-      }
-    };
-
-    void (async () => {
-      // Render 資源有限，依序啟動可避免兩個 Chromium 同一秒搶記憶體。
-      await startOne("AB");
-      if (!cancelled) await startOne("DB");
-    })();
-
+      });
     return () => {
       cancelled = true;
-      for (const kind of ["AB", "DB"] as VendorKind[]) {
-        try { vendorControllersRef.current[kind]?.close(); } catch {}
-        delete vendorControllersRef.current[kind];
-      }
     };
-  }, [accessGranted, accessSessionId, loginPlatform]);
+  }, [accessGranted, accessSessionId, activePlatform, loginPlatform]);
 
   // 如果 DG 原生遊戲把背景 relay 踢掉：先用「同一個已取得的 DG token」
   // 重掛一次背景 relay，不再呼叫 DGLI/login 取得第二組 token。這樣可避免
@@ -6246,7 +6234,6 @@ export default function HomeScreen() {
           style={[
             s.topbar,
             !desktop ? s.topbarMobile : null,
-            phone ? s.topbarPhone : null,
             activePlatform === "DG" && s.topbarDg,
           ]}
         >
@@ -6273,7 +6260,7 @@ export default function HomeScreen() {
               )}
             </View>
           </View>
-          <View style={[s.row, !desktop && s.topbarActionsMobile]}>
+          <View style={s.row}>
             <Pressable style={s.lineBtn} onPress={openLineContact}>
               <View style={s.lineLogo}>
                 <Text style={s.lineLogoText}>LINE</Text>
@@ -6321,13 +6308,7 @@ export default function HomeScreen() {
                   : "即時桌況 · 牌路分析 · 荷官同步"}
               </Text>
             </View>
-            <View
-              style={[
-                s.overStats,
-                !desktop && s.overStatsMobile,
-                phone && s.overStatsPhone,
-              ]}
-            >
+            <View style={[s.overStats, !desktop && s.overStatsMobile]}>
               <View
                 style={[
                   s.overStat,
@@ -6360,36 +6341,34 @@ export default function HomeScreen() {
                   平台 · 可用 {availableTableCount} 桌
                 </Text>
                 <View style={s.platformSwitch}>
-                  <View style={s.platformTabsGrid}>
-                    {(["MT", "DG", "AB", "DB"] as PlatformKey[]).map((p) => (
-                      <Pressable
-                        key={p}
-                        onPress={() => {
-                          setActivePlatform(p);
-                          setActiveCategory(p === "DB" ? "極速" : "一般");
-                        }}
+                  {(["MT", "DG", "AB", "DB"] as PlatformKey[]).map((p) => (
+                    <Pressable
+                      key={p}
+                      onPress={() => {
+                        setActivePlatform(p);
+                        setActiveCategory("一般");
+                      }}
+                      style={[
+                        s.platformTab,
+                        activePlatform === p &&
+                          (p === "DG"
+                            ? s.platformTabDgActive
+                            : s.platformTabMtActive),
+                      ]}
+                    >
+                      <Text
                         style={[
-                          s.platformTab,
+                          s.platformTabText,
                           activePlatform === p &&
                             (p === "DG"
-                              ? s.platformTabDgActive
-                              : s.platformTabMtActive),
+                              ? s.platformTabTextDgActive
+                              : s.platformTabTextActive),
                         ]}
                       >
-                        <Text
-                          style={[
-                            s.platformTabText,
-                            activePlatform === p &&
-                              (p === "DG"
-                                ? s.platformTabTextDgActive
-                                : s.platformTabTextActive),
-                          ]}
-                        >
-                          {p === "AB" ? "歐博" : p}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
+                        {p === "AB" ? "歐博" : p}
+                      </Text>
+                    </Pressable>
+                  ))}
                   <Pressable
                     disabled={!hasEnteredGame || walletTransferBusy}
                     onPress={confirmTransferAll}
@@ -6425,7 +6404,7 @@ export default function HomeScreen() {
             >
               {(activePlatform === "AB"
                 ? ["一般", "快速", "免佣", "保險", "VIP", "所有"]
-                : ["極速", "經典", "完美", "共享", "包桌", "電投", "所有"]
+                : ["一般", "終極", "完美", "共贏", "包桌", "電投", "所有"]
               ).map((category) => (
                 <Pressable
                   key={category}
@@ -6457,22 +6436,13 @@ export default function HomeScreen() {
             style={[
               s.cardsGrid,
               desktop && s.cardsGridDesktop,
-              !desktop && activePlatform === "DB" && s.cardsGridDbMobile,
               desktop && s.cardsGridDesktopCentered,
             ]}
           >
             {tables.map((t) => (
               <View
                 key={t.apiId}
-                style={
-                  desktop
-                    ? activePlatform === "AB" || activePlatform === "DB"
-                      ? s.cardWrapVendorDesktop
-                      : s.cardWrapDesktop
-                    : activePlatform === "DB"
-                      ? s.cardWrapDbMobile
-                      : s.cardWrap
-                }
+                style={desktop ? s.cardWrapDesktop : s.cardWrap}
               >
                 <MemoTableCard
                   table={t}
@@ -7040,18 +7010,6 @@ const s = StyleSheet.create({
   },
   topbarDg: { backgroundColor: "#110E08", borderBottomColor: "#8B6B2E" },
   topbarMobile: { minHeight: 64, paddingHorizontal: 10 },
-  topbarPhone: {
-    paddingTop: 8,
-    paddingBottom: 8,
-    flexDirection: "column",
-    alignItems: "stretch",
-    gap: 8,
-  },
-  topbarActionsMobile: {
-    width: "100%",
-    flexWrap: "wrap",
-    justifyContent: "flex-end",
-  },
   brandMobileStack: { alignItems: "flex-start" },
   brandIcon: {
     width: 34,
@@ -7125,8 +7083,7 @@ const s = StyleSheet.create({
   },
   overSub: { color: "#7894A8", fontSize: 9, marginTop: 3 },
   overStats: { flexDirection: "row", gap: 8 },
-  overStatsMobile: { width: "100%", gap: 8, flexDirection: "row" },
-  overStatsPhone: { flexDirection: "row" },
+  overStatsMobile: { width: "100%", gap: 6 },
   overStat: {
     minWidth: 112,
     borderWidth: 1,
@@ -7142,23 +7099,17 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     marginTop: 5,
-    gap: 5,
-  },
-  platformTabsGrid: {
-    flex: 1,
-    minWidth: 104,
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 3,
+    padding: 2,
+    borderRadius: 6,
+    backgroundColor: "rgba(0,0,0,.26)",
+    borderWidth: 1,
+    borderColor: "rgba(130,151,166,.22)",
   },
   platformTab: {
-    width: "calc(50% - 1.5px)" as any,
+    minWidth: 42,
     height: 23,
-    paddingHorizontal: 7,
+    paddingHorizontal: 10,
     borderRadius: 4,
-    borderWidth: 1,
-    borderColor: "#29475B",
-    backgroundColor: "#0B1823",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -7182,8 +7133,8 @@ const s = StyleSheet.create({
   platformTabTextDgActive: { color: "#FFF2C9" },
   walletReturnBtn: {
     height: 23,
-    flexShrink: 0,
-    paddingHorizontal: 7,
+    marginLeft: 4,
+    paddingHorizontal: 8,
     borderRadius: 4,
     borderWidth: 1,
     borderColor: "#9B7530",
@@ -7215,12 +7166,9 @@ const s = StyleSheet.create({
   listHint: { color: "#73899A", fontSize: 8 },
   cardsGrid: { width: "100%", alignSelf: "center" },
   cardsGridDesktop: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  cardsGridDbMobile: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   cardsGridDesktopCentered: { maxWidth: 1280 },
   cardWrap: { width: "100%" },
   cardWrapDesktop: { width: "calc(50% - 5px)" as any, maxWidth: 635 },
-  cardWrapVendorDesktop: { width: "calc(33.333% - 7px)" as any },
-  cardWrapDbMobile: { width: "calc(50% - 3px)" as any },
   tableCard: {
     backgroundColor: "#08111A",
     borderWidth: 1,
@@ -7247,18 +7195,6 @@ const s = StyleSheet.create({
     alignItems: "center",
     borderBottomWidth: 1,
     borderBottomColor: "#27485E",
-  },
-  tableHeadMobile: {
-    height: 30,
-    paddingVertical: 0,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  tableHeadRowMobile: {
-    width: "auto",
-    justifyContent: "flex-start",
-    gap: 4,
   },
   tableHeadDg: { backgroundColor: "#171208", borderBottomColor: "#785B27" },
   game: { color: "#EAF6FF", fontSize: 9, fontWeight: "700" },
