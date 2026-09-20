@@ -118,14 +118,132 @@ export function dbCategory(value:any){
 }
 const DB_BACCARAT_CATEGORIES:Record<number,string>={2002:"極速",2001:"經典",2003:"完美",2004:"共享",2005:"包桌",2038:"電投"};
 export function dbBaccaratCategory(gameTypeId:any){return DB_BACCARAT_CATEGORIES[n(gameTypeId)]||""}
+export function dbParseMaybe(value:any):any{
+  if(typeof value!=="string")return value;
+  const trimmed=value.trim();
+  if(!(trimmed.startsWith("{")||trimmed.startsWith("[")))return value;
+  try{return dbParseMaybe(JSON.parse(trimmed))}catch{return value}
+}
+export function dbFlattenPacket(root:any){
+  if(!root||typeof root!=="object"||Array.isArray(root))return root;
+  const json=dbParseMaybe(root.jsonData);
+  const fromJson=json&&typeof json==="object"&&!Array.isArray(json)?json:{};
+  const data=dbParseMaybe(fromJson.data??root.data);
+  const fromData=data&&typeof data==="object"&&!Array.isArray(data)?data:{};
+  const inner=dbParseMaybe((fromData as any).data);
+  const fromInner=inner&&typeof inner==="object"&&!Array.isArray(inner)?inner:{};
+  const merged:any={...root,...fromJson,...fromData,...fromInner};
+  const gid=fromInner.gameTypeId??fromData.gameTypeId??fromJson.gameTypeId;
+  if(gid!=null&&n(gid)!==2013)merged.gameTypeId=gid;
+  else if(n(merged.gameTypeId)===2013)delete merged.gameTypeId;
+  return merged;
+}
+export function dbCardFace(num:any){
+  const x=n(num); if(x<=0)return"";
+  const rank=((x-1)%13)+1;
+  if(rank===1)return"A"; if(rank===11)return"J"; if(rank===12)return"Q"; if(rank===13)return"K";
+  return String(rank);
+}
+export function dbPoker(merged:any){
+  const infos=Array.isArray(merged?.currentRoundExtInfos)&&merged.currentRoundExtInfos.length?merged.currentRoundExtInfos:merged?._draws;
+  if(!Array.isArray(infos)||!infos.length)return undefined;
+  const player:string[]=[],banker:string[]=[];
+  for(const info of infos){
+    const face=dbCardFace(info?.cardNumber); if(!face)continue;
+    const slot=Math.max(0,n(info?.ownerIndex)-1);
+    if(n(info?.cardOwner)===0)player[slot]=face; else banker[slot]=face;
+  }
+  const p=player.filter(Boolean).join("-"),b=banker.filter(Boolean).join("-");
+  return p||b?JSON.stringify({player:p,banker:b}):undefined;
+}
 export function dbResolveCategory(value:any){
-  const id=value?.gameTypeId??value?.gameTypeID??value?.game_type_id??value?.gameType?.id??value?.gameType?.gameTypeId??value?.tableTypeId;
-  const fromId=dbBaccaratCategory(id);
+  const rawId=value?.gameTypeId??value?.gameTypeID??value?.game_type_id??value?.gameType?.id??value?.gameType?.gameTypeId??value?.tableTypeId;
+  const typeId=n(rawId);
+  if(typeId===2013)return dbCategory(text(value?.gameTypeName,value?.gameType?.name,value?.gameName));
+  const fromId=dbBaccaratCategory(rawId);
   if(fromId)return fromId;
-  const named=dbCategory(text(value?.gameTypeName,value?.gameType?.name,value?.gameName,value?.tableName,value?.name,value?.gameTypeId));
+  if(typeId)return"";
+  const named=dbCategory(text(value?.gameTypeName,value?.gameType?.name,value?.gameName,value?.tableName,value?.name));
   if(named)return named;
   if(value?.roadPaper||value?.beatPlateRoad||value?.roadPaper?.beatPlateRoad)return"經典";
   return"";
+}
+export function ingestDbPackets(packets:any[]){
+  const raw=new Map<string,any>();
+  const map=new Map<string,VendorTable>();
+  for(const packet of packets)applyDbPacket(packet,raw,map);
+  return [...map.values()];
+}
+function applyDbPacket(root:any, dbRaw:Map<string,any>, map:Map<string,VendorTable>, onSkip?:(msg:string)=>void){
+  if(!root||typeof root!=="object"||root.__binary)return false;
+  let changed=false;
+  const save=(value:any,forcedId?:string)=>{
+    if(!value||typeof value!=="object")return;
+    const id=text(forcedId,value?.tableId,value?.table_id,value?.tableNo,value?.tableCode);
+    if(!id||id==="undefined")return;
+    const previousRaw=dbRaw.get(id)||{};
+    const incomingType=n(value.gameTypeId);
+    const keepType=(!incomingType||incomingType===2013)&&previousRaw.gameTypeId!=null&&n(previousRaw.gameTypeId)!==2013;
+    const draws=[...(previousRaw._draws||[])];
+    if(value.cardNumber!=null&&value.cardOwner!=null)draws.push({cardNumber:value.cardNumber,cardOwner:value.cardOwner,ownerIndex:value.ownerIndex});
+    const merged={
+      ...previousRaw,
+      ...value,
+      gameTypeId:keepType?previousRaw.gameTypeId:value.gameTypeId??previousRaw.gameTypeId,
+      tableOnline:{...(previousRaw.tableOnline||{}),...(value?.tableOnline||{})},
+      roadPaper:{...(previousRaw.roadPaper||{}),...(value?.roadPaper||{}),...(typeof value?.data==="object"&&value.data?.beatPlateRoad?value.data:{})},
+      gameType:{...(previousRaw.gameType||{}),...(value?.gameType||{})},
+      _draws:draws,
+    };
+    dbRaw.set(id,merged);
+    const category=dbResolveCategory(merged);
+    if(!category){
+      onSkip?.(`DB 桌略過｜id=${id}｜gameTypeId=${text(merged.gameTypeId,merged.gameType?.id)}｜keys=${Object.keys(merged).slice(0,12)}`);
+      return;
+    }
+    const old=map.get(id);
+    let rr=dbDecodeBeatPlate(merged.roadPaper?.beatPlateRoad||merged.beatPlateRoad||merged.roadPaper?.beadPlateRoad);
+    if(!rr.length&&Array.isArray(merged.results))rr=merged.results.map((x:any)=>{
+      const z=String(x?.result??x?.winner??x?.code??x).toLowerCase();
+      if(z.includes("bank")||z==="1"||z==="莊")return"莊";if(z.includes("play")||z==="0"||z==="閒")return"閒";if(z.includes("tie")||z==="2"||z==="和")return"和";return null;
+    }).filter(Boolean) as Road[];
+    if(!rr.length&&old)rr=old.results;
+    const summary=Array.isArray(merged.bootReport?.items)?merged.bootReport.items:[];
+    const summaryCount=(point:number,fallback:number)=>n(summary.find((x:any)=>n(x?.betPointId)===point)?.winCount??fallback);
+    const counted=count(rr);
+    const serverTime=n(merged.serverTime),endTime=n(merged.countdownEndTime);
+    const calculatedCountdown=endTime&&serverTime?Math.max(0,Math.ceil((endTime-serverTime)/1000)):0;
+    const poker=dbPoker(merged)||old?.poker;
+    map.set(id,{id:`DB-${id}`,apiId:id,game:"百家樂",name:text(merged.dealerName,merged.dealer?.name,merged.tableName,old?.name,"—"),players:text(merged.tableOnline?.onlineNumber,merged.onlineCount,old?.players,"—"),countdown:n(calculatedCountdown||merged.countDown||merged.countdown||merged.betCountDown||old?.countdown),countdownUpdatedAt:Date.now(),roomId:id,tableBadge:id,shoe:text(merged.bootNo,merged.newBootNo,merged.shoeId,old?.shoe,"—"),round:n(merged.roundNo??merged.roundId??old?.round),banker:summaryCount(3001,counted.莊),player:summaryCount(3002,counted.閒),tie:summaryCount(3003,counted.和),results:rr,trend:"",live:true,dealerPhoto:text(merged.dealerPic,merged.dealerPicTable,merged.phonePicTable,old?.dealerPhoto)||undefined,poker,lastUpdated:Date.now(),category});
+    changed=true;
+  };
+  const visit=(value:any,depth=0)=>{
+    if(value==null||depth>12)return;
+    if(typeof value==="string"){
+      const trimmed=value.trim();if(!trimmed||!(trimmed.startsWith("{")||trimmed.startsWith("[")))return;
+      try{visit(JSON.parse(trimmed),depth+1)}catch{}return;
+    }
+    if(Array.isArray(value)){for(const item of value.slice(0,3000))visit(item,depth+1);return}
+    if(typeof value!=="object")return;
+    const flat=dbFlattenPacket(value);
+    const mapObj=flat.gameTableMap??flat.tableMap??flat.tablesMap??value.gameTableMap;
+    if(mapObj&&typeof mapObj==="object"){
+      const entries=Array.isArray(mapObj)?mapObj.map((t:any,i:number)=>[text(t?.tableId,t?.id,i),t]):Object.entries(mapObj);
+      for(const [id,table] of entries)save(table,String(id));
+    }
+    const roads=flat.roadPaperCacheMap??value.roadPaperCacheMap;
+    if(roads&&typeof roads==="object"){
+      for(const [id,entry] of Object.entries(roads as Record<string,any>)){
+        const paper=entry?.data&&typeof entry.data==="object"?entry.data:entry;
+        save({tableId:entry?.tableId??id,roadPaper:paper},String(id));
+      }
+    }
+    if(flat.tableId!=null||flat.table_id!=null||flat.tableNo!=null)save(flat);
+    else if(value.tableId!=null||value.table_id!=null||value.tableNo!=null)save(value);
+    for(const child of Object.values(value).slice(0,500))visit(child,depth+1);
+  };
+  visit(root);
+  return changed;
 }
 export function dbDecodeBeatPlate(encoded:any):Road[]{
   if(typeof encoded!=="string"||!encoded)return[];
@@ -249,57 +367,10 @@ class VendorRelay{
     }
   }
   private handleDb(root:any){
-    if(root?.__binary)return;
     const pnlCandidate=root?.totalWinLoss??root?.todayWinLoss??root?.netWinLoss??root?.data?.totalWinLoss??root?.data?.todayWinLoss??root?.data?.netWinLoss;
     if(pnlCandidate!==undefined&&Number.isFinite(Number(pnlCandidate))){this.pnl=Number(pnlCandidate);this.broadcast("pnl",this.pnl)}
-    let changed=false;
-    const save=(value:any,forcedId?:string)=>{
-      if(!value||typeof value!=="object")return;
-      const id=text(forcedId,value?.tableId,value?.table_id,value?.tableNo,value?.tableCode);
-      if(!id||id==="undefined")return;
-      const previousRaw=this.dbRaw.get(id)||{};
-      const merged={...previousRaw,...value,tableOnline:{...(previousRaw.tableOnline||{}),...(value?.tableOnline||{})},roadPaper:{...(previousRaw.roadPaper||{}),...(value?.roadPaper||{})},gameType:{...(previousRaw.gameType||{}),...(value?.gameType||{})}};
-      this.dbRaw.set(id,merged);
-      const category=dbResolveCategory(merged);
-      if(!category){
-        if(this.objectCount<=8)this.event(`DB 桌略過｜id=${id}｜gameTypeId=${text(merged.gameTypeId,merged.gameType?.id)}｜keys=${Object.keys(merged).slice(0,12)}`);
-        return;
-      }
-      const old=this.map.get(id);
-      let rr=dbDecodeBeatPlate(merged.roadPaper?.beatPlateRoad||merged.beatPlateRoad||merged.roadPaper?.beadPlateRoad);
-      if(!rr.length&&Array.isArray(merged.results))rr=merged.results.map((x:any)=>{
-        const z=String(x?.result??x?.winner??x?.code??x).toLowerCase();
-        if(z.includes("bank")||z==="1"||z==="莊")return"莊";if(z.includes("play")||z==="0"||z==="閒")return"閒";if(z.includes("tie")||z==="2"||z==="和")return"和";return null;
-      }).filter(Boolean) as Road[];
-      if(!rr.length&&old)rr=old.results;
-      const summary=Array.isArray(merged.bootReport?.items)?merged.bootReport.items:[];
-      const summaryCount=(point:number,fallback:number)=>n(summary.find((x:any)=>n(x?.betPointId)===point)?.winCount??fallback);
-      const counted=count(rr);
-      const serverTime=n(merged.serverTime),endTime=n(merged.countdownEndTime);
-      const calculatedCountdown=endTime&&serverTime?Math.max(0,Math.ceil((endTime-serverTime)/1000)):0;
-      this.map.set(id,{id:`DB-${id}`,apiId:id,game:"百家樂",name:text(merged.dealerName,merged.dealer?.name,merged.tableName,old?.name,"—"),players:text(merged.tableOnline?.onlineNumber,merged.onlineCount,old?.players,"—"),countdown:n(calculatedCountdown||merged.countDown||merged.countdown||old?.countdown),countdownUpdatedAt:Date.now(),roomId:id,tableBadge:id,shoe:text(merged.bootNo,merged.shoeId,old?.shoe,"—"),round:n(merged.roundNo??merged.roundId??old?.round),banker:summaryCount(3001,counted.莊),player:summaryCount(3002,counted.閒),tie:summaryCount(3003,counted.和),results:rr,trend:"",live:true,dealerPhoto:text(merged.dealerPic,merged.dealerPicTable,merged.phonePicTable,old?.dealerPhoto)||undefined,lastUpdated:Date.now(),category});
-      changed=true;
-    };
-    const visit=(value:any,depth=0)=>{
-      if(value==null||depth>12)return;
-      if(typeof value==="string"){
-        const trimmed=value.trim();if(!trimmed||!(trimmed.startsWith("{")||trimmed.startsWith("[")))return;
-        try{visit(JSON.parse(trimmed),depth+1)}catch{}return;
-      }
-      if(Array.isArray(value)){for(const item of value.slice(0,3000))visit(item,depth+1);return}
-      if(typeof value!=="object")return;
-      const map=value.gameTableMap??value.tableMap??value.tablesMap;
-      if(map&&typeof map==="object"){
-        const entries=Array.isArray(map)?map.map((t:any,i:number)=>[text(t?.tableId,t?.id,i),t]):Object.entries(map);
-        for(const [id,table] of entries)save(table,String(id));
-      }
-      if(Array.isArray(value.tableList)||Array.isArray(value.tables)||Array.isArray(value.gameTableList)){
-        for(const table of (value.tableList||value.tables||value.gameTableList))save(table);
-      }
-      if(value.tableId!=null||value.table_id!=null||value.tableNo!=null)save(value);
-      for(const child of Object.values(value).slice(0,500))visit(child,depth+1);
-    };
-    visit(root);if(changed)this.emit();
+    const changed=applyDbPacket(root,this.dbRaw,this.map,this.objectCount<=8?(msg)=>this.event(msg):undefined);
+    if(changed)this.emit();
   }
 }
 

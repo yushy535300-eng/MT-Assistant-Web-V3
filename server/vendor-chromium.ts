@@ -645,11 +645,22 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
       if(seen.has(v))return; seen.add(v);
       try{
         if(v.__v_isRef){keep(v.value,depth+1,seen);return}
-        const map=v.gameTableMap||v.tableMap||v.tablesMap;
+        const map=v.gameTableMap||v.tableMap||v.tablesMap||v.roadPaperCacheMap;
         if(map){
-          emit({gameTableMap: map instanceof Map ? Object.fromEntries(map) : map});
+          emit({gameTableMap: map instanceof Map ? Object.fromEntries(map) : (v.gameTableMap||v.tableMap||v.tablesMap||undefined), roadPaperCacheMap: v.roadPaperCacheMap instanceof Map ? Object.fromEntries(v.roadPaperCacheMap) : v.roadPaperCacheMap});
         }
-        if(typeof v.c==='string' || v.protocolId!=null || v.jsonData!=null || v.gameTableMap || v.tableMap || v.roadPaper || v.tableId!=null || v.tableNo!=null || v.gameId!=null || v.roads || v.roadmaps || v.gameCode || v.tableCode || v.cmd || v.WW3 || v.beatPlateRoad || v.tableList || v.gameTableList){
+        if(v.protocolId!=null || v.jsonData!=null){
+          try{
+            let json=v.jsonData; if(typeof json==='string') json=JSON.parse(json);
+            let data=json&&json.data!=null?json.data:v.data;
+            if(typeof data==='string') data=JSON.parse(data);
+            const flat=Object.assign({}, v, json&&typeof json==='object'?json:{}, data&&typeof data==='object'?data:{});
+            if(data&&data.gameTypeId!=null&&Number(data.gameTypeId)!==2013) flat.gameTypeId=data.gameTypeId;
+            else if(Number(flat.gameTypeId)===2013) delete flat.gameTypeId;
+            emit(flat);
+          }catch{ emit(v); }
+        }
+        if(typeof v.c==='string' || v.protocolId!=null || v.jsonData!=null || v.gameTableMap || v.tableMap || v.roadPaperCacheMap || v.roadPaper || v.tableId!=null || v.tableNo!=null || v.gameId!=null || v.roads || v.roadmaps || v.gameCode || v.tableCode || v.cmd || v.WW3 || v.beatPlateRoad || v.tableList || v.gameTableList){
           emit(v);
         }
         if(v instanceof Map){for(const x of v.values())keep(x,depth+1,seen)}

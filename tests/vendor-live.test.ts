@@ -1,5 +1,5 @@
 import {describe,expect,it} from "vitest";
-import {abCategory,abPoker,abRank,abRoad,abRoadFromCards,dbCategory,dbResolveCategory} from "../server/vendor-relay";
+import {abCategory,abPoker,abRank,abRoad,abRoadFromCards,dbCategory,dbDecodeBeatPlate,dbFlattenPacket,dbResolveCategory,ingestDbPackets} from "../server/vendor-relay";
 import {pickLaunchUrl} from "../server/vendor-launch";
 
 describe("歐博 HAR 協議",()=>{
@@ -30,6 +30,35 @@ describe("DB 大廳分類",()=>{
     expect(dbResolveCategory({gameTypeId:2002,tableId:"301"})).toBe("極速");
     expect(dbResolveCategory({gameTypeName:"經典百家樂",tableId:"88"})).toBe("經典");
     expect(dbResolveCategory({tableId:"9",roadPaper:{beatPlateRoad:"AAA="}})).toBe("經典");
+    expect(dbResolveCategory({gameTypeId:2013,tableId:"1"})).toBe("");
+  });
+  it("解開外層 2013 廣播並讀大廳路紙快取",()=>{
+    const envelope={
+      protocolId:303,
+      gameTypeId:2013,
+      jsonData:JSON.stringify({
+        id:303,
+        gameTypeId:2013,
+        data:JSON.stringify({
+          tableId:2777,
+          roundNo:"GJ4026920556",
+          gameTypeId:2001,
+          dealerName:"Sylvie",
+          roadPaper:{beatPlateRoad:"KAYHpykIQpzEIUhWkOYlCNKQpDlIUhGMoQpCkIABQaCgwA=="},
+        }),
+      }),
+    };
+    expect(dbFlattenPacket(envelope).gameTypeId).toBe(2001);
+    const hall=ingestDbPackets([
+      {protocolId:10052,data:{gameTableMap:{2777:{tableId:2777,tableOnline:{onlineNumber:8},gameStatus:4}}}},
+      {protocolId:10071,roadPaperCacheMap:{2777:{tableId:2777,data:{beatPlateRoad:"KAYHpykIQpzEIUhWkOYlCNKQpDlIUhGMoQpCkIABQaCgwA=="}}}},
+      envelope,
+    ]);
+    expect(hall).toHaveLength(1);
+    expect(hall[0].category).toBe("經典");
+    expect(hall[0].name).toBe("Sylvie");
+    expect(hall[0].results.length).toBeGreaterThan(0);
+    expect(dbDecodeBeatPlate("KAYHpykIQpzEIUhWkOYlCNKQpDlIUhGMoQpCkIABQaCgwA==").length).toBeGreaterThan(0);
   });
 });
 
