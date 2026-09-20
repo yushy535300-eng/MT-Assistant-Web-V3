@@ -2379,6 +2379,8 @@ function tableMatchesAssistId(table: { id?: string; apiId?: string; tableBadge?:
   if (!want) return false;
   return tableIdKeys(table).includes(want);
 }
+
+function parsePokerFace(token: string): string | null {
   const value = String(token || "").trim().toUpperCase();
   if (!value) return null;
   if (value === "A" || value === "J" || value === "Q" || value === "K") return value;
