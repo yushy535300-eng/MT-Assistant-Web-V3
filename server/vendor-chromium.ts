@@ -583,6 +583,7 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   const cdp = new CdpClient(launched.wsUrl);
   await cdp.ready();
   const vendorSessions = new Set<string>();
+  const instrumentedSessions = new Set<string>();
   await cdp.send('Target.setDiscoverTargets', { discover: true });
   await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
@@ -607,42 +608,23 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   await cdp.send('Page.enable', {}, pageSessionId);
   await cdp.send('Runtime.enable', {}, pageSessionId);
   await cdp.send('Network.setUserAgentOverride', { userAgent: NORMAL_CHROME_UA, acceptLanguage: 'zh-TW,zh;q=0.9', platform: 'Windows' }, pageSessionId);
-  // AB frames are plain JSON. Observe them at the DevTools network layer as
-  // well as inside the page, because a vendor may create its WebSocket in a
-  // worker where a window-level WebSocket wrapper cannot see it.
-  cdp.onEvent((message) => {
-    if (stopped) return;
-    if(message.method==='Target.attachedToTarget'){
-      const sessionId=String(message.params?.sessionId||'');
-      if(sessionId){
-        vendorSessions.add(sessionId);
-        void cdp.send('Network.enable',{},sessionId).catch(()=>{});
-        void cdp.send('Runtime.enable',{},sessionId).catch(()=>{});
-      }
-      return;
-    }
-    if (!vendorSessions.has(String(message.sessionId||''))) return;
-    if (message.method !== 'Network.webSocketFrameReceived') return;
-    const response = message.params?.response || {};
-    if (Number(response.opcode) !== 1 || typeof response.payloadData !== 'string') return;
-    try { hooks.onObject(JSON.parse(response.payloadData)); } catch {}
-  });
   const source = `(() => {
     if (window.__MT_VENDOR_TAP__) return;
-    const q=[]; const seen=new WeakSet();
-    const keep=(v,depth=0)=>{
+    const q=[];
+    const keep=(v,depth=0,seen=new WeakSet())=>{
       if(depth>8||v==null)return;
       if(typeof v==='string' && (v.trim().startsWith('{')||v.trim().startsWith('['))){try{keep(parse(v),depth+1)}catch{}return}
       if(typeof v!=='object')return;
       if(seen.has(v))return; seen.add(v);
       try{
+        if(v.__v_isRef){keep(v.value,depth+1,seen);return}
         const c=v.c, p=v.p;
         if(typeof c==='string' || v.protocolId!=null || v.jsonData!=null || v.gameTableMap || v.roadPaper || v.tableId!=null || v.gameId!=null || v.roads || v.roadmaps || v.gameCode || v.tableCode){
           q.push(JSON.parse(JSON.stringify(v))); if(q.length>2000)q.splice(0,q.length-1500);
         }
-        if(v instanceof Map){for(const x of v.values())keep(x,depth+1)}
-        else if(Array.isArray(v)){ for(let i=0;i<Math.min(v.length,600);i++)keep(v[i],depth+1); }
-        else for(const k of Object.keys(v).slice(0,300))keep(v[k],depth+1);
+        if(v instanceof Map){for(const x of v.values())keep(x,depth+1,seen)}
+        else if(Array.isArray(v)){ for(let i=0;i<Math.min(v.length,600);i++)keep(v[i],depth+1,seen); }
+        else for(const k of Object.keys(v).slice(0,300))keep(v[k],depth+1,seen);
       }catch{}
     };
     const parse=JSON.parse;
@@ -666,20 +648,45 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     setInterval(scan,1000);
     window.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep,scan};
   })();`;
-  await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source }, pageSessionId);
+  const instrumentSession=async(sessionId:string)=>{
+    if(!sessionId||instrumentedSessions.has(sessionId))return;
+    instrumentedSessions.add(sessionId); vendorSessions.add(sessionId);
+    await cdp.send('Network.enable',{},sessionId).catch(()=>{});
+    await cdp.send('Runtime.enable',{},sessionId).catch(()=>{});
+    await cdp.send('Page.enable',{},sessionId).catch(()=>{});
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument',{source},sessionId).catch(()=>{});
+    await cdp.send('Runtime.evaluate',{expression:source},sessionId,8000).catch(()=>{});
+  };
+  // AB may open its socket in a worker and DB commonly keeps its decoded Vue
+  // state in an out-of-process frame. Instrument and drain every attached CDP
+  // target instead of observing only the outer launch page.
+  cdp.onEvent((message) => {
+    if (stopped) return;
+    if(message.method==='Target.attachedToTarget'){
+      void instrumentSession(String(message.params?.sessionId||''));
+      return;
+    }
+    if (!vendorSessions.has(String(message.sessionId||''))) return;
+    if (message.method !== 'Network.webSocketFrameReceived') return;
+    const response = message.params?.response || {};
+    if (Number(response.opcode) !== 1 || typeof response.payloadData !== 'string') return;
+    try { hooks.onObject(JSON.parse(response.payloadData)); } catch {}
+  });
+  await instrumentSession(pageSessionId);
   await cdp.send('Page.navigate', { url: hooks.gameUrl }, pageSessionId, 15000);
   hooks.onLog(`${hooks.label} 真實頁面已啟動`);
   let busy=false;
   poll=setInterval(async()=>{
     if(stopped||busy)return; busy=true;
     try{
-      const out=await cdp.send('Runtime.evaluate',{expression:`window.__MT_VENDOR_TAP__?window.__MT_VENDOR_TAP__.drain():[]`,returnByValue:true},pageSessionId,8000);
-      const values=out?.result?.value;
-      if(Array.isArray(values))for(const value of values)hooks.onObject(value);
+      for(const sessionId of Array.from(vendorSessions)){
+        const out=await cdp.send('Runtime.evaluate',{expression:`typeof window!=='undefined'&&window.__MT_VENDOR_TAP__?window.__MT_VENDOR_TAP__.drain():[]`,returnByValue:true},sessionId,4000).catch(()=>null);
+        const values=out?.result?.value;
+        if(Array.isArray(values))for(const value of values)hooks.onObject(value);
+      }
     }catch(e:any){ if(!stopped)hooks.onLog(`${hooks.label} 解碼資料讀取重試：${safeText(e?.message||e,160)}`); }
     finally{busy=false}
   },120);
   poll.unref?.();
   return { stop };
 }
-

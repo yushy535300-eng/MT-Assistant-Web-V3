@@ -6451,13 +6451,23 @@ export default function HomeScreen() {
                       : s.cardWrap
                 }
               >
-                <MemoTableCard
-                  table={t}
-                  desktop={desktop}
-                  onAction={stableTableAction}
-                  connected={activeConnected}
-                  platform={activePlatform}
-                />
+                <View
+                  style={
+                    desktop && (activePlatform === "AB" || activePlatform === "DB")
+                      ? s.vendorCardScaleDesktop
+                      : !desktop && activePlatform === "DB"
+                        ? s.dbCardScaleMobile
+                        : undefined
+                  }
+                >
+                  <MemoTableCard
+                    table={t}
+                    desktop={desktop}
+                    onAction={stableTableAction}
+                    connected={activeConnected}
+                    platform={activePlatform}
+                  />
+                </View>
               </View>
             ))}
           </View>
@@ -7182,6 +7192,8 @@ const s = StyleSheet.create({
   cardWrapDesktop: { width: "calc(50% - 5px)" as any, maxWidth: 635 },
   cardWrapVendorDesktop: { width: "calc(33.333% - 7px)" as any },
   cardWrapDbMobile: { width: "calc(50% - 3px)" as any },
+  vendorCardScaleDesktop: { width: "150%", zoom: 2 / 3 } as any,
+  dbCardScaleMobile: { width: "200%", zoom: 0.5 } as any,
   tableCard: {
     backgroundColor: "#08111A",
     borderWidth: 1,
