@@ -38,7 +38,7 @@ export function abPoker(raw:any){
 export function abCategory(code:any){
   return ({101:"一般",103:"快速",104:"免佣",110:"保險",111:"VIP"} as any)[n(code)]||"其他";
 }
-export function dbCategory(value:any){const s=String(value??"");if(/終極|ultimate/i.test(s))return"終極";if(/完美|perfect/i.test(s))return"完美";if(/共贏|cowin|co-win/i.test(s))return"共贏";if(/包桌|private/i.test(s))return"包桌";if(/電投|electronic/i.test(s))return"電投";return"一般"}
+export function dbCategory(value:any){const s=String(value??"");if(/極速|极速|speed/i.test(s))return"極速";if(/經典|经典|classic/i.test(s))return"經典";if(/完美|perfect/i.test(s))return"完美";if(/共享|共贏|共享|cowin|co-win/i.test(s))return"共享";if(/包桌|private/i.test(s))return"包桌";if(/電投|electronic/i.test(s))return"電投";return"極速"}
 
 class VendorRelay{
   private clients=new Set<Sink>(); private map=new Map<string,VendorTable>();

@@ -263,15 +263,15 @@ async function takeWarmOrLaunchChrome(executable: string, sessionId: string, onL
 }
 
 async function acquireVendorChrome(executable: string, rawSessionId: string, onLog: (message: string) => void) {
-  // AB and DB use the same authenticated application session. Keep them in
-  // separate tabs of one Chromium instead of spawning two heavy processes on
-  // Render. The relay key carries a trailing :AB / :DB; remove only that tag.
-  const key = rawSessionId.replace(/:(?:AB|DB)$/i, "");
+  // Keep AB and DB in isolated Chromium processes. Their pages create popup,
+  // iframe and worker targets without a reliable openerId; sharing one browser
+  // allowed both relays to attach to the same target and cross-read sessions.
+  const key = rawSessionId;
   let shared = sharedVendorChromes.get(key);
   if (!shared || !chromeAlive(shared.chrome)) {
     let pending = sharedVendorChromeStarts.get(key);
     if (!pending) {
-      pending = launchChrome(executable, `vendor-${key}`, message => onLog(`共用瀏覽器｜${message}`))
+      pending = launchChrome(executable, `vendor-${key}`, message => onLog(`獨立瀏覽器｜${message}`))
         .then(chrome => {
           const entry: SharedVendorChrome = { chrome, refs: 0 };
           sharedVendorChromes.set(key, entry);
@@ -285,7 +285,7 @@ async function acquireVendorChrome(executable: string, rawSessionId: string, onL
     }
     shared = await pending;
   } else {
-    onLog(`共用既有 Chromium｜pid=${shared.chrome.child.pid}`);
+    onLog(`沿用同平台 Chromium｜pid=${shared.chrome.child.pid}`);
   }
   shared.refs++;
   let released = false;

@@ -265,11 +265,11 @@ const abPlaceholderTables = Object.entries(abPlaceholderGroups).flatMap(
   ([category, ids]) => ids.map((id) => vendorPlaceholder(id, category)),
 );
 const dbPlaceholderCounts: Record<string, number> = {
-  一般: 21,
-  終極: 47,
-  完美: 3,
-  共贏: 2,
-  包桌: 2,
+  極速: 141,
+  經典: 54,
+  完美: 6,
+  共享: 4,
+  包桌: 4,
   電投: 10,
 };
 const dbPlaceholderTables = Object.entries(dbPlaceholderCounts).flatMap(
@@ -3968,7 +3968,8 @@ export default function HomeScreen() {
         },
         body: {
           begin_at: `${day}T00:00:00.000Z`,
-          cur: 1,
+          // MT 官方頁送出的第一頁索引是 0；送 1 在部分帳號會直接回空陣列。
+          cur: 0,
           end_at: `${day}T23:59:59.000Z`,
           room_id: 1,
           s: 8,
@@ -6365,7 +6366,7 @@ export default function HomeScreen() {
                         key={p}
                         onPress={() => {
                           setActivePlatform(p);
-                          setActiveCategory("一般");
+                          setActiveCategory(p === "DB" ? "極速" : "一般");
                         }}
                         style={[
                           s.platformTab,
@@ -6424,7 +6425,7 @@ export default function HomeScreen() {
             >
               {(activePlatform === "AB"
                 ? ["一般", "快速", "免佣", "保險", "VIP", "所有"]
-                : ["一般", "終極", "完美", "共贏", "包桌", "電投", "所有"]
+                : ["極速", "經典", "完美", "共享", "包桌", "電投", "所有"]
               ).map((category) => (
                 <Pressable
                   key={category}
@@ -6456,13 +6457,22 @@ export default function HomeScreen() {
             style={[
               s.cardsGrid,
               desktop && s.cardsGridDesktop,
+              !desktop && activePlatform === "DB" && s.cardsGridDbMobile,
               desktop && s.cardsGridDesktopCentered,
             ]}
           >
             {tables.map((t) => (
               <View
                 key={t.apiId}
-                style={desktop ? s.cardWrapDesktop : s.cardWrap}
+                style={
+                  desktop
+                    ? activePlatform === "AB" || activePlatform === "DB"
+                      ? s.cardWrapVendorDesktop
+                      : s.cardWrapDesktop
+                    : activePlatform === "DB"
+                      ? s.cardWrapDbMobile
+                      : s.cardWrap
+                }
               >
                 <MemoTableCard
                   table={t}
@@ -7115,8 +7125,8 @@ const s = StyleSheet.create({
   },
   overSub: { color: "#7894A8", fontSize: 9, marginTop: 3 },
   overStats: { flexDirection: "row", gap: 8 },
-  overStatsMobile: { width: "100%", gap: 8, flexDirection: "column" },
-  overStatsPhone: { flexDirection: "column" },
+  overStatsMobile: { width: "100%", gap: 8, flexDirection: "row" },
+  overStatsPhone: { flexDirection: "row" },
   overStat: {
     minWidth: 112,
     borderWidth: 1,
@@ -7205,9 +7215,12 @@ const s = StyleSheet.create({
   listHint: { color: "#73899A", fontSize: 8 },
   cardsGrid: { width: "100%", alignSelf: "center" },
   cardsGridDesktop: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  cardsGridDbMobile: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   cardsGridDesktopCentered: { maxWidth: 1280 },
   cardWrap: { width: "100%" },
   cardWrapDesktop: { width: "calc(50% - 5px)" as any, maxWidth: 635 },
+  cardWrapVendorDesktop: { width: "calc(33.333% - 7px)" as any },
+  cardWrapDbMobile: { width: "calc(50% - 3px)" as any },
   tableCard: {
     backgroundColor: "#08111A",
     borderWidth: 1,
@@ -7236,15 +7249,16 @@ const s = StyleSheet.create({
     borderBottomColor: "#27485E",
   },
   tableHeadMobile: {
-    height: 52,
-    paddingVertical: 4,
-    flexDirection: "column",
-    alignItems: "stretch",
+    height: 30,
+    paddingVertical: 0,
+    flexDirection: "row",
+    alignItems: "center",
     justifyContent: "space-between",
   },
   tableHeadRowMobile: {
-    width: "100%",
-    justifyContent: "space-between",
+    width: "auto",
+    justifyContent: "flex-start",
+    gap: 4,
   },
   tableHeadDg: { backgroundColor: "#171208", borderBottomColor: "#785B27" },
   game: { color: "#EAF6FF", fontSize: 9, fontWeight: "700" },
