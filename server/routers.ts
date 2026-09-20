@@ -2,18 +2,15 @@ import { z } from "zod";
 import { publicProcedure, router } from "./_core/trpc";
 import { randomUUID } from "node:crypto";
 import { authorizeWhitelist, getWhitelistPlatform } from "./whitelist";
+import {
+  deleteTrackerSession,
+  hasActiveTrackerSession,
+  loadTrackerSession,
+  saveTrackerSession,
+} from "./sessions";
 
-
-// TZ website authorization + single-login registry.
-// The browser talks to TZ directly so Render is not the source IP of the TZ login request.
-// Passwords are never sent to or stored by this server.
-const activeSessions = new Map<string, { sessionId:string; platform:string; username:string }>();
-
-export function hasActiveTrackerSession(sessionId:string){
-  if(!sessionId)return false;
-  for(const value of activeSessions.values()) if(value.sessionId===sessionId) return true;
-  return false;
-}
+export { hasActiveTrackerSession } from "./sessions";
+export { requireTrackerSession } from "./sessions";
 
 export const appRouter = router({
   trackerAccess: router({
@@ -28,8 +25,6 @@ export const appRouter = router({
         platform: z.enum(["TZ","OFA"]).default("TZ"),
       }))
       .mutation(async ({ input }) => {
-        // TZ already authenticated the credentials in the user's browser.
-        // Do not persist the TZ token; it is only proof that the browser login completed.
         const username = input.username.trim().toLowerCase();
         if (!username || !input.tzToken.trim()) return { success: false, sessionId: "", reason: "invalid_login" } as const;
 
@@ -38,39 +33,29 @@ export const appRouter = router({
         if (!access.allowed) return { success: false, sessionId: "", reason: access.reason } as const;
 
         const sessionId = randomUUID();
-        activeSessions.set(`${platform}:${username}`, {sessionId,platform,username});
+        await saveTrackerSession({ sessionId, platform, username });
         return { success: true, sessionId } as const;
       }),
     checkSession: publicProcedure
       .input(z.object({ sessionId: z.string().min(1).max(128) }))
       .query(async ({ input }) => {
-        let current:{sessionId:string;platform:string;username:string}|null=null;
-        for (const value of activeSessions.values()) { if(value.sessionId===input.sessionId){current=value;break;} }
-        if (!current) return { valid: false, reason: "session_invalid" } as const;
-        const {username,platform}=current;
+        const current = await loadTrackerSession(input.sessionId);
+        if (!current) return { valid: false, reason: "session_expired" } as const;
 
-        // Re-check the live whitelist on every session heartbeat. This makes admin
-        // disable/delete/expiry changes affect users who are already online.
-        const access = await authorizeWhitelist(username, platform);
+        const access = await authorizeWhitelist(current.username, current.platform);
         if (!access.allowed) {
-          activeSessions.delete(`${platform}:${username}`);
+          await deleteTrackerSession(input.sessionId);
           return { valid: false, reason: access.reason } as const;
         }
         return { valid: true, reason: "ok" } as const;
       }),
     logout: publicProcedure
       .input(z.object({ sessionId: z.string().min(1).max(128) }))
-      .mutation(({ input }) => {
-        for (const [key, value] of activeSessions.entries()) {
-          if (value.sessionId === input.sessionId) {
-            activeSessions.delete(key);
-              break;
-          }
-        }
+      .mutation(async ({ input }) => {
+        await deleteTrackerSession(input.sessionId);
         return { success: true } as const;
       }),
   }),
 });
 
 export type AppRouter = typeof appRouter;
-

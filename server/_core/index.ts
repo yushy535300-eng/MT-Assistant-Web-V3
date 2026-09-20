@@ -4,7 +4,7 @@ import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { appRouter, hasActiveTrackerSession } from "../routers";
+import { appRouter, hasActiveTrackerSession, requireTrackerSession } from "../routers";
 import { createContext } from "./context";
 import { randomUUID } from "node:crypto";
 import { adminPage } from "../admin-page";
@@ -45,7 +45,7 @@ async function startServer() {
     const platform=req.body?.platform==="OFA"?"OFA":req.body?.platform==="TZ"?"TZ":"";
     const platformToken=String(req.body?.platformToken||"").trim();
     let gameUrl=String(req.body?.gameUrl||"");
-    if(!hasActiveTrackerSession(sessionId))return res.status(401).json({ok:false,error:"session_invalid"});
+    if(!(await requireTrackerSession(sessionId)))return res.status(401).json({ok:false,error:"session_invalid"});
     if(!kind)return res.status(400).json({ok:false,error:"invalid_vendor"});
     try{
       // Issue the launch URL from this same Render host. AB/DB bind the one-time
@@ -66,7 +66,7 @@ async function startServer() {
   });
   app.get("/api/vendor/stream",(req,res)=>{
     const sessionId=String(req.query.sessionId||""),kind=vendorKind(req.query.kind);
-    if(!hasActiveTrackerSession(sessionId))return res.status(401).end();if(!kind)return res.status(400).end();
+    if(!(await requireTrackerSession(sessionId)))return res.status(401).end();if(!kind)return res.status(400).end();
     const relay=getVendorRelay(sessionId,kind);if(!relay)return res.status(404).end();
     res.status(200);res.setHeader("Content-Type","text/event-stream; charset=utf-8");res.setHeader("Cache-Control","no-cache, no-transform");res.setHeader("Connection","keep-alive");res.setHeader("X-Accel-Buffering","no");(res as any).flushHeaders?.();
     const off=relay.subscribe(res);const keep=setInterval(()=>{try{res.write(": keepalive\n\n")}catch{}},15000);let done=false;const close=()=>{if(done)return;done=true;clearInterval(keep);off()};req.once("close",close);res.once("close",close);res.once("finish",close);

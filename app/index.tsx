@@ -2481,6 +2481,7 @@ export default function HomeScreen() {
         expired: "此 TZ 帳號授權已到期。",
         not_whitelisted: "此 TZ 帳號已不在授權白名單。",
         database_unavailable: "授權服務暫時無法使用。",
+        session_expired: "連線已中斷，請重新登入。",
         session_invalid: "此帳號已於其他裝置登入，本裝置已自動登出。",
       };
       setAccessNotice(notices[reason] || "此帳號授權已失效，請重新登入。");
