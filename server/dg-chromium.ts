@@ -639,9 +639,14 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   if (!pageSessionId) throw new Error(`${hooks.label} Chromium target attach failed`);
   let stopped = false;
   let poll: ReturnType<typeof setInterval> | null = null;
+  let targetPoll: ReturnType<typeof setInterval> | null = null;
+  const targetSessions = new Map<string,string>([[String(targetId),pageSessionId]]);
+  const relatedTargets = new Set<string>([String(targetId)]);
+  const executionContexts = new Map<string,Set<number>>();
   const stop = () => {
     if (stopped) return; stopped = true;
     if (poll) clearInterval(poll);
+    if (targetPoll) clearInterval(targetPoll);
     void (async () => {
       try { await cdp.send('Target.closeTarget', { targetId }, undefined, 3000); } catch {}
       try { cdp.close(); } catch {}
@@ -659,7 +664,20 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   // well as inside the page, because a vendor may create its WebSocket in a
   // worker where a window-level WebSocket wrapper cannot see it.
   cdp.onEvent((message) => {
-    if (stopped || message.sessionId !== pageSessionId) return;
+    if (stopped || !message.sessionId || ![...targetSessions.values()].includes(message.sessionId)) return;
+    if(message.method==='Runtime.executionContextCreated'){
+      const context=message.params?.context,id=Number(context?.id);
+      if(Number.isFinite(id)&&context?.auxData?.isDefault!==false){
+        const set=executionContexts.get(message.sessionId)||new Set<number>();set.add(id);executionContexts.set(message.sessionId,set);
+      }
+      return;
+    }
+    if(message.method==='Runtime.executionContextDestroyed'){
+      executionContexts.get(message.sessionId)?.delete(Number(message.params?.executionContextId));return;
+    }
+    if(message.method==='Runtime.executionContextsCleared'){
+      executionContexts.delete(message.sessionId);return;
+    }
     if (message.method !== 'Network.webSocketFrameReceived') return;
     const response = message.params?.response || {};
     if (Number(response.opcode) !== 1 || typeof response.payloadData !== 'string') return;
@@ -724,19 +742,68 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     window.WebSocket=TapWS;
     window.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep,harvest};
   })();`;
+
+  const instrumentTarget = async (childTargetId:string,sessionId:string,type:string) => {
+    try { await cdp.send('Network.enable', {}, sessionId, 5000); } catch {}
+    try { await cdp.send('Runtime.enable', {}, sessionId, 5000); } catch {}
+    try { await cdp.send('Network.setUserAgentOverride', { userAgent: NORMAL_CHROME_UA, acceptLanguage: 'zh-TW,zh;q=0.9', platform: 'Windows' }, sessionId, 5000); } catch {}
+    if(['page','iframe','webview'].includes(type)){
+      try { await cdp.send('Page.enable', {}, sessionId, 5000); } catch {}
+      try { await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source }, sessionId, 5000); } catch {}
+      // A popup may already have loaded before we attach. Install the tap in
+      // its current document as well, rather than waiting for another reload.
+      try { await cdp.send('Runtime.evaluate', { expression: source }, sessionId, 5000); } catch {}
+    }
+    hooks.onLog(`${hooks.label} 已接管子執行環境｜type=${type}｜target=${childTargetId.slice(0,8)}`);
+  };
+
+  let scanningTargets=false;
+  const scanRelatedTargets=async()=>{
+    if(stopped||scanningTargets)return;scanningTargets=true;
+    try{
+      const result=await cdp.send('Target.getTargets',{},undefined,5000);
+      const infos=Array.isArray(result?.targetInfos)?result.targetInfos:[];
+      let changed=true;
+      while(changed){
+        changed=false;
+        for(const info of infos){
+          const id=String(info?.targetId||''),opener=String(info?.openerId||''),type=String(info?.type||'');
+          if(!id||relatedTargets.has(id)||!opener||!relatedTargets.has(opener))continue;
+          if(!['page','iframe','webview','worker','shared_worker'].includes(type))continue;
+          relatedTargets.add(id);changed=true;
+          try{
+            const a=await cdp.send('Target.attachToTarget',{targetId:id,flatten:true},undefined,5000);
+            const sid=String(a?.sessionId||'');if(!sid)continue;
+            targetSessions.set(id,sid);
+            await instrumentTarget(id,sid,type);
+          }catch(e:any){if(!stopped)hooks.onLog(`${hooks.label} 子分頁接管重試：${safeText(e?.message||e,140)}`)}
+        }
+      }
+    }catch(e:any){if(!stopped)hooks.onLog(`${hooks.label} 子分頁掃描重試：${safeText(e?.message||e,140)}`)}
+    finally{scanningTargets=false}
+  };
   await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source }, pageSessionId);
   await cdp.send('Page.navigate', { url: hooks.gameUrl }, pageSessionId, 15000);
   hooks.onLog(`${hooks.label} 真實頁面已啟動`);
+  void scanRelatedTargets();
+  targetPoll=setInterval(()=>void scanRelatedTargets(),1000);
+  targetPoll.unref?.();
   let busy=false;
   poll=setInterval(async()=>{
     if(stopped||busy)return; busy=true;
     try{
-      const out=await cdp.send('Runtime.evaluate',{expression:`window.__MT_VENDOR_TAP__?(${hooks.label === "DB" ? "window.__MT_VENDOR_TAP__.harvest()," : ""}window.__MT_VENDOR_TAP__.drain()):[]`,returnByValue:true},pageSessionId,8000);
-      const values=out?.result?.value;
-      if(Array.isArray(values))for(const value of values)hooks.onObject(value);
+      for(const sessionId of targetSessions.values()){
+        const ids=[...(executionContexts.get(sessionId)||[])];
+        const contexts=ids.length?ids:[undefined];
+        for(const contextId of contexts)try{
+          const out=await cdp.send('Runtime.evaluate',{expression:`typeof window!=='undefined'&&window.__MT_VENDOR_TAP__?(${hooks.label === "DB" ? "window.__MT_VENDOR_TAP__.harvest()," : ""}window.__MT_VENDOR_TAP__.drain()):[]`,contextId,returnByValue:true},sessionId,5000);
+          const values=out?.result?.value;
+          if(Array.isArray(values))for(const value of values)hooks.onObject(value);
+        }catch{}
+      }
     }catch(e:any){ if(!stopped)hooks.onLog(`${hooks.label} 解碼資料讀取重試：${safeText(e?.message||e,160)}`); }
     finally{busy=false}
-  },120);
+  },250);
   poll.unref?.();
   return { stop };
 }
