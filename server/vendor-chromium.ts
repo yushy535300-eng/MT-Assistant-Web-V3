@@ -33,6 +33,7 @@ type RequestMeta = { url: string; type: string; method: string };
 
 function findChromeExecutable() {
   const root = process.cwd();
+  const localApp = process.env.LOCALAPPDATA || '';
   const candidates = [
     process.env.DG_CHROME_PATH,
     process.env.CHROME_PATH,
@@ -41,9 +42,15 @@ function findChromeExecutable() {
     '/usr/bin/google-chrome',
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    localApp ? path.join(localApp, 'Google', 'Chrome', 'Application', 'chrome.exe') : '',
   ].filter((x): x is string => !!x);
   for (const p of candidates) {
-    try { fs.accessSync(p, fs.constants.X_OK); return p; } catch {}
+    try {
+      fs.accessSync(p, fs.constants.F_OK);
+      return p;
+    } catch {}
   }
   return '';
 }
@@ -58,7 +65,7 @@ function isDgWs(url: string) {
 function redactUrl(value: string) {
   try {
     const u = new URL(value);
-    for (const key of ['token', 'sign', 'auth', 'authorization', 'session', 'sessionId']) {
+    for (const key of ['token', 'sign', 'auth', 'authorization', 'session', 'sessionId', 'params']) {
       if (u.searchParams.has(key)) u.searchParams.set(key, '***');
     }
     return u.toString();
@@ -147,7 +154,7 @@ class CdpClient {
   close() { try { this.ws.close(); } catch {} }
 }
 
-async function launchChrome(executable: string, sessionId: string, onLog: (message: string) => void) {
+async function launchChrome(executable: string, sessionId: string, onLog: (message: string) => void, extraArgs: string[] = []) {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), `dg-chrome-${sessionId.slice(0, 8)}-`));
   const args = [
     '--headless=new',
@@ -174,6 +181,7 @@ async function launchChrome(executable: string, sessionId: string, onLog: (messa
     `--user-data-dir=${profile}`,
     `--user-agent=${NORMAL_CHROME_UA}`,
     '--window-size=1280,720',
+    ...extraArgs,
     'about:blank',
   ];
 
@@ -579,7 +587,12 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
 export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Promise<VendorBrowserTransport> {
   const executable = findChromeExecutable();
   if (!executable) throw new Error('找不到 Chrome/Chromium；請確認 postinstall 已完成');
-  const launched = await launchChrome(executable, `${hooks.label.toLowerCase()}-${hooks.sessionId}`, hooks.onLog);
+  const launched = await launchChrome(
+    executable,
+    `${hooks.label.toLowerCase()}-${hooks.sessionId}`,
+    hooks.onLog,
+    ['--timezone=Asia/Taipei', '--lang=zh-TW'],
+  );
   const cdp = new CdpClient(launched.wsUrl);
   await cdp.ready();
   const vendorSessions = new Set<string>();
@@ -606,10 +619,6 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   launched.child.once('exit', (code, signal) => {
     if (!stopped) hooks.onFailure?.(`${hooks.label} Chromium 意外結束 (code=${code}, signal=${signal})`);
   });
-  await cdp.send('Network.enable', {}, pageSessionId);
-  await cdp.send('Page.enable', {}, pageSessionId);
-  await cdp.send('Runtime.enable', {}, pageSessionId);
-  await cdp.send('Network.setUserAgentOverride', { userAgent: NORMAL_CHROME_UA, acceptLanguage: 'zh-TW,zh;q=0.9', platform: 'Windows' }, pageSessionId);
   const counters={targets:1,contexts:0,ws:0,frames:0,binary:0,json:0,objects:0,responses:0};
   const responseRequests=new Map<string,{requestId:string,mime:string}>();
   const source = `(() => {
@@ -630,8 +639,7 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
       if(seen.has(v))return; seen.add(v);
       try{
         if(v.__v_isRef){keep(v.value,depth+1,seen);return}
-        const c=v.c, p=v.p;
-        if(typeof c==='string' || v.protocolId!=null || v.jsonData!=null || v.gameTableMap || v.roadPaper || v.tableId!=null || v.gameId!=null || v.roads || v.roadmaps || v.gameCode || v.tableCode){
+        if(typeof v.c==='string' || v.protocolId!=null || v.jsonData!=null || v.gameTableMap || v.roadPaper || v.tableId!=null || v.gameId!=null || v.roads || v.roadmaps || v.gameCode || v.tableCode || v.cmd || v.WW3 || v.beatPlateRoad){
           emit(v);
         }
         if(v instanceof Map){for(const x of v.values())keep(x,depth+1,seen)}
@@ -661,6 +669,15 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     if(typeof document!=='undefined')setInterval(scan,1000);
     root.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep,scan};
   })();`;
+  const probeSource = `(() => {
+    try {
+      const text=(document.body&&document.body.innerText||'').replace(/\\s+/g,' ').trim().slice(0,180);
+      const iframes=[...document.querySelectorAll('iframe')].map(f=>String(f.src||'')).filter(Boolean).slice(0,6);
+      const hit=[...document.querySelectorAll('button,a,[role=button],input[type=button]')].find(el=>/進[入場]|开始|開始|进入游戏|ENTER/i.test(el.innerText||el.value||''));
+      if(hit) hit.click();
+      return {href:String(location.href||''),title:String(document.title||''),ready:String(document.readyState||''),iframes,text,clicked:!!hit,tap:!!window.__MT_VENDOR_TAP__};
+    } catch (e) { return {error:String(e&&e.message||e)}; }
+  })()`;
   const instrumentSession=async(sessionId:string)=>{
     if(!sessionId||instrumentedSessions.has(sessionId))return;
     instrumentedSessions.add(sessionId); vendorSessions.add(sessionId);
@@ -668,14 +685,14 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     await cdp.send('Runtime.enable',{},sessionId).catch(()=>{});
     await cdp.send('Runtime.addBinding',{name:'__mtVendorPush'},sessionId).catch(()=>{});
     await cdp.send('Page.enable',{},sessionId).catch(()=>{});
-    await cdp.send('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:false,flatten:true},sessionId).catch(()=>{});
+    await cdp.send('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:true,flatten:true},sessionId).catch(()=>{});
     await cdp.send('Page.addScriptToEvaluateOnNewDocument',{source},sessionId).catch(()=>{});
     await cdp.send('Runtime.evaluate',{expression:source},sessionId,8000).catch(()=>{});
+    await cdp.send('Network.setUserAgentOverride',{userAgent:NORMAL_CHROME_UA,acceptLanguage:'zh-TW,zh;q=0.9,en;q=0.8',platform:'Windows'},sessionId).catch(()=>{});
+    await cdp.send('Network.setExtraHTTPHeaders',{headers:{'Accept-Language':'zh-TW,zh;q=0.9,en;q=0.8'}},sessionId).catch(()=>{});
+    await cdp.send('Runtime.runIfWaitingForDebugger',{},sessionId).catch(()=>{});
     hooks.onLog(`監聽目標已安裝｜session=${sessionId.slice(0,8)}`);
   };
-  // AB may open its socket in a worker and DB commonly keeps its decoded Vue
-  // state in an out-of-process frame. Instrument and drain every attached CDP
-  // target instead of observing only the outer launch page.
   cdp.onEvent((message) => {
     if (stopped) return;
     if(message.method==='Target.attachedToTarget'){
@@ -683,6 +700,16 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
       const info=message.params?.targetInfo||{};
       hooks.onLog(`發現目標｜type=${safeText(info.type,30)}｜url=${redactUrl(String(info.url||'')).slice(0,220)}`);
       void instrumentSession(String(message.params?.sessionId||''));
+      return;
+    }
+    if(message.method==='Page.frameNavigated'){
+      const url=String(message.params?.frame?.url||'');
+      if(url&&message.params?.frame?.parentId==null)hooks.onLog(`主頁導向｜${redactUrl(url).slice(0,260)}`);
+      return;
+    }
+    if(message.method==='Network.loadingFailed'){
+      const p=message.params||{};
+      if(p.type==='Document'||p.type==='WebSocket')hooks.onLog(`載入失敗｜type=${p.type}｜${safeText(p.errorText,120)}`);
       return;
     }
     const sessionId=String(message.sessionId||'');
@@ -744,7 +771,15 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     finally{busy=false}
   },120);
   poll.unref?.();
-  diagnostics=setInterval(()=>hooks.onLog(`擷取狀態｜targets=${counters.targets}｜contexts=${counters.contexts}｜ws=${counters.ws}｜frames=${counters.frames}｜binary=${counters.binary}｜json=${counters.json}｜xhr=${counters.responses}｜objects=${counters.objects}`),5000);
+  diagnostics=setInterval(async()=>{
+    let page='';
+    try{
+      const probe=await cdp.send('Runtime.evaluate',{expression:probeSource,returnByValue:true},pageSessionId,4000);
+      const v=probe?.result?.value||{};
+      page=`｜url=${redactUrl(String(v.href||'')).slice(0,180)}｜title=${safeText(v.title,40)}｜iframes=${Array.isArray(v.iframes)?v.iframes.length:0}｜tap=${v.tap?'1':'0'}｜text=${safeText(v.text,80)}`;
+    }catch{}
+    hooks.onLog(`擷取狀態｜targets=${counters.targets}｜contexts=${counters.contexts}｜ws=${counters.ws}｜frames=${counters.frames}｜binary=${counters.binary}｜json=${counters.json}｜xhr=${counters.responses}｜objects=${counters.objects}${page}`);
+  },5000);
   diagnostics.unref?.();
   return { stop };
 }

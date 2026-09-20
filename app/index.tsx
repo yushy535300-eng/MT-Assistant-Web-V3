@@ -231,53 +231,6 @@ const dgPlaceholderTables: TableData[] = dgPlaceholderDefs.map(
   }),
 );
 
-// Vendor table shells are deliberately independent from the live connection.
-// A failed/slow relay must never collapse the dashboard into an empty page.
-// AB ids/categories come from the captured getGameHall snapshot; DB publishes
-// category totals in its lobby, so stable category slots are used until the
-// decoded live snapshot replaces them.
-const vendorPlaceholder = (apiId: string, category: string): TableData => ({
-  id: apiId,
-  apiId,
-  game: "百家樂",
-  name: "—",
-  players: "—",
-  roomId: apiId,
-  tableBadge: apiId,
-  shoe: "—",
-  round: 0,
-  banker: 0,
-  player: 0,
-  tie: 0,
-  results: [],
-  trend: "",
-  live: false,
-  category,
-});
-const abPlaceholderGroups: Record<string, string[]> = {
-  一般: ["B201", "B202", "B203", "B219", "B220", "B501", "B502", "B503", "B504", "B505", "B506", "B507", "B601", "B602", "B603", "B604", "B605", "B618"],
-  快速: ["Q201", "Q202", "Q204", "Q501", "Q502", "Q601", "Q701", "Q702"],
-  免佣: ["C201", "C202", "C501", "C701"],
-  保險: ["IB201", "IB202"],
-  VIP: ["V911", "V912", "V971", "V972"],
-};
-const abPlaceholderTables = Object.entries(abPlaceholderGroups).flatMap(
-  ([category, ids]) => ids.map((id) => vendorPlaceholder(id, category)),
-);
-const dbPlaceholderCounts: Record<string, number> = {
-  極速: 141,
-  經典: 54,
-  完美: 6,
-  共享: 4,
-  包桌: 4,
-  電投: 10,
-};
-const dbPlaceholderTables = Object.entries(dbPlaceholderCounts).flatMap(
-  ([category, count]) =>
-    Array.from({ length: count }, (_, index) =>
-      vendorPlaceholder(`DB-${category}-${String(index + 1).padStart(3, "0")}`, category),
-    ),
-);
 const lineContactUrl = "https://line.me/ti/p/k2pkYGXGL3";
 const threadsUrl = "https://www.threads.com/@uss0857?igshid=NTc4MTIwNjQ2YQ==";
 const tzRegisterUrl = "https://shy9453.tz6868.cc";
@@ -981,12 +934,14 @@ function TableCard({
   onAction,
   connected,
   platform = "MT",
+  scaled = false,
 }: {
   table: TableData;
   desktop: boolean;
   onAction: (kind: string, table: TableData) => void;
   connected: boolean;
   platform?: PlatformKey;
+  scaled?: boolean;
 }) {
   const dg = platform === "DG";
   const tableId = table.apiId ?? `BAG${table.id}`;
@@ -1010,7 +965,12 @@ function TableCard({
     });
   return (
     <View
-      style={[s.tableCard, desktop && s.tableCardDesktop, dg && s.tableCardDg]}
+      style={[
+        s.tableCard,
+        desktop && s.tableCardDesktop,
+        dg && s.tableCardDg,
+        scaled && s.tableCardScaled,
+      ]}
     >
       <View style={[s.tableHead, dg && s.tableHeadDg]}>
         <View style={s.row}>
@@ -4658,11 +4618,10 @@ export default function HomeScreen() {
       setVendorConnected((v) => ({ ...v, [kind]: false }));
       setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
       setVendorMessage((v) => ({ ...v, [kind]: "正在取得平台授權並啟動即時牌路" }));
-      getVendorLoginUrlFromPlatform(loginPlatform, platformToken, kind)
-      .then((url) => {
+      Promise.resolve()
+      .then(() => {
         if (cancelled) return null;
-        setVendorUrls((v) => ({ ...v, [kind]: url }));
-        return connectVendorLive(kind, url, accessSessionId, {
+        return connectVendorLive(kind, "", accessSessionId, {
           onTables: (next: VendorTableData[]) => {
             if (!cancelled)
               setVendorTables((v) => ({ ...v, [kind]: next as TableData[] }));
@@ -4703,12 +4662,22 @@ export default function HomeScreen() {
           onEvent: (message) => {
             if (!cancelled && message) appendEvent(message);
           },
+        }, {
+          platform: loginPlatform,
+          platformToken,
         });
       })
       .then((controller) => {
         if (!controller) return;
         if (cancelled) controller.close();
-        else vendorControllersRef.current[kind] = controller;
+        else {
+          vendorControllersRef.current[kind] = controller;
+          if (controller.host)
+            setVendorUrls((v) => ({
+              ...v,
+              [kind]: `https://${controller.host}/`,
+            }));
+        }
       })
       .catch((e: any) => {
         if (!cancelled) {
@@ -5083,7 +5052,7 @@ export default function HomeScreen() {
 
   const confirmTransferAll = () => {
     if (!hasEnteredGame) {
-      notify("請先進入 MT 或 DG 平台");
+      notify("請先進入遊戲平台");
       return;
     }
     setWalletTransferOpen(true);
@@ -6281,6 +6250,28 @@ export default function HomeScreen() {
               <MaterialIcons name="settings" size={16} color="#fff" />
               <Text style={s.headerBtnText}>連線</Text>
             </Pressable>
+            <Pressable
+              disabled={!hasEnteredGame || walletTransferBusy}
+              onPress={confirmTransferAll}
+              style={[
+                s.headerBtn,
+                (!hasEnteredGame || walletTransferBusy) && s.headerBtnMuted,
+              ]}
+            >
+              <MaterialIcons
+                name="account-balance-wallet"
+                size={16}
+                color={hasEnteredGame ? "#FFF1C6" : "#8A9AA6"}
+              />
+              <Text
+                style={[
+                  s.headerBtnText,
+                  !hasEnteredGame && s.headerBtnTextMuted,
+                ]}
+              >
+                {walletTransferBusy ? "轉回中" : "轉回"}
+              </Text>
+            </Pressable>
           </View>
         </View>
         <ScrollView contentContainerStyle={s.content}>
@@ -6311,6 +6302,7 @@ export default function HomeScreen() {
               <View
                 style={[
                   s.overStat,
+                  s.overStatCompact,
                   !desktop && s.overStatMobile,
                   activePlatform === "DG" && s.overStatDg,
                 ]}
@@ -6328,24 +6320,18 @@ export default function HomeScreen() {
                       ? "已連線"
                       : "連線中"}
                 </Text>
-              </View>
-              <View
-                style={[
-                  s.overStat,
-                  !desktop && s.overStatMobile,
-                  activePlatform === "DG" && s.overStatDg,
-                ]}
-              >
-                <Text style={s.smallLabel}>
-                  平台 · 可用 {availableTableCount} 桌
+                <Text style={s.overStatMeta}>
+                  {activePlatform} · {availableTableCount} 桌
                 </Text>
-                <View style={s.platformSwitch}>
-                  {(["MT", "DG", "AB", "DB"] as PlatformKey[]).map((p) => (
+              </View>
+              <View style={s.platformSwitch}>
+                <View style={s.platformSwitchRow}>
+                  {(["MT", "DG"] as PlatformKey[]).map((p) => (
                     <Pressable
                       key={p}
                       onPress={() => {
                         setActivePlatform(p);
-                        setActiveCategory(p === "DB" ? "極速" : "一般");
+                        setActiveCategory("一般");
                       }}
                       style={[
                         s.platformTab,
@@ -6364,34 +6350,35 @@ export default function HomeScreen() {
                               : s.platformTabTextActive),
                         ]}
                       >
+                        {p}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                <View style={s.platformSwitchRow}>
+                  {(["AB", "DB"] as PlatformKey[]).map((p) => (
+                    <Pressable
+                      key={p}
+                      onPress={() => {
+                        setActivePlatform(p);
+                        setActiveCategory(p === "DB" ? "極速" : "一般");
+                      }}
+                      style={[
+                        s.platformTab,
+                        activePlatform === p && s.platformTabMtActive,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          s.platformTabText,
+                          activePlatform === p && s.platformTabTextActive,
+                        ]}
+                      >
                         {p === "AB" ? "歐博" : p}
                       </Text>
                     </Pressable>
                   ))}
                 </View>
-                <Pressable
-                  disabled={!hasEnteredGame || walletTransferBusy}
-                  onPress={confirmTransferAll}
-                  style={[
-                    s.walletReturnBtn,
-                    (!hasEnteredGame || walletTransferBusy) &&
-                      s.walletReturnBtnDisabled,
-                  ]}
-                >
-                  <MaterialIcons
-                    name="account-balance-wallet"
-                    size={15}
-                    color={hasEnteredGame ? "#FFF1C6" : "#71808B"}
-                  />
-                  <Text
-                    style={[
-                      s.walletReturnText,
-                      !hasEnteredGame && s.walletReturnTextDisabled,
-                    ]}
-                  >
-                    {walletTransferBusy ? "轉回中" : "一鍵轉回原平台"}
-                  </Text>
-                </Pressable>
               </View>
             </View>
           </View>
@@ -6443,7 +6430,9 @@ export default function HomeScreen() {
               <View style={s.vendorEmptyState}>
                 <MaterialIcons name="sync" size={22} color="#58B8ED" />
                 <Text style={s.vendorEmptyTitle}>
-                  {vendorStatus[activePlatform as VendorKind] === "error" ? "尚未取得真實桌台" : "正在同步真實桌台"}
+                  {vendorStatus[activePlatform as VendorKind] === "連線失敗"
+                    ? "尚未取得真實桌台"
+                    : "正在同步真實桌台"}
                 </Text>
                 <Text style={s.vendorEmptyText}>{vendorMessage[activePlatform as VendorKind]}</Text>
               </View>
@@ -6476,6 +6465,11 @@ export default function HomeScreen() {
                     onAction={stableTableAction}
                     connected={activeConnected}
                     platform={activePlatform}
+                    scaled={
+                      desktop
+                        ? activePlatform === "AB" || activePlatform === "DB"
+                        : activePlatform === "DB"
+                    }
                   />
                 </View>
               </View>
@@ -7083,7 +7077,9 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#3D6682",
   },
+  headerBtnMuted: { opacity: 0.55 },
   headerBtnText: { color: "#fff", fontSize: 10, fontWeight: "800" },
+  headerBtnTextMuted: { color: "#8A9AA6" },
   content: { padding: 10, paddingBottom: 90 },
   overview: {
     borderWidth: 1,
@@ -7119,26 +7115,27 @@ const s = StyleSheet.create({
     padding: 9,
     backgroundColor: "#091722",
   },
+  overStatCompact: { minWidth: 96, paddingVertical: 8, paddingHorizontal: 9 },
+  overStatMeta: { color: "#7F96A8", fontSize: 8, fontWeight: "700", marginTop: 3 },
   overStatDg: { borderColor: "#745925", backgroundColor: "#100D08" },
   overStatMobile: { flex: 1, minWidth: 0, padding: 8 },
   overValue: { color: "#fff", fontSize: 13, fontWeight: "900", marginTop: 4 },
   platformSwitch: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-    width: 184,
+    flexDirection: "column",
+    alignItems: "stretch",
     gap: 4,
-    marginTop: 5,
-    padding: 2,
+    marginTop: 0,
+    padding: 3,
     borderRadius: 6,
     backgroundColor: "rgba(0,0,0,.26)",
     borderWidth: 1,
     borderColor: "rgba(130,151,166,.22)",
   },
+  platformSwitchRow: { flexDirection: "row", gap: 4 },
   platformTab: {
-    width: 86,
-    height: 27,
-    paddingHorizontal: 8,
+    width: 72,
+    height: 26,
+    paddingHorizontal: 6,
     borderRadius: 4,
     alignItems: "center",
     justifyContent: "center",
@@ -7200,8 +7197,8 @@ const s = StyleSheet.create({
   cardsGridDesktopCentered: { maxWidth: 1280 },
   cardWrap: { width: "100%" },
   cardWrapDesktop: { width: "calc(50% - 5px)" as any, maxWidth: 635 },
-  cardWrapVendorDesktop: { width: "calc(33.333% - 7px)" as any, height: 153, overflow: "hidden" },
-  cardWrapDbMobile: { width: "calc(50% - 3px)" as any, height: 104, overflow: "hidden" },
+  cardWrapVendorDesktop: { width: "calc(33.333% - 7px)" as any, height: 146, overflow: "hidden" },
+  cardWrapDbMobile: { width: "calc(50% - 3px)" as any, height: 96, overflow: "hidden" },
   vendorCardScaleDesktop: {
     width: "150%",
     transform: [{ scale: 2 / 3 }],
@@ -7237,6 +7234,7 @@ const s = StyleSheet.create({
     shadowRadius: 4,
   },
   tableCardDesktop: {},
+  tableCardScaled: { marginBottom: 0 },
   tableCardDg: {
     backgroundColor: "#100D08",
     borderColor: "#8C6B2C",

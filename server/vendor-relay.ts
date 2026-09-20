@@ -36,6 +36,31 @@ export function abPoker(raw:any){
 export function abCategory(code:any){
   return ({101:"一般",103:"快速",104:"免佣",110:"保險",111:"VIP"} as any)[n(code)]||"其他";
 }
+export function abHands(raw:any){
+  if(!Array.isArray(raw)||raw.length<2)return null;
+  const side=(x:any)=>Array.isArray(x)?x.map(abRank).filter((v)=>v>0).slice(0,3):[];
+  const player=side(raw[0]),banker=side(raw[1]);
+  if(player.length<2||banker.length<2)return null;
+  const point=(cards:number[])=>cards.reduce((s,v)=>s+(v>=10?0:v),0)%10;
+  return {player,banker,playerPoint:point(player),bankerPoint:point(banker)};
+}
+export function abRoadFromCards(raw:any):Road|null{
+  const hands=abHands(raw);if(!hands)return null;
+  const {player,banker,playerPoint,bankerPoint}=hands;
+  if(playerPoint>=8||bankerPoint>=8)return playerPoint===bankerPoint?"和":playerPoint>bankerPoint?"閒":"莊";
+  const playerDraw=playerPoint<=5;
+  if(playerDraw&&player.length<3)return null;
+  const third=playerDraw?(player[2]>=10?0:player[2]):-1;
+  let bankerDraw=false;
+  if(!playerDraw)bankerDraw=bankerPoint<=5;
+  else if(bankerPoint<=2)bankerDraw=true;
+  else if(bankerPoint===3)bankerDraw=third!==8;
+  else if(bankerPoint===4)bankerDraw=third>=2&&third<=7;
+  else if(bankerPoint===5)bankerDraw=third>=4&&third<=7;
+  else if(bankerPoint===6)bankerDraw=third===6||third===7;
+  if(bankerDraw&&banker.length<3)return null;
+  return playerPoint===bankerPoint?"和":playerPoint>bankerPoint?"閒":"莊";
+}
 export function dbCategory(value:any){const s=String(value??"");if(/終極|ultimate/i.test(s))return"終極";if(/完美|perfect/i.test(s))return"完美";if(/共贏|cowin|co-win/i.test(s))return"共贏";if(/包桌|private/i.test(s))return"包桌";if(/電投|electronic/i.test(s))return"電投";return"一般"}
 const DB_BACCARAT_CATEGORIES:Record<number,string>={2002:"極速",2001:"經典",2003:"完美",2004:"共享",2005:"包桌",2038:"電投"};
 export function dbBaccaratCategory(gameTypeId:any){return DB_BACCARAT_CATEGORIES[n(gameTypeId)]||""}
@@ -71,7 +96,7 @@ class VendorRelay{
     this.transport=await startVendorBrowserTransport({sessionId:this.key,gameUrl:this.gameUrl,label:this.kind,
       onLog:m=>this.event(m),onObject:o=>this.handle(o),onFailure:m=>this.setStatus("error",m)});
     this.setStatus("connecting",`${this.kind} 已開啟，等待桌台資料`);
-    const wait=setTimeout(()=>{if(!this.stopped&&!this.map.size)this.setStatus("error",`${this.kind} 背景頁面已開啟，但 20 秒內未收到可解析的桌台資料`)},20000);
+    const wait=setTimeout(()=>{if(!this.stopped&&!this.map.size)this.setStatus("error",`${this.kind} 背景頁面已開啟，但 45 秒內未收到可解析的桌台資料`)},45000);
     wait.unref?.();
   }
   subscribe(res:Sink){this.lastTouch=Date.now();this.clients.add(res);this.send(res,"status",{status:this.status,message:this.message});this.send(res,"tables",this.tables());this.send(res,"pnl",this.pnl);return()=>{this.clients.delete(res);this.lastTouch=Date.now()}}
@@ -81,7 +106,11 @@ class VendorRelay{
   private event(message:string){console.log(`[Vendor ${this.kind}][${this.key.slice(0,8)}] ${message}`);this.broadcast("event",{message:`${this.kind} ${message}`})}
   private setStatus(status:string,message:string){this.status=status;this.message=message;console.log(`[Vendor ${this.kind}][${this.key.slice(0,8)}] status=${status}｜${message}`);this.broadcast("status",{status,message})}
   private tables(){return [...this.map.values()].sort((a,b)=>a.apiId.localeCompare(b.apiId,undefined,{numeric:true}))}
-  private emit(){this.setStatus("connected",`${this.kind} 已同步 ${this.map.size} 桌`);this.broadcast("tables",this.tables())}
+  private emit(){
+    if(!this.map.size)return;
+    this.setStatus("connected",`${this.kind} 已同步 ${this.map.size} 桌`);
+    this.broadcast("tables",this.tables());
+  }
   private handle(root:any){
     if(this.stopped||!root||typeof root!=="object")return;
     this.objectCount++;
@@ -113,7 +142,18 @@ class VendorRelay{
       for(const s of p.A){const prev=this.map.get(String(s.AA));if(!prev)continue;this.map.set(String(s.AA),{...prev,countdown:n(s.BB),countdownUpdatedAt:Date.now(),round:n(s.CC)||prev.round,lastUpdated:Date.now()})}this.emit();return;
     }
     if(cmd==="pushRawCards"){
-      const prev=this.map.get(String(p.A));if(!prev)return;this.map.set(String(p.A),{...prev,round:n(p.E)||prev.round,poker:abPoker(p.B)||prev.poker,lastUpdated:Date.now()});this.emit();return;
+      const prev=this.map.get(String(p.A));if(!prev)return;
+      const poker=abPoker(p.B)||prev.poker;
+      const round=n(p.E)||prev.round;
+      const outcome=abRoadFromCards(p.B);
+      const key=outcome?`${round}:${outcome}`:prev.lastResultKey;
+      let results=prev.results,banker=prev.banker,player=prev.player,tie=prev.tie;
+      if(outcome&&key!==prev.lastResultKey){
+        results=[...prev.results,outcome];
+        const c=count(results);banker=c.莊;player=c.閒;tie=c.和;
+      }
+      this.map.set(String(p.A),{...prev,round,poker,results,banker,player,tie,lastResultKey:key,lastUpdated:Date.now()});
+      this.emit();return;
     }
     if(cmd==="pushPayoutInfo"){
       // Current user is the VIP=23 entry. Z is balance, L is this bet's P/L;

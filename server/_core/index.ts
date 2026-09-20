@@ -12,6 +12,7 @@ import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, d
 import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken, sweepIdleDgRelays } from "../dg-relay";
 import { registerDgGameProxy } from "../dg-game-proxy";
 import { getVendorRelay, startVendorRelay, stopVendorRelay, sweepVendorRelays, type VendorKind } from "../vendor-relay";
+import { fetchVendorLaunchUrl } from "../vendor-launch";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,13 +41,28 @@ async function startServer() {
 
   const vendorKind=(raw:any):VendorKind|null=>raw==="AB"||raw==="DB"?raw:null;
   app.post("/api/vendor/start",async(req,res)=>{
-    const sessionId=String(req.body?.sessionId||""),kind=vendorKind(req.body?.kind),gameUrl=String(req.body?.gameUrl||"");
+    const sessionId=String(req.body?.sessionId||""),kind=vendorKind(req.body?.kind);
+    const platform=req.body?.platform==="OFA"?"OFA":req.body?.platform==="TZ"?"TZ":"";
+    const platformToken=String(req.body?.platformToken||"").trim();
+    let gameUrl=String(req.body?.gameUrl||"");
     if(!hasActiveTrackerSession(sessionId))return res.status(401).json({ok:false,error:"session_invalid"});
     if(!kind)return res.status(400).json({ok:false,error:"invalid_vendor"});
-    let u:URL;try{u=new URL(gameUrl)}catch{return res.status(400).json({ok:false,error:"invalid_game_url"})}
-    if(u.protocol!=="https:")return res.status(400).json({ok:false,error:"invalid_game_url"});
-    console.log(`[Vendor API] start｜kind=${kind}｜host=${u.hostname}｜session=${sessionId.slice(0,8)}`);
-    try{await startVendorRelay(sessionId,kind,u.toString());return res.json({ok:true})}catch(e:any){console.error(`[Vendor API] start failed｜kind=${kind}｜${e?.message||e}`);return res.status(502).json({ok:false,error:e?.message||"vendor_start_failed"})}
+    try{
+      // Issue the launch URL from this same Render host. AB/DB bind the one-time
+      // session to the IP that called TZ/OFA game login; using the browser's URL
+      // here left Chromium stuck on a geo/IP page with ws=0.
+      if(platform&&platformToken){
+        gameUrl=await fetchVendorLaunchUrl({platform,platformToken,kind});
+      }
+      let u:URL;try{u=new URL(gameUrl)}catch{return res.status(400).json({ok:false,error:"invalid_game_url"})}
+      if(u.protocol!=="https:")return res.status(400).json({ok:false,error:"invalid_game_url"});
+      console.log(`[Vendor API] start｜kind=${kind}｜host=${u.hostname}｜auth=${platform&&platformToken?"server":"client-url"}｜session=${sessionId.slice(0,8)}`);
+      await startVendorRelay(sessionId,kind,u.toString());
+      return res.json({ok:true,host:u.hostname});
+    }catch(e:any){
+      console.error(`[Vendor API] start failed｜kind=${kind}｜${e?.message||e}`);
+      return res.status(502).json({ok:false,error:e?.message||"vendor_start_failed"});
+    }
   });
   app.get("/api/vendor/stream",(req,res)=>{
     const sessionId=String(req.query.sessionId||""),kind=vendorKind(req.query.kind);

@@ -8,8 +8,16 @@ export type VendorTableData={
 };
 type Callbacks={onTables:(v:VendorTableData[])=>void;onStatus?:(s:string,m?:string)=>void;onEvent?:(m:string)=>void;onPnl?:(v:number|null)=>void;onSettlement?:(v:{pnl:number;tableId?:string})=>void};
 
-export async function connectVendorLive(kind:VendorKind,gameUrl:string,sessionId:string,cb:Callbacks){
-  const response=await fetch("/api/vendor/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({kind,gameUrl,sessionId})});
+export async function connectVendorLive(
+  kind:VendorKind,
+  gameUrl:string,
+  sessionId:string,
+  cb:Callbacks,
+  auth?:{platform:"TZ"|"OFA";platformToken:string},
+){
+  const response=await fetch("/api/vendor/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
+    kind,gameUrl,sessionId,platform:auth?.platform,platformToken:auth?.platformToken,
+  })});
   const data=await response.json().catch(()=>null);if(!response.ok||!data?.ok)throw new Error(data?.error||`${kind} 啟動失敗`);
   const source=new EventSource(`/api/vendor/stream?kind=${kind}&sessionId=${encodeURIComponent(sessionId)}`);
   source.addEventListener("status",(e:any)=>{try{const x=JSON.parse(e.data);cb.onStatus?.(x.status,x.message)}catch{}});
@@ -18,5 +26,8 @@ export async function connectVendorLive(kind:VendorKind,gameUrl:string,sessionId
   source.addEventListener("settlement",(e:any)=>{try{cb.onSettlement?.(JSON.parse(e.data))}catch{}});
   source.addEventListener("event",(e:any)=>{try{cb.onEvent?.(JSON.parse(e.data)?.message||"")}catch{}});
   source.onerror=()=>cb.onStatus?.("error",`${kind} 即時資料暫時中斷`);
-  return{close(){source.close();void fetch("/api/vendor/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({kind,sessionId})}).catch(()=>{})}};
+  return{
+    host:String(data?.host||""),
+    close(){source.close();void fetch("/api/vendor/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({kind,sessionId})}).catch(()=>{})},
+  };
 }
