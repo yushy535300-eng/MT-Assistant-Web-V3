@@ -65,6 +65,7 @@ class VendorRelay{
   private dbRaw=new Map<string,any>();
   private transport:VendorBrowserTransport|null=null; private status="connecting"; private message="啟動中";
   private pnl:number|null=null; private stopped=false; private lastTouch=Date.now();
+  private objectCount=0; private lastLoggedTableCount=0;
   constructor(readonly key:string,readonly kind:VendorKind,readonly gameUrl:string){}
   async start(){
     this.transport=await startVendorBrowserTransport({sessionId:this.key,gameUrl:this.gameUrl,label:this.kind,
@@ -83,8 +84,17 @@ class VendorRelay{
   private emit(){this.setStatus("connected",`${this.kind} 已同步 ${this.map.size} 桌`);this.broadcast("tables",this.tables())}
   private handle(root:any){
     if(this.stopped||!root||typeof root!=="object")return;
+    this.objectCount++;
+    if(this.objectCount===1||this.objectCount===10||this.objectCount===100){
+      const keys=Object.keys(root).slice(0,20).join(",");
+      this.event(`已收到解密物件 ${this.objectCount} 筆｜keys=${keys||"(array)"}`);
+    }
     this.lastTouch=Date.now();
     if(this.kind==="AB")this.handleAb(root);else this.handleDb(root);
+    if(this.map.size!==this.lastLoggedTableCount){
+      this.lastLoggedTableCount=this.map.size;
+      this.event(`真實百家樂桌解析完成｜${this.map.size} 桌`);
+    }
   }
   private handleAb(o:any){
     if(n(o?.code)===0&&Array.isArray(o?.data?.C)&&o.data.C.some((x:any)=>x?.JJ!==undefined&&x?.CC)){

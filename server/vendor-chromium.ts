@@ -593,9 +593,11 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   vendorSessions.add(pageSessionId);
   let stopped = false;
   let poll: ReturnType<typeof setInterval> | null = null;
+  let diagnostics: ReturnType<typeof setInterval> | null = null;
   const stop = () => {
     if (stopped) return; stopped = true;
     if (poll) clearInterval(poll);
+    if (diagnostics) clearInterval(diagnostics);
     try { cdp.close(); } catch {}
     try { launched.child.kill('SIGTERM'); } catch {}
     setTimeout(() => { try { if (!launched.child.killed) launched.child.kill('SIGKILL'); } catch {} }, 1200).unref?.();
@@ -608,9 +610,19 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   await cdp.send('Page.enable', {}, pageSessionId);
   await cdp.send('Runtime.enable', {}, pageSessionId);
   await cdp.send('Network.setUserAgentOverride', { userAgent: NORMAL_CHROME_UA, acceptLanguage: 'zh-TW,zh;q=0.9', platform: 'Windows' }, pageSessionId);
+  const counters={targets:1,contexts:0,ws:0,frames:0,binary:0,json:0,objects:0,responses:0};
+  const responseRequests=new Map<string,{requestId:string,mime:string}>();
   const source = `(() => {
-    if (window.__MT_VENDOR_TAP__) return;
+    const root=globalThis;
+    if (root.__MT_VENDOR_TAP__) return;
     const q=[];
+    const emit=(v)=>{
+      try{
+        const json=JSON.stringify(v); if(!json||json.length>3000000)return;
+        if(typeof root.__mtVendorPush==='function')root.__mtVendorPush(json);
+        else {q.push(JSON.parse(json));if(q.length>2000)q.splice(0,q.length-1500)}
+      }catch{}
+    };
     const keep=(v,depth=0,seen=new WeakSet())=>{
       if(depth>8||v==null)return;
       if(typeof v==='string' && (v.trim().startsWith('{')||v.trim().startsWith('['))){try{keep(parse(v),depth+1)}catch{}return}
@@ -620,42 +632,46 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
         if(v.__v_isRef){keep(v.value,depth+1,seen);return}
         const c=v.c, p=v.p;
         if(typeof c==='string' || v.protocolId!=null || v.jsonData!=null || v.gameTableMap || v.roadPaper || v.tableId!=null || v.gameId!=null || v.roads || v.roadmaps || v.gameCode || v.tableCode){
-          q.push(JSON.parse(JSON.stringify(v))); if(q.length>2000)q.splice(0,q.length-1500);
+          emit(v);
         }
         if(v instanceof Map){for(const x of v.values())keep(x,depth+1,seen)}
         else if(Array.isArray(v)){ for(let i=0;i<Math.min(v.length,600);i++)keep(v[i],depth+1,seen); }
         else for(const k of Object.keys(v).slice(0,300))keep(v[k],depth+1,seen);
       }catch{}
     };
-    const parse=JSON.parse;
+    const parse=root.JSON.parse;
     JSON.parse=function(){ const v=parse.apply(this,arguments); try{keep(v)}catch{} return v };
-    const NativeWS=window.WebSocket;
-    class TapWS extends NativeWS {
+    const NativeWS=root.WebSocket;
+    if(NativeWS){class TapWS extends NativeWS {
       constructor(url,protocols){ if(arguments.length>1)super(url,protocols);else super(url);
-        this.addEventListener('message',e=>{try{if(typeof e.data==='string')keep(parse(e.data))}catch{}});
+        this.addEventListener('message',e=>{try{if(typeof e.data==='string')keep(parse(e.data));else if(e.data&&typeof e.data.arrayBuffer==='function')e.data.arrayBuffer().then(b=>emit({__binary:Array.from(new Uint8Array(b)).slice(0,200000)})).catch(()=>{})}catch{}});
       }
+      for(const k of ['CONNECTING','OPEN','CLOSING','CLOSED'])try{Object.defineProperty(TapWS,k,{value:NativeWS[k]})}catch{}
+      root.WebSocket=TapWS;
     }
-    for(const k of ['CONNECTING','OPEN','CLOSING','CLOSED'])try{Object.defineProperty(TapWS,k,{value:NativeWS[k]})}catch{}
-    window.WebSocket=TapWS;
     const scan=()=>{
       try{
+        if(typeof document==='undefined')return;
         for(const el of document.querySelectorAll('*')){
           const c=el.__vueParentComponent||el.__vue__;
           if(c){keep(c.setupState);keep(c.data);keep(c.ctx);keep(c.proxy&&c.proxy.$data);keep(c.proxy&&c.proxy.$store&&c.proxy.$store.state)}
         }
       }catch{}
     };
-    setInterval(scan,1000);
-    window.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep,scan};
+    if(typeof document!=='undefined')setInterval(scan,1000);
+    root.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep,scan};
   })();`;
   const instrumentSession=async(sessionId:string)=>{
     if(!sessionId||instrumentedSessions.has(sessionId))return;
     instrumentedSessions.add(sessionId); vendorSessions.add(sessionId);
     await cdp.send('Network.enable',{},sessionId).catch(()=>{});
     await cdp.send('Runtime.enable',{},sessionId).catch(()=>{});
+    await cdp.send('Runtime.addBinding',{name:'__mtVendorPush'},sessionId).catch(()=>{});
     await cdp.send('Page.enable',{},sessionId).catch(()=>{});
+    await cdp.send('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:false,flatten:true},sessionId).catch(()=>{});
     await cdp.send('Page.addScriptToEvaluateOnNewDocument',{source},sessionId).catch(()=>{});
     await cdp.send('Runtime.evaluate',{expression:source},sessionId,8000).catch(()=>{});
+    hooks.onLog(`監聽目標已安裝｜session=${sessionId.slice(0,8)}`);
   };
   // AB may open its socket in a worker and DB commonly keeps its decoded Vue
   // state in an out-of-process frame. Instrument and drain every attached CDP
@@ -663,14 +679,54 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   cdp.onEvent((message) => {
     if (stopped) return;
     if(message.method==='Target.attachedToTarget'){
+      counters.targets++;
+      const info=message.params?.targetInfo||{};
+      hooks.onLog(`發現目標｜type=${safeText(info.type,30)}｜url=${redactUrl(String(info.url||'')).slice(0,220)}`);
       void instrumentSession(String(message.params?.sessionId||''));
       return;
     }
-    if (!vendorSessions.has(String(message.sessionId||''))) return;
-    if (message.method !== 'Network.webSocketFrameReceived') return;
-    const response = message.params?.response || {};
-    if (Number(response.opcode) !== 1 || typeof response.payloadData !== 'string') return;
-    try { hooks.onObject(JSON.parse(response.payloadData)); } catch {}
+    const sessionId=String(message.sessionId||'');
+    if (!vendorSessions.has(sessionId)) return;
+    if(message.method==='Runtime.executionContextCreated'){
+      counters.contexts++;
+      const contextId=message.params?.context?.id;
+      if(contextId!=null)void cdp.send('Runtime.evaluate',{expression:source,contextId},sessionId,8000).catch(()=>{});
+      return;
+    }
+    if(message.method==='Runtime.bindingCalled'&&message.params?.name==='__mtVendorPush'){
+      counters.objects++;
+      try{hooks.onObject(JSON.parse(String(message.params?.payload||'')))}catch{}
+      return;
+    }
+    if(message.method==='Network.webSocketCreated'){
+      counters.ws++;
+      hooks.onLog(`偵測即時 WebSocket｜${redactUrl(String(message.params?.url||'')).slice(0,260)}`);
+      return;
+    }
+    if(message.method==='Network.webSocketFrameReceived'){
+      counters.frames++;
+      const response=message.params?.response||{};
+      if(Number(response.opcode)!==1){counters.binary++;return}
+      if(typeof response.payloadData!=='string')return;
+      try{counters.json++;hooks.onObject(JSON.parse(response.payloadData))}catch{}
+      return;
+    }
+    if(message.method==='Network.responseReceived'){
+      const p=message.params||{},type=String(p.type||''),mime=String(p.response?.mimeType||'');
+      if((type==='XHR'||type==='Fetch')&&/json|text/i.test(mime))responseRequests.set(`${sessionId}:${p.requestId}`,{requestId:String(p.requestId),mime});
+      return;
+    }
+    if(message.method==='Network.loadingFinished'){
+      const key=`${sessionId}:${message.params?.requestId}`,meta=responseRequests.get(key);
+      if(!meta)return;responseRequests.delete(key);
+      void cdp.send('Network.getResponseBody',{requestId:meta.requestId},sessionId,5000).then(body=>{
+        let value:any=String(body?.body||'');
+        if(body?.base64Encoded)value=Buffer.from(value,'base64').toString('utf8');
+        try{value=JSON.parse(value)}catch{return}
+        counters.responses++;hooks.onObject(value);
+      }).catch(()=>{});
+      return;
+    }
   });
   await instrumentSession(pageSessionId);
   await cdp.send('Page.navigate', { url: hooks.gameUrl }, pageSessionId, 15000);
@@ -688,5 +744,7 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     finally{busy=false}
   },120);
   poll.unref?.();
+  diagnostics=setInterval(()=>hooks.onLog(`擷取狀態｜targets=${counters.targets}｜contexts=${counters.contexts}｜ws=${counters.ws}｜frames=${counters.frames}｜binary=${counters.binary}｜json=${counters.json}｜xhr=${counters.responses}｜objects=${counters.objects}`),5000);
+  diagnostics.unref?.();
   return { stop };
 }

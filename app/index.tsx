@@ -1255,6 +1255,7 @@ async function getGameLoginUrlFromPlatform(
   platform: "TZ" | "OFA",
   token: string,
   provider: "MTLI" | "DGLI" | "AB01" | "YABOZR",
+  device: "Desktop" | "Mobile" = "Desktop",
 ) {
   if (Platform.OS !== "web")
     throw new Error("自動取得平台 Token 目前僅支援網站版");
@@ -1276,7 +1277,7 @@ async function getGameLoginUrlFromPlatform(
         game_return_url: base,
         game_kind: "",
         game_type: "",
-        game_device: "Desktop",
+        game_device: device,
       }),
       signal: controller.signal,
     });
@@ -1389,11 +1390,13 @@ async function getVendorLoginUrlFromPlatform(
   platform: "TZ" | "OFA",
   token: string,
   kind: VendorKind,
+  device: "Desktop" | "Mobile" = "Desktop",
 ) {
   return getGameLoginUrlFromPlatform(
     platform,
     token,
     kind === "AB" ? "AB01" : "YABOZR",
+    device,
   );
 }
 
@@ -2673,13 +2676,9 @@ export default function HomeScreen() {
         ? dgTables
         : dgPlaceholderTables
       : activePlatform === "AB"
-        ? vendorTables.AB.length
-          ? vendorTables.AB
-          : abPlaceholderTables
+        ? vendorTables.AB
         : activePlatform === "DB"
-          ? vendorTables.DB.length
-            ? vendorTables.DB
-            : dbPlaceholderTables
+          ? vendorTables.DB
           : mtSnapshotReady
             ? mtTables
             : initialTables;
@@ -5055,14 +5054,16 @@ export default function HomeScreen() {
         setGameViewUrl(proxyUrl || url);
       } else {
         const kind = activePlatform as VendorKind;
-        const url =
-          vendorUrls[kind] ||
-          (await getVendorLoginUrlFromPlatform(
-            loginPlatform,
-            platformToken,
-            kind,
-          ));
-        setVendorUrls((v) => ({ ...v, [kind]: url }));
+        // The dashboard relay owns its background authorization. Entering the
+        // real vendor lobby gets a separate foreground authorization so a
+        // mobile browser receives the vendor's native mobile lobby instead of
+        // reusing the background Chromium desktop URL.
+        const url = await getVendorLoginUrlFromPlatform(
+          loginPlatform,
+          platformToken,
+          kind,
+          desktop ? "Desktop" : "Mobile",
+        );
         setGameViewPlatform(kind);
         setGameViewUrl(url);
       }
@@ -6438,6 +6439,15 @@ export default function HomeScreen() {
               !desktop && activePlatform === "DB" && s.cardsGridDbMobile,
             ]}
           >
+            {tables.length === 0 && (activePlatform === "AB" || activePlatform === "DB") ? (
+              <View style={s.vendorEmptyState}>
+                <MaterialIcons name="sync" size={22} color="#58B8ED" />
+                <Text style={s.vendorEmptyTitle}>
+                  {vendorStatus[activePlatform as VendorKind] === "error" ? "尚未取得真實桌台" : "正在同步真實桌台"}
+                </Text>
+                <Text style={s.vendorEmptyText}>{vendorMessage[activePlatform as VendorKind]}</Text>
+              </View>
+            ) : null}
             {tables.map((t) => (
               <View
                 key={t.apiId}
@@ -7190,10 +7200,32 @@ const s = StyleSheet.create({
   cardsGridDesktopCentered: { maxWidth: 1280 },
   cardWrap: { width: "100%" },
   cardWrapDesktop: { width: "calc(50% - 5px)" as any, maxWidth: 635 },
-  cardWrapVendorDesktop: { width: "calc(33.333% - 7px)" as any },
-  cardWrapDbMobile: { width: "calc(50% - 3px)" as any },
-  vendorCardScaleDesktop: { width: "150%", zoom: 2 / 3 } as any,
-  dbCardScaleMobile: { width: "200%", zoom: 0.5 } as any,
+  cardWrapVendorDesktop: { width: "calc(33.333% - 7px)" as any, height: 153, overflow: "hidden" },
+  cardWrapDbMobile: { width: "calc(50% - 3px)" as any, height: 104, overflow: "hidden" },
+  vendorCardScaleDesktop: {
+    width: "150%",
+    transform: [{ scale: 2 / 3 }],
+    transformOrigin: "top left",
+  } as any,
+  dbCardScaleMobile: {
+    width: "200%",
+    transform: [{ scale: 0.5 }],
+    transformOrigin: "top left",
+  } as any,
+  vendorEmptyState: {
+    width: "100%",
+    minHeight: 150,
+    borderWidth: 1,
+    borderColor: "#304F65",
+    borderRadius: 8,
+    backgroundColor: "#0B1925",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+    gap: 6,
+  },
+  vendorEmptyTitle: { color: "#EAF8FF", fontSize: 14, fontWeight: "900" },
+  vendorEmptyText: { color: "#91A7B8", fontSize: 10, textAlign: "center" },
   tableCard: {
     backgroundColor: "#08111A",
     borderWidth: 1,
