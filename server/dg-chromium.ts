@@ -31,6 +31,7 @@ export type VendorBrowserTransport = { stop: () => void };
 type SharedVendorChrome = { chrome: LaunchedChrome; refs: number };
 const sharedVendorChromes = new Map<string, SharedVendorChrome>();
 const sharedVendorChromeStarts = new Map<string, Promise<SharedVendorChrome>>();
+const sharedVendorRootTargets = new Set<string>();
 
 type CdpMessage = { id?: number; method?: string; params?: any; result?: any; error?: any; sessionId?: string };
 type RequestMeta = { url: string; type: string; method: string };
@@ -634,6 +635,7 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   const cdp = new CdpClient(launched.wsUrl);
   await cdp.ready();
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+  sharedVendorRootTargets.add(String(targetId));
   const attached = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   const pageSessionId = String(attached.sessionId || '');
   if (!pageSessionId) throw new Error(`${hooks.label} Chromium target attach failed`);
@@ -643,12 +645,15 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   const targetSessions = new Map<string,string>([[String(targetId),pageSessionId]]);
   const relatedTargets = new Set<string>([String(targetId)]);
   const executionContexts = new Map<string,Set<number>>();
+  const vendorRequests = new Map<string,{url:string;type:string}>();
+  const loggedWsHosts = new Set<string>();
   const stop = () => {
     if (stopped) return; stopped = true;
     if (poll) clearInterval(poll);
     if (targetPoll) clearInterval(targetPoll);
     void (async () => {
       try { await cdp.send('Target.closeTarget', { targetId }, undefined, 3000); } catch {}
+      sharedVendorRootTargets.delete(String(targetId));
       try { cdp.close(); } catch {}
       shared.release();
     })();
@@ -677,6 +682,35 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     }
     if(message.method==='Runtime.executionContextsCleared'){
       executionContexts.delete(message.sessionId);return;
+    }
+    if(message.method==='Network.requestWillBeSent'){
+      const p=message.params||{},id=String(p.requestId||'');
+      if(id)vendorRequests.set(`${message.sessionId}:${id}`,{url:String(p.request?.url||''),type:String(p.type||'')});
+      return;
+    }
+    if(message.method==='Network.webSocketCreated'){
+      try{
+        const u=new URL(String(message.params?.url||'')),key=`${u.host}${u.pathname}`;
+        if(key&&!loggedWsHosts.has(key)){loggedWsHosts.add(key);hooks.onLog(`${hooks.label} 偵測到即時 WebSocket｜${key}`)}
+      }catch{}
+      return;
+    }
+    if(message.method==='Network.responseReceived'){
+      const p=message.params||{},id=String(p.requestId||''),key=`${message.sessionId}:${id}`;
+      const meta=vendorRequests.get(key),mime=String(p.response?.mimeType||'');
+      if(meta)vendorRequests.set(key,{...meta,type:['XHR','Fetch'].includes(meta.type)&&/json/i.test(mime)?'JSON':''});
+      return;
+    }
+    if(message.method==='Network.loadingFinished'){
+      const id=String(message.params?.requestId||''),key=`${message.sessionId}:${id}`,meta=vendorRequests.get(key);
+      vendorRequests.delete(key);
+      if(meta?.type==='JSON')void cdp.send('Network.getResponseBody',{requestId:id},message.sessionId,5000).then(body=>{
+        try{hooks.onObject(JSON.parse(String(body?.body||'')))}catch{}
+      }).catch(()=>{});
+      return;
+    }
+    if(message.method==='Network.loadingFailed'){
+      vendorRequests.delete(`${message.sessionId}:${String(message.params?.requestId||'')}`);return;
     }
     if (message.method !== 'Network.webSocketFrameReceived') return;
     const response = message.params?.response || {};
@@ -767,9 +801,11 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
       while(changed){
         changed=false;
         for(const info of infos){
-          const id=String(info?.targetId||''),opener=String(info?.openerId||''),type=String(info?.type||'');
-          if(!id||relatedTargets.has(id)||!opener||!relatedTargets.has(opener))continue;
+          const id=String(info?.targetId||''),type=String(info?.type||'');
+          if(!id||relatedTargets.has(id)||sharedVendorRootTargets.has(id))continue;
           if(!['page','iframe','webview','worker','shared_worker'].includes(type))continue;
+          // OOPIF/worker targets may not expose openerId. This Chromium is
+          // dedicated to AB/DB, so every non-root execution target is relevant.
           relatedTargets.add(id);changed=true;
           try{
             const a=await cdp.send('Target.attachToTarget',{targetId:id,flatten:true},undefined,5000);
