@@ -28,6 +28,10 @@ export type VendorBrowserHooks = {
 
 export type VendorBrowserTransport = { stop: () => void };
 
+type SharedVendorChrome = { chrome: LaunchedChrome; refs: number };
+const sharedVendorChromes = new Map<string, SharedVendorChrome>();
+const sharedVendorChromeStarts = new Map<string, Promise<SharedVendorChrome>>();
+
 type CdpMessage = { id?: number; method?: string; params?: any; result?: any; error?: any; sessionId?: string };
 type RequestMeta = { url: string; type: string; method: string };
 
@@ -255,6 +259,52 @@ async function takeWarmOrLaunchChrome(executable: string, sessionId: string, onL
     return chrome;
   }
   return launchChrome(executable, sessionId, onLog);
+}
+
+async function acquireVendorChrome(executable: string, rawSessionId: string, onLog: (message: string) => void) {
+  // AB and DB use the same authenticated application session. Keep them in
+  // separate tabs of one Chromium instead of spawning two heavy processes on
+  // Render. The relay key carries a trailing :AB / :DB; remove only that tag.
+  const key = rawSessionId.replace(/:(?:AB|DB)$/i, "");
+  let shared = sharedVendorChromes.get(key);
+  if (!shared || !chromeAlive(shared.chrome)) {
+    let pending = sharedVendorChromeStarts.get(key);
+    if (!pending) {
+      pending = launchChrome(executable, `vendor-${key}`, message => onLog(`共用瀏覽器｜${message}`))
+        .then(chrome => {
+          const entry: SharedVendorChrome = { chrome, refs: 0 };
+          sharedVendorChromes.set(key, entry);
+          chrome.child.once('exit', () => {
+            if (sharedVendorChromes.get(key) === entry) sharedVendorChromes.delete(key);
+          });
+          return entry;
+        })
+        .finally(() => sharedVendorChromeStarts.delete(key));
+      sharedVendorChromeStarts.set(key, pending);
+    }
+    shared = await pending;
+  } else {
+    onLog(`共用既有 Chromium｜pid=${shared.chrome.child.pid}`);
+  }
+  shared.refs++;
+  let released = false;
+  return {
+    launched: shared.chrome,
+    release: () => {
+      if (released) return;
+      released = true;
+      const current = sharedVendorChromes.get(key);
+      if (!current) return;
+      current.refs = Math.max(0, current.refs - 1);
+      if (current.refs > 0) return;
+      sharedVendorChromes.delete(key);
+      try { current.chrome.child.kill('SIGTERM'); } catch {}
+      setTimeout(() => {
+        try { if (!current.chrome.child.killed) current.chrome.child.kill('SIGKILL'); } catch {}
+      }, 1200).unref?.();
+      try { fs.rmSync(current.chrome.profile, { recursive: true, force: true }); } catch {}
+    },
+  };
 }
 
 export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<DgChromiumTransport> {
@@ -579,7 +629,8 @@ export async function startDgChromiumTransport(hooks: DgChromiumHooks): Promise<
 export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Promise<VendorBrowserTransport> {
   const executable = findChromeExecutable();
   if (!executable) throw new Error('找不到 Chrome/Chromium；請確認 postinstall 已完成');
-  const launched = await launchChrome(executable, `${hooks.label.toLowerCase()}-${hooks.sessionId}`, hooks.onLog);
+  const shared = await acquireVendorChrome(executable, hooks.sessionId, hooks.onLog);
+  const launched = shared.launched;
   const cdp = new CdpClient(launched.wsUrl);
   await cdp.ready();
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
@@ -591,10 +642,11 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   const stop = () => {
     if (stopped) return; stopped = true;
     if (poll) clearInterval(poll);
-    try { cdp.close(); } catch {}
-    try { launched.child.kill('SIGTERM'); } catch {}
-    setTimeout(() => { try { if (!launched.child.killed) launched.child.kill('SIGKILL'); } catch {} }, 1200).unref?.();
-    try { fs.rmSync(launched.profile, { recursive: true, force: true }); } catch {}
+    void (async () => {
+      try { await cdp.send('Target.closeTarget', { targetId }, undefined, 3000); } catch {}
+      try { cdp.close(); } catch {}
+      shared.release();
+    })();
   };
   launched.child.once('exit', (code, signal) => {
     if (!stopped) hooks.onFailure?.(`${hooks.label} Chromium 意外結束 (code=${code}, signal=${signal})`);
@@ -636,9 +688,41 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
         this.addEventListener('message',e=>{try{if(typeof e.data==='string')keep(parse(e.data))}catch{}});
       }
     }
+    const clone=(v,depth=0,local=new WeakSet())=>{
+      if(v==null||typeof v==='string'||typeof v==='number'||typeof v==='boolean')return v;
+      if(typeof v!=='object'||depth>6||local.has(v))return undefined;
+      local.add(v);
+      if(Array.isArray(v))return v.slice(0,500).map(x=>clone(x,depth+1,local));
+      const out={};
+      for(const k of Object.keys(v).slice(0,180)){
+        if(k.startsWith('__')||/^(?:parent|root|appContext|vnode|subTree|effect|scope)$/i.test(k))continue;
+        try{const x=clone(v[k],depth+1,local);if(x!==undefined)out[k]=x}catch{}
+      }
+      return out;
+    };
+    const harvest=()=>{
+      const components=new Set();
+      try{
+        for(const el of Array.from(document.querySelectorAll('*')).slice(0,4000)){
+          let c=el.__vueParentComponent||el.__vue__;
+          for(let i=0;c&&i<8;i++,c=c.parent)components.add(c);
+        }
+        let added=0;
+        for(const c of components){
+          if(added>=80)break;
+          for(const state of [c.props,c.setupState,c.data,c.ctx]){
+            if(!state||typeof state!=='object')continue;
+            const keys=Object.keys(state);
+            if(!keys.some(k=>/(?:table|game|road|shoe|dealer|play|list|ting|data|item)/i.test(k)))continue;
+            try{const x=clone(state);if(x&&Object.keys(x).length){q.push(x);added++}}catch{}
+          }
+        }
+        if(q.length>2000)q.splice(0,q.length-1500);
+      }catch{}
+    };
     for(const k of ['CONNECTING','OPEN','CLOSING','CLOSED'])try{Object.defineProperty(TapWS,k,{value:NativeWS[k]})}catch{}
     window.WebSocket=TapWS;
-    window.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep};
+    window.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep,harvest};
   })();`;
   await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source }, pageSessionId);
   await cdp.send('Page.navigate', { url: hooks.gameUrl }, pageSessionId, 15000);
@@ -647,7 +731,7 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   poll=setInterval(async()=>{
     if(stopped||busy)return; busy=true;
     try{
-      const out=await cdp.send('Runtime.evaluate',{expression:`window.__MT_VENDOR_TAP__?window.__MT_VENDOR_TAP__.drain():[]`,returnByValue:true},pageSessionId,8000);
+      const out=await cdp.send('Runtime.evaluate',{expression:`window.__MT_VENDOR_TAP__?(${hooks.label === "DB" ? "window.__MT_VENDOR_TAP__.harvest()," : ""}window.__MT_VENDOR_TAP__.drain()):[]`,returnByValue:true},pageSessionId,8000);
       const values=out?.result?.value;
       if(Array.isArray(values))for(const value of values)hooks.onObject(value);
     }catch(e:any){ if(!stopped)hooks.onLog(`${hooks.label} 解碼資料讀取重試：${safeText(e?.message||e,160)}`); }
