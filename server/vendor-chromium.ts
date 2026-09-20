@@ -627,7 +627,13 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     const q=[];
     const emit=(v)=>{
       try{
-        const json=JSON.stringify(v); if(!json||json.length>3000000)return;
+        const json=JSON.stringify(v,(k,val)=>{
+          if(val instanceof Map) return Object.fromEntries([...val.entries()].slice(0,800));
+          if(val && typeof val==='object' && val.__v_isRef) return val.value;
+          if(typeof val==='bigint') return Number(val);
+          return val;
+        });
+        if(!json||json.length>3000000)return;
         if(typeof root.__mtVendorPush==='function')root.__mtVendorPush(json);
         else {q.push(JSON.parse(json));if(q.length>2000)q.splice(0,q.length-1500)}
       }catch{}
@@ -639,12 +645,16 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
       if(seen.has(v))return; seen.add(v);
       try{
         if(v.__v_isRef){keep(v.value,depth+1,seen);return}
-        if(typeof v.c==='string' || v.protocolId!=null || v.jsonData!=null || v.gameTableMap || v.roadPaper || v.tableId!=null || v.gameId!=null || v.roads || v.roadmaps || v.gameCode || v.tableCode || v.cmd || v.WW3 || v.beatPlateRoad){
+        const map=v.gameTableMap||v.tableMap||v.tablesMap;
+        if(map){
+          emit({gameTableMap: map instanceof Map ? Object.fromEntries(map) : map});
+        }
+        if(typeof v.c==='string' || v.protocolId!=null || v.jsonData!=null || v.gameTableMap || v.tableMap || v.roadPaper || v.tableId!=null || v.tableNo!=null || v.gameId!=null || v.roads || v.roadmaps || v.gameCode || v.tableCode || v.cmd || v.WW3 || v.beatPlateRoad || v.tableList || v.gameTableList){
           emit(v);
         }
         if(v instanceof Map){for(const x of v.values())keep(x,depth+1,seen)}
         else if(Array.isArray(v)){ for(let i=0;i<Math.min(v.length,600);i++)keep(v[i],depth+1,seen); }
-        else for(const k of Object.keys(v).slice(0,300))keep(v[k],depth+1,seen);
+        else for(const k of Object.keys(v).slice(0,400))keep(v[k],depth+1,seen);
       }catch{}
     };
     const parse=root.JSON.parse;
@@ -663,11 +673,27 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
         for(const el of document.querySelectorAll('*')){
           const c=el.__vueParentComponent||el.__vue__;
           if(c){keep(c.setupState);keep(c.data);keep(c.ctx);keep(c.proxy&&c.proxy.$data);keep(c.proxy&&c.proxy.$store&&c.proxy.$store.state)}
+          const app=el.__vue_app__;
+          if(app){
+            keep(app._context&&app._context.provides);
+            const pinia=app.config&&app.config.globalProperties&&app.config.globalProperties.$pinia;
+            if(pinia&&pinia.state)keep(pinia.state.value||pinia.state);
+          }
+        }
+      }catch{}
+    };
+    const snapshot=()=>{
+      try{
+        scan();
+        for(const el of document.querySelectorAll('*')){
+          const app=el.__vue_app__;
+          const pinia=app&&app.config&&app.config.globalProperties&&app.config.globalProperties.$pinia;
+          if(pinia&&pinia.state)keep(pinia.state.value||pinia.state);
         }
       }catch{}
     };
     if(typeof document!=='undefined')setInterval(scan,1000);
-    root.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep,scan};
+    root.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep,scan,snapshot};
   })();`;
   const probeSource = `(() => {
     try {
@@ -763,7 +789,7 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     if(stopped||busy)return; busy=true;
     try{
       for(const sessionId of Array.from(vendorSessions)){
-        const out=await cdp.send('Runtime.evaluate',{expression:`typeof window!=='undefined'&&window.__MT_VENDOR_TAP__?window.__MT_VENDOR_TAP__.drain():[]`,returnByValue:true},sessionId,4000).catch(()=>null);
+        const out=await cdp.send('Runtime.evaluate',{expression:`(()=>{try{if(window.__MT_VENDOR_TAP__&&window.__MT_VENDOR_TAP__.snapshot)window.__MT_VENDOR_TAP__.snapshot()}catch{}return typeof window!=='undefined'&&window.__MT_VENDOR_TAP__?window.__MT_VENDOR_TAP__.drain():[]})()`,returnByValue:true},sessionId,4000).catch(()=>null);
         const values=out?.result?.value;
         if(Array.isArray(values))for(const value of values)hooks.onObject(value);
       }

@@ -1,5 +1,5 @@
 import {describe,expect,it} from "vitest";
-import {abCategory,abPoker,abRank,abRoad,abRoadFromCards,dbCategory} from "../server/vendor-relay";
+import {abCategory,abPoker,abRank,abRoad,abRoadFromCards,dbCategory,dbResolveCategory} from "../server/vendor-relay";
 import {pickLaunchUrl} from "../server/vendor-launch";
 
 describe("歐博 HAR 協議",()=>{
@@ -23,10 +23,13 @@ describe("歐博 HAR 協議",()=>{
 });
 
 describe("DB 大廳分類",()=>{
-  it("分類文字穩定映射且預設一般",()=>{
-    expect(dbCategory("終極百家樂")).toBe("終極");
+  it("對齊畫面上的極速／經典／共享分類",()=>{
+    expect(dbCategory("終極百家樂")).toBe("極速");
     expect(dbCategory("包桌百家乐")).toBe("包桌");
-    expect(dbCategory("")).toBe("一般");
+    expect(dbCategory("")).toBe("");
+    expect(dbResolveCategory({gameTypeId:2002,tableId:"301"})).toBe("極速");
+    expect(dbResolveCategory({gameTypeName:"經典百家樂",tableId:"88"})).toBe("經典");
+    expect(dbResolveCategory({tableId:"9",roadPaper:{beatPlateRoad:"AAA="}})).toBe("經典");
   });
 });
 

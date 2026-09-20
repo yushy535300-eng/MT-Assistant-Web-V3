@@ -106,9 +106,27 @@ export function abRoadFromCards(raw:any):Road|null{
   if(bankerDraw&&banker.length<3)return null;
   return playerPoint===bankerPoint?"和":playerPoint>bankerPoint?"閒":"莊";
 }
-export function dbCategory(value:any){const s=String(value??"");if(/終極|ultimate/i.test(s))return"終極";if(/完美|perfect/i.test(s))return"完美";if(/共贏|cowin|co-win/i.test(s))return"共贏";if(/包桌|private/i.test(s))return"包桌";if(/電投|electronic/i.test(s))return"電投";return"一般"}
+export function dbCategory(value:any){
+  const s=String(value??"");
+  if(/極速|終極|speedy|ultimate|fast/i.test(s))return"極速";
+  if(/完美|perfect/i.test(s))return"完美";
+  if(/共贏|共享|cowin|co-win|share/i.test(s))return"共享";
+  if(/包桌|private/i.test(s))return"包桌";
+  if(/電投|electronic/i.test(s))return"電投";
+  if(/經典|classic|一般|baccarat|百家/i.test(s))return"經典";
+  return"";
+}
 const DB_BACCARAT_CATEGORIES:Record<number,string>={2002:"極速",2001:"經典",2003:"完美",2004:"共享",2005:"包桌",2038:"電投"};
 export function dbBaccaratCategory(gameTypeId:any){return DB_BACCARAT_CATEGORIES[n(gameTypeId)]||""}
+export function dbResolveCategory(value:any){
+  const id=value?.gameTypeId??value?.gameTypeID??value?.game_type_id??value?.gameType?.id??value?.gameType?.gameTypeId??value?.tableTypeId;
+  const fromId=dbBaccaratCategory(id);
+  if(fromId)return fromId;
+  const named=dbCategory(text(value?.gameTypeName,value?.gameType?.name,value?.gameName,value?.tableName,value?.name,value?.gameTypeId));
+  if(named)return named;
+  if(value?.roadPaper||value?.beatPlateRoad||value?.roadPaper?.beatPlateRoad)return"經典";
+  return"";
+}
 export function dbDecodeBeatPlate(encoded:any):Road[]{
   if(typeof encoded!=="string"||!encoded)return[];
   try{
@@ -231,17 +249,24 @@ class VendorRelay{
     }
   }
   private handleDb(root:any){
+    if(root?.__binary)return;
     const pnlCandidate=root?.totalWinLoss??root?.todayWinLoss??root?.netWinLoss??root?.data?.totalWinLoss??root?.data?.todayWinLoss??root?.data?.netWinLoss;
     if(pnlCandidate!==undefined&&Number.isFinite(Number(pnlCandidate))){this.pnl=Number(pnlCandidate);this.broadcast("pnl",this.pnl)}
     let changed=false;
     const save=(value:any,forcedId?:string)=>{
-      const id=text(forcedId,value?.tableId,value?.table_id);if(!id)return;
+      if(!value||typeof value!=="object")return;
+      const id=text(forcedId,value?.tableId,value?.table_id,value?.tableNo,value?.tableCode);
+      if(!id||id==="undefined")return;
       const previousRaw=this.dbRaw.get(id)||{};
-      const merged={...previousRaw,...value,tableOnline:{...(previousRaw.tableOnline||{}),...(value?.tableOnline||{})},roadPaper:{...(previousRaw.roadPaper||{}),...(value?.roadPaper||{})}};
+      const merged={...previousRaw,...value,tableOnline:{...(previousRaw.tableOnline||{}),...(value?.tableOnline||{})},roadPaper:{...(previousRaw.roadPaper||{}),...(value?.roadPaper||{})},gameType:{...(previousRaw.gameType||{}),...(value?.gameType||{})}};
       this.dbRaw.set(id,merged);
-      const category=dbBaccaratCategory(merged.gameTypeId);if(!category)return;
+      const category=dbResolveCategory(merged);
+      if(!category){
+        if(this.objectCount<=8)this.event(`DB 桌略過｜id=${id}｜gameTypeId=${text(merged.gameTypeId,merged.gameType?.id)}｜keys=${Object.keys(merged).slice(0,12)}`);
+        return;
+      }
       const old=this.map.get(id);
-      let rr=dbDecodeBeatPlate(merged.roadPaper?.beatPlateRoad);
+      let rr=dbDecodeBeatPlate(merged.roadPaper?.beatPlateRoad||merged.beatPlateRoad||merged.roadPaper?.beadPlateRoad);
       if(!rr.length&&Array.isArray(merged.results))rr=merged.results.map((x:any)=>{
         const z=String(x?.result??x?.winner??x?.code??x).toLowerCase();
         if(z.includes("bank")||z==="1"||z==="莊")return"莊";if(z.includes("play")||z==="0"||z==="閒")return"閒";if(z.includes("tie")||z==="2"||z==="和")return"和";return null;
@@ -252,7 +277,7 @@ class VendorRelay{
       const counted=count(rr);
       const serverTime=n(merged.serverTime),endTime=n(merged.countdownEndTime);
       const calculatedCountdown=endTime&&serverTime?Math.max(0,Math.ceil((endTime-serverTime)/1000)):0;
-      this.map.set(id,{id:`DB-${id}`,apiId:id,game:"百家樂",name:text(merged.dealerName,merged.dealer?.name,old?.name,"—"),players:text(merged.tableOnline?.onlineNumber,merged.onlineCount,old?.players,"—"),countdown:n(calculatedCountdown||merged.countDown||merged.countdown||old?.countdown),countdownUpdatedAt:Date.now(),roomId:id,tableBadge:id,shoe:text(merged.bootNo,merged.shoeId,old?.shoe,"—"),round:n(merged.roundNo??merged.roundId??old?.round),banker:summaryCount(3001,counted.莊),player:summaryCount(3002,counted.閒),tie:summaryCount(3003,counted.和),results:rr,trend:"",live:true,dealerPhoto:text(merged.dealerPic,merged.dealerPicTable,merged.phonePicTable,old?.dealerPhoto)||undefined,lastUpdated:Date.now(),category});
+      this.map.set(id,{id:`DB-${id}`,apiId:id,game:"百家樂",name:text(merged.dealerName,merged.dealer?.name,merged.tableName,old?.name,"—"),players:text(merged.tableOnline?.onlineNumber,merged.onlineCount,old?.players,"—"),countdown:n(calculatedCountdown||merged.countDown||merged.countdown||old?.countdown),countdownUpdatedAt:Date.now(),roomId:id,tableBadge:id,shoe:text(merged.bootNo,merged.shoeId,old?.shoe,"—"),round:n(merged.roundNo??merged.roundId??old?.round),banker:summaryCount(3001,counted.莊),player:summaryCount(3002,counted.閒),tie:summaryCount(3003,counted.和),results:rr,trend:"",live:true,dealerPhoto:text(merged.dealerPic,merged.dealerPicTable,merged.phonePicTable,old?.dealerPhoto)||undefined,lastUpdated:Date.now(),category});
       changed=true;
     };
     const visit=(value:any,depth=0)=>{
@@ -263,8 +288,15 @@ class VendorRelay{
       }
       if(Array.isArray(value)){for(const item of value.slice(0,3000))visit(item,depth+1);return}
       if(typeof value!=="object")return;
-      if(value.gameTableMap&&typeof value.gameTableMap==="object")for(const [id,table] of Object.entries(value.gameTableMap))save(table,id);
-      if(value.tableId!=null&&(value.gameTypeId!=null||this.dbRaw.has(String(value.tableId))))save(value);
+      const map=value.gameTableMap??value.tableMap??value.tablesMap;
+      if(map&&typeof map==="object"){
+        const entries=Array.isArray(map)?map.map((t:any,i:number)=>[text(t?.tableId,t?.id,i),t]):Object.entries(map);
+        for(const [id,table] of entries)save(table,String(id));
+      }
+      if(Array.isArray(value.tableList)||Array.isArray(value.tables)||Array.isArray(value.gameTableList)){
+        for(const table of (value.tableList||value.tables||value.gameTableList))save(table);
+      }
+      if(value.tableId!=null||value.table_id!=null||value.tableNo!=null)save(value);
       for(const child of Object.values(value).slice(0,500))visit(child,depth+1);
     };
     visit(root);if(changed)this.emit();

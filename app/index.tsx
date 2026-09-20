@@ -6376,7 +6376,7 @@ export default function HomeScreen() {
                       key={p}
                       onPress={() => {
                         setActivePlatform(p);
-                        setActiveCategory(p === "DB" ? "極速" : "一般");
+                        setActiveCategory(p === "DB" ? "所有" : "一般");
                       }}
                       style={[
                         s.platformTab,
