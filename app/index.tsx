@@ -5182,7 +5182,13 @@ export default function HomeScreen() {
         if (cancelled) return null;
         const forceRestart = vendorForceRestartRef.current[kind] === true;
         vendorForceRestartRef.current[kind] = false;
-        return connectVendorLive(kind, "", accessSessionId, {
+        // TZ 授權必須在瀏覽器打，Render 機房 IP 代打 AB01/YABOZR 會被擋。
+        const launchUrl = await getVendorLoginUrlFromPlatform(
+          loginPlatform,
+          platformToken,
+          kind,
+        );
+        return connectVendorLive(kind, launchUrl, accessSessionId, {
           onTables: (next: VendorTableData[]) => {
             if (cancelled) return;
             const merged = mergeVendorTables(

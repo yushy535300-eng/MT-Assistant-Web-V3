@@ -117,9 +117,11 @@ async function startServer() {
         return res.json({ok:true,reused:true,host:(()=>{try{return new URL(existing.gameUrl).hostname}catch{return ""}})()});
       }
       if(platform&&platformToken){
+        const fromClient=String(gameUrl||"");
         const saved=loadPersistedVendors().find((row)=>row.sessionId===sessionId&&row.kind===kind);
-        const candidate=String(existing?.gameUrl||saved?.gameUrl||gameUrl||"");
-        if(vendorLaunchIsReady(kind, candidate)) gameUrl=candidate;
+        const stored=String(existing?.gameUrl||saved?.gameUrl||"");
+        if(vendorLaunchIsReady(kind, fromClient)) gameUrl=fromClient;
+        else if(vendorLaunchIsReady(kind, stored)) gameUrl=stored;
         else gameUrl=await fetchVendorLaunchUrl({platform,platformToken,kind});
       }
       let u:URL;try{u=new URL(gameUrl)}catch{return res.status(400).json({ok:false,error:"invalid_game_url"})}

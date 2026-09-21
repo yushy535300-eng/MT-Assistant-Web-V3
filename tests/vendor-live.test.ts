@@ -87,6 +87,14 @@ describe("歐博 HAR 協議",()=>{
     expect(shouldIgnorePausedVendorStart(true,true,true)).toBe(false);
     expect(shouldIgnorePausedVendorStart(true,false,true)).toBe(false);
   });
+  it("歐博／DB 啟動優先用瀏覽器拿到的授權網址，避免 Render 代打 TZ 被擋",()=>{
+    const app=require("node:fs").readFileSync(require("node:path").resolve("app/index.tsx"),"utf8");
+    expect(app).toContain("getVendorLoginUrlFromPlatform");
+    expect(app).toContain("TZ 授權必須在瀏覽器打");
+    const api=require("node:fs").readFileSync(require("node:path").resolve("server/_core/index.ts"),"utf8");
+    expect(api).toContain("fromClient");
+    expect(api).toContain("vendorLaunchIsReady(kind, fromClient)");
+  });
   it("歐博回牌路要等遊戲頁關掉才重開 Chrome，避免 6076",()=>{
     const source=require("node:fs").readFileSync(require("node:path").resolve("server/vendor-relay.ts"),"utf8");
     expect(source).toContain("遊戲頁關閉後再重開背景歐博，避免 6076");
