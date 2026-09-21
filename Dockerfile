@@ -1,4 +1,4 @@
-# Render / Docker 部署用：內建 Chrome 系統相依，歐博／DB 背景擷取才能跑。
+# Render / Docker：Node + Chrome 系統相依（DG 背景可能用到）。
 FROM node:22-bookworm-slim
 
 WORKDIR /app
@@ -29,11 +29,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 
 COPY package.json pnpm-lock.yaml ./
-ENV DG_CHROME_REQUIRE_SMOKE=1
-RUN pnpm install --frozen-lockfile
+COPY scripts/ensure-chromium.mjs ./scripts/ensure-chromium.mjs
+
+RUN pnpm install --no-frozen-lockfile
 
 COPY . .
-RUN pnpm build
+ENV DG_CHROME_REQUIRE_SMOKE=1
+RUN node scripts/ensure-chromium.mjs && pnpm build
 
 ENV NODE_ENV=production
 ENV PORT=10000

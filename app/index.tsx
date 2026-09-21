@@ -44,16 +44,27 @@ import {
   buildAskRoad,
 } from "@/lib/road-render";
 import { connectDgLive, type DgTableData } from "@/lib/dg-live";
-import { collectConfirmedMtTableIds } from "@/lib/mt-table-membership";
-import { platformTodayPnl, type DgDailyPnl } from "@/lib/dg-report";
-import { mtTodayReportRange } from "@/lib/mt-report";
+import { connectSaLive, type SaTableData, type SaWinReportResult } from "@/lib/sa-live";
 import {
-  connectVendorLive,
-  type VendorKind,
-  type VendorTableData,
-} from "@/lib/vendor-live";
+  saWinReportTableMatches,
+  saWinReportToSettleBody,
+} from "@/lib/sa-report";
+import { collectConfirmedMtTableIds } from "@/lib/mt-table-membership";
+import { type DgDailyPnl } from "@/lib/dg-report";
+import { mtTodayReportRange } from "@/lib/mt-report";
+import { saTableLabel } from "@/lib/sa-table-labels";
+import {
+  applySaReportSettlement,
+  computeBaccaratBetPnl,
+  loadPlatformReport,
+  resetPlatformReport,
+  saResultMatchesPending,
+  selectPlatformTodayPnl,
+  type PlatformReportBucket,
+  type ReportPlatformKey,
+} from "@/lib/platform-report";
 
-type PlatformKey = "MT" | "DG" | "AB" | "DB";
+type PlatformKey = "MT" | "DG" | "SA" | "MV";
 
 /** Set iframe.src only when the URL actually changes. Rewriting the same src
  *  on every React render reloads DG (spinner / digital table / live video flash). */
@@ -102,6 +113,9 @@ type TableData = {
   results: Result[];
   trend: string;
   live?: boolean;
+  /** SA relay 「開桌」 (TableMode Open/Pause or live round). */
+  open?: boolean;
+  rest?: number;
   dealerPhoto?: string;
   streamUrl?: string;
   lastUpdated?: number;
@@ -132,6 +146,8 @@ type PendingBet = {
   side: BetSide;
   amount: number;
   resultKey?: string;
+  /** Which 今日輸贏 bucket owns this pending settle. */
+  reportPlatform?: ReportPlatformKey;
 } | null;
 
 const mtLoadingTableIds = [
@@ -259,6 +275,27 @@ const dgPlaceholderTables: TableData[] = dgPlaceholderDefs.map(
     live: false,
   }),
 );
+
+// SA desks come only from relay 「開桌」(Init Rest Open/Pause, GameStart,
+// GameRest, or live roads). Never seed from sa-table-labels.json catalog.
+
+/**
+ * Client safety net — open desks only.
+ * open===true keeps empty road shells (DG pattern). Never require results.
+ */
+function isSaOpenTable(t: {
+  results?: unknown[];
+  round?: number;
+  live?: boolean;
+  countdown?: number;
+  open?: boolean;
+}): boolean {
+  if (t.open === true) return true;
+  if ((t.results?.length || 0) > 0) return true;
+  if ((t.round || 0) > 0) return true;
+  if (t.live && (t.countdown || 0) > 0) return true;
+  return false;
+}
 
 const lineContactUrl = "https://line.me/ti/p/k2pkYGXGL3";
 const threadsUrl = "https://www.threads.com/@uss0857?igshid=NTc4MTIwNjQ2YQ==";
@@ -661,8 +698,8 @@ function RoadGrid({
   platform?: PlatformKey;
 }) {
   const dg = platform === "DG";
-  const ab = platform === "AB";
-  const db = platform === "DB";
+  const ab = platform === "SA";
+  const db = platform === "MV";
   const roadCellTheme = dg ? s.roadCellDg : ab ? s.roadCellAb : db ? s.roadCellDb : null;
   const beads = useMemo(
     () => buildSlidingBeadGrid(table.results),
@@ -840,12 +877,19 @@ function CountdownBadge({
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [tick, count]);
-  const elapsed = tick && updatedAt ? Math.floor((now - updatedAt) / 1000) : 0;
+  // Only show real betting countdown (1–60). Hide garbage / 發牌中 zeros.
+  const raw = count == null ? null : Number(count);
+  const sane =
+    raw != null && Number.isFinite(raw) && raw >= 1 && raw <= 60 ? raw : null;
+  const elapsed = tick && updatedAt && sane != null
+    ? Math.floor((now - updatedAt) / 1000)
+    : 0;
+  const shown = sane == null ? null : Math.max(0, sane - elapsed);
   return (
     <View style={s.countWrap}>
       <MaterialIcons name="schedule" size={11} color="#DDE8F0" />
       <Text style={s.countdown}>
-        {count == null ? "—" : Math.max(0, count - elapsed)}
+        {shown == null || shown <= 0 ? "—" : shown}
       </Text>
     </View>
   );
@@ -956,7 +1000,28 @@ function DealerLiveVideo({
   return (
     <View style={s.liveMediaFill}>
       {table.dealerPhoto ? (
-        <Image source={{ uri: table.dealerPhoto }} style={s.photoImage} />
+        Platform.OS === "web" ? (
+          // SA room covers are landscape (dealer centered). Cover + center
+          // crop into the tall photo slot = 裁荷官 (sides/table cut away).
+          createElement("img" as any, {
+            src: table.dealerPhoto,
+            alt: "",
+            draggable: false,
+            style: {
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              objectPosition: "center 32%",
+              transform: "scale(1.55)",
+              transformOrigin: "center 28%",
+              background: "#0a1018",
+            },
+          })
+        ) : (
+          <Image source={{ uri: table.dealerPhoto }} style={s.photoImage} />
+        )
       ) : (
         <Text style={s.crown}>♛</Text>
       )}
@@ -1001,8 +1066,8 @@ function TableCard({
   scaled?: boolean;
 }) {
   const dg = platform === "DG";
-  const ab = platform === "AB";
-  const db = platform === "DB";
+  const ab = platform === "SA";
+  const db = platform === "MV";
   const tableId = table.apiId ?? `BAG${table.id}`;
   const [videoEnabled, setVideoEnabled] = useState(() => {
     if (Platform.OS !== "web" || typeof window === "undefined") return false;
@@ -1035,14 +1100,18 @@ function TableCard({
     >
       <View style={[s.tableHead, dg && s.tableHeadDg, ab && s.tableHeadAb, db && s.tableHeadDb]}>
         <View style={s.row}>
-          <Text style={s.game}>百家樂</Text>
-          <Text style={[s.tableId, dg && s.tableIdDg, ab && s.tableIdAb, db && s.tableIdDb]}>{table.id}</Text>
+          <Text style={s.game}>{table.game || "百家樂"}</Text>
+          <Text style={[s.tableId, dg && s.tableIdDg, ab && s.tableIdAb, db && s.tableIdDb]}>
+            {ab
+              ? table.tableBadge || table.name || table.id || table.roomId
+              : table.id}
+          </Text>
           <MaterialIcons name="person" size={12} color="#fff" />
           <Text style={s.headText}>{table.players}</Text>
           <CountdownBadge
             count={table.countdown}
             updatedAt={table.countdownUpdatedAt}
-            tick={platform === "MT" || platform === "DG"}
+            tick={platform === "MT" || platform === "DG" || platform === "SA"}
           />
         </View>
         <View style={s.row}>
@@ -1110,9 +1179,25 @@ function TableCard({
             />
           </View>
           <Text style={[s.dealerName, dg && s.dealerNameDg, ab && s.dealerNameAb, db && s.dealerNameDb]}>
-            {table.name || "—"}
+            {ab
+              ? table.name || table.tableBadge || table.id || "—"
+              : table.name || "—"}
           </Text>
-          <Text style={s.meta}>房間 {table.roomId || table.id}</Text>
+          <Text style={s.meta}>
+            {ab
+              ? (() => {
+                  const label =
+                    table.tableBadge || table.name || table.id || table.roomId || "—";
+                  const dealer =
+                    table.trend && table.trend !== label
+                      ? table.trend
+                      : table.players && table.players !== "—"
+                        ? table.players
+                        : "";
+                  return dealer ? `${label} · 荷官 ${dealer}` : String(label);
+                })()
+              : `房間 ${table.roomId || table.id}`}
+          </Text>
           <View style={s.metaVideoRow}>
             <Text numberOfLines={1} style={[s.meta, s.metaVideoText]}>
               Shoe {table.shoe} · 第 {table.round} 把
@@ -1159,8 +1244,8 @@ function MatrixMark({
           style={[
             s.matrixMarkText,
             brand === "DG" && s.matrixMarkTextDg,
-            brand === "AB" && s.matrixMarkTextAb,
-            brand === "DB" && s.matrixMarkTextDb,
+            brand === "SA" && s.matrixMarkTextAb,
+            brand === "MV" && s.matrixMarkTextDb,
             { fontSize: Math.max(10, size * 0.34) },
           ]}
         >
@@ -1170,8 +1255,8 @@ function MatrixMark({
           style={[
             s.matrixMarkAccent,
             brand === "DG" && s.matrixMarkAccentDg,
-            brand === "AB" && s.matrixMarkAccentAb,
-            brand === "DB" && s.matrixMarkAccentDb,
+            brand === "SA" && s.matrixMarkAccentAb,
+            brand === "MV" && s.matrixMarkAccentDb,
           ]}
         />
       </View>
@@ -1193,6 +1278,94 @@ function ThreadsSignature({ mobile = false }: { mobile?: boolean }) {
 }
 
 const MemoTableCard = memo(TableCard);
+
+function LiveStreamCard({
+  table,
+  desktop,
+  onEnter,
+  busy,
+}: {
+  table: TableData;
+  desktop: boolean;
+  onEnter: (table: TableData) => void;
+  busy?: boolean;
+}) {
+  const isLive = !!table.live;
+  const title = String(table.trend || table.roomId || "").trim();
+  return (
+    <Pressable
+      disabled={busy || !isLive}
+      onPress={() => onEnter(table)}
+      style={[
+        s.liveCard,
+        desktop && s.liveCardDesktop,
+        (busy || !isLive) && { opacity: isLive ? 0.55 : 0.78 },
+      ]}
+    >
+      <View style={s.liveCardMedia}>
+        {table.dealerPhoto ? (
+          Platform.OS === "web" ? (
+            // RN Web Image paints via background-image and ignores objectPosition;
+            // use a real <img> so cover + top-center keeps faces in frame.
+            createElement("img" as any, {
+              src: table.dealerPhoto,
+              alt: "",
+              draggable: false,
+              style: {
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                objectPosition: "center top",
+                opacity: isLive ? 1 : 0.55,
+              },
+            })
+          ) : (
+            <Image
+              source={{ uri: table.dealerPhoto }}
+              resizeMode="cover"
+              style={[s.liveCardPhoto, !isLive && s.liveCardPhotoOff]}
+            />
+          )
+        ) : (
+          <>
+            <View style={s.liveCardGlow} />
+            <MaterialIcons
+              name="videocam"
+              size={desktop ? 34 : 28}
+              color="#7EE0D2"
+            />
+          </>
+        )}
+        <View style={[s.liveBadge, !isLive && s.liveBadgeOff]}>
+          {isLive ? <View style={s.liveBadgeDot} /> : null}
+          <Text style={s.liveBadgeText}>{isLive ? "LIVE" : "休息中"}</Text>
+        </View>
+      </View>
+      <View style={s.liveCardBody}>
+        <Text numberOfLines={1} style={s.liveCardTitle}>
+          {table.name}
+        </Text>
+        <Text numberOfLines={2} style={s.liveCardMeta}>
+          {title || (isLive ? "直播中 · 點擊進入觀看" : "目前未開播")}
+        </Text>
+        <View style={[s.liveCardCta, !isLive && s.liveCardCtaOff]}>
+          <MaterialIcons
+            name={isLive ? "play-circle-filled" : "schedule"}
+            size={14}
+            color={isLive ? "#E8FFF9" : "#9BB8B0"}
+          />
+          <Text style={[s.liveCardCtaText, !isLive && s.liveCardCtaTextOff]}>
+            {isLive ? "進入直播" : "尚未開播"}
+          </Text>
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+const MemoLiveStreamCard = memo(LiveStreamCard);
 
 const FloatingOrb = memo(function FloatingOrb({
   position,
@@ -1295,25 +1468,114 @@ async function loginToPlatformFromBrowser(
   }
 }
 
+function platformApiBase(platform: "TZ" | "OFA") {
+  return platform === "OFA" ? "https://www.ofa1188.net" : "https://www.tz6868.cc";
+}
+
+function providerDisplayName(
+  provider: string,
+  platformKey?: PlatformKey,
+) {
+  const code = String(provider || "").trim().toUpperCase();
+  if (platformKey === "SA") return "SA";
+  if (platformKey === "MV") return "美女直播";
+  if (code === "DGLI") return "DG";
+  if (code === "MTLI") return "MT";
+  return code || "平台";
+}
+
+/** MT/DG: token. SA: username+token (or token). 美女直播: userid+time+sign (LIVE77) or uid+userid. */
+function gameLoginCredentialOk(
+  url: URL,
+  platformKey?: PlatformKey,
+) {
+  const q = url.searchParams;
+  const token = !!q.get("token");
+  const sessionId = !!q.get("sessionId");
+  const params = !!q.get("params");
+  const username = !!q.get("username");
+  const uid = !!q.get("uid");
+  const userid = !!q.get("userid");
+  const sign = !!q.get("sign");
+  const time = !!q.get("time");
+  const host = url.hostname.toLowerCase();
+
+  if (platformKey === "MV" || /score777/i.test(host))
+    // TZ LIVE77 → /live/home/registerAndLogin?userid=&time=&sign=
+    return (userid && sign) || (userid && time) || (uid && userid) || userid || uid;
+  if (platformKey === "SA" || /labplatform|sagaming|saplay/i.test(host))
+    return (username && token) || token || sessionId || username;
+  if (platformKey === "MT" || platformKey === "DG") return token;
+  return token || sessionId || params || (uid && userid) || (username && token);
+}
+
+function pickGameLoginUrl(
+  data: any,
+  platformKey?: PlatformKey,
+) {
+  const rawCandidates: any[] = [
+    data?.data?.game_url,
+    data?.data?.url,
+    data?.raw?.url,
+    data?.raw?.game_url,
+    typeof data?.raw === "string" ? data.raw : undefined,
+  ];
+  const cleaned = rawCandidates
+    .filter((v) => typeof v === "string" && v.trim())
+    .map((v) =>
+      String(v)
+        .trim()
+        .replace(/\\\//g, "/")
+        .replace(/^['"]|['"]$/g, ""),
+    );
+  for (const candidate of cleaned) {
+    try {
+      const u = new URL(candidate);
+      if (u.protocol === "https:" && gameLoginCredentialOk(u, platformKey))
+        return u.toString();
+    } catch {}
+  }
+  // Relative path + absolute origin from another field.
+  const absolute = cleaned.find((v) => {
+    try {
+      return new URL(v).protocol === "https:";
+    } catch {
+      return false;
+    }
+  });
+  const relative = cleaned.find((v) =>
+    /[?&](token|sessionId|params|uid|userid|username)=/i.test(v),
+  );
+  if (absolute && relative) {
+    try {
+      const u = new URL(relative, new URL(absolute).origin);
+      if (gameLoginCredentialOk(u, platformKey)) return u.toString();
+    } catch {}
+  }
+  return "";
+}
+
 async function getGameLoginUrlFromPlatform(
   platform: "TZ" | "OFA",
   token: string,
-  provider: "MTLI" | "DGLI" | "AB01" | "YABOZR",
+  provider: string,
   device: "Desktop" | "Mobile" = "Desktop",
+  platformKey?: PlatformKey,
 ) {
   if (Platform.OS !== "web")
     throw new Error("自動取得平台 Token 目前僅支援網站版");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
-  const base =
-    platform === "OFA" ? "https://www.ofa1188.net" : "https://www.tz6868.cc";
+  const base = platformApiBase(platform);
+  const code = String(provider || "").trim();
+  if (!code) throw new Error("缺少遊戲代碼");
   const request = async (withAuth: boolean) => {
     const headers: any = {
       "Content-Type": "application/json",
       Accept: "application/json, text/plain, */*",
     };
     if (withAuth && token) headers.Authorization = `Bearer ${token}`;
-    return fetch(`${base}/api/v2/game/${provider}/login`, {
+    return fetch(`${base}/api/v2/game/${encodeURIComponent(code)}/login`, {
       method: "POST",
       mode: "cors",
       headers,
@@ -1328,6 +1590,8 @@ async function getGameLoginUrlFromPlatform(
     });
   };
   try {
+    // Keep the original probe-then-auth order so existing TZ/OFA CORS behavior
+    // stays the same. Only retry with Bearer when the first response is 401/403.
     let response = await request(false);
     let data: any = null;
     try {
@@ -1347,71 +1611,13 @@ async function getGameLoginUrlFromPlatform(
         data = await response.json();
       } catch {}
     }
-    const providerName =
-      provider === "DGLI"
-        ? "DG"
-        : provider === "AB01"
-          ? "歐博"
-          : provider === "YABOZR"
-            ? "DB"
-            : "MT";
+    const providerName = providerDisplayName(code, platformKey);
     if (!response.ok || Number(data?.code) !== 200)
       throw new Error(
         String(data?.message ?? data?.msg ?? `取得 ${providerName} 授權失敗`),
       );
 
-    // Different providers use different one-time credentials: MT/DG use
-    // `token`, AB uses `sessionId`, and DB uses an encrypted `params` payload.
-    // Requiring `token` for every provider prevented AB/DB from ever starting.
-    const rawCandidates: any[] = [
-      data?.data?.game_url,
-      data?.data?.url,
-      data?.raw?.url,
-      data?.raw?.game_url,
-      typeof data?.raw === "string" ? data.raw : undefined,
-    ];
-    const cleaned = rawCandidates
-      .filter((v) => typeof v === "string" && v.trim())
-      .map((v) =>
-        String(v)
-          .trim()
-          .replace(/\\\//g, "/")
-          .replace(/^['"]|['"]$/g, ""),
-      );
-    let gameUrl = "";
-    for (const candidate of cleaned) {
-      try {
-        const u = new URL(candidate);
-        const credentialOk =
-          provider === "AB01"
-            ? !!u.searchParams.get("sessionId")
-            : provider === "YABOZR"
-              ? !!u.searchParams.get("params")
-              : !!u.searchParams.get("token");
-        if (u.protocol === "https:" && credentialOk) {
-          gameUrl = u.toString();
-          break;
-        }
-      } catch {}
-    }
-    // If one field is relative but another field gives us the vendor origin,
-    // resolve the relative path against that origin.
-    if (!gameUrl) {
-      const absolute = cleaned.find((v) => {
-        try {
-          return new URL(v).protocol === "https:";
-        } catch {
-          return false;
-        }
-      });
-      const relative = cleaned.find((v) => /[?&]token=/i.test(v));
-      if (absolute && relative) {
-        try {
-          const u = new URL(relative, new URL(absolute).origin);
-          if (u.searchParams.get("token")) gameUrl = u.toString();
-        } catch {}
-      }
-    }
+    const gameUrl = pickGameLoginUrl(data, platformKey);
     if (!gameUrl) throw new Error(`找不到 ${providerName} 有效授權網址`);
     return gameUrl;
   } finally {
@@ -1423,26 +1629,13 @@ async function getMtLoginUrlFromPlatform(
   platform: "TZ" | "OFA",
   token: string,
 ) {
-  return getGameLoginUrlFromPlatform(platform, token, "MTLI");
+  return getGameLoginUrlFromPlatform(platform, token, "MTLI", "Desktop", "MT");
 }
 async function getDgLoginUrlFromPlatform(
   platform: "TZ" | "OFA",
   token: string,
 ) {
-  return getGameLoginUrlFromPlatform(platform, token, "DGLI");
-}
-async function getVendorLoginUrlFromPlatform(
-  platform: "TZ" | "OFA",
-  token: string,
-  kind: VendorKind,
-  device: "Desktop" | "Mobile" = "Desktop",
-) {
-  return getGameLoginUrlFromPlatform(
-    platform,
-    token,
-    kind === "AB" ? "AB01" : "YABOZR",
-    device,
-  );
+  return getGameLoginUrlFromPlatform(platform, token, "DGLI", "Desktop", "DG");
 }
 
 async function platformWalletRequest(
@@ -1450,12 +1643,12 @@ async function platformWalletRequest(
   token: string,
   method: "GET" | "POST",
   body?: any,
+  timeoutMs = 8000,
 ) {
   if (Platform.OS !== "web") throw new Error("轉點目前僅支援網站版");
-  const base =
-    platform === "OFA" ? "https://www.ofa1188.net" : "https://www.tz6868.cc";
+  const base = platformApiBase(platform);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const request = async (withAuth: boolean) => {
     const headers: any = { Accept: "application/json, text/plain, */*" };
     if (method === "POST") headers["Content-Type"] = "application/json";
@@ -1486,15 +1679,48 @@ async function platformWalletRequest(
   }
 }
 
+async function fetchPlatformGamesList(
+  platform: "TZ" | "OFA",
+  token?: string,
+) {
+  if (Platform.OS !== "web") return [];
+  const base = platformApiBase(platform);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const headers: any = { Accept: "application/json, text/plain, */*" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch(`${base}/api/v1/games`, {
+      method: "GET",
+      mode: "cors",
+      credentials: "omit",
+      headers,
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => null);
+    return Array.isArray(data?.data) ? data.data : [];
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function transferAllToMainWallet(
   platform: "TZ" | "OFA",
   token: string,
-  opts?: { skipEmptyCheck?: boolean },
+  opts?: { skipEmptyCheck?: boolean; timeoutMs?: number },
 ) {
-  const result = await platformWalletRequest(platform, token, "POST", {
-    s: "all",
-    t: 0,
-  });
+  const result = await platformWalletRequest(
+    platform,
+    token,
+    "POST",
+    {
+      s: "all",
+      t: 0,
+    },
+    opts?.timeoutMs ?? 8000,
+  );
   const ok = result.response.ok && Number(result.data?.code) === 200;
   if (ok)
     return {
@@ -1509,7 +1735,7 @@ async function transferAllToMainWallet(
   // TZ 在沒有可轉回點數時可能只回 422/9999「失敗」。
   // 再讀一次遊戲錢包；如果所有遊戲錢包都是 0，就顯示成「目前無可轉回點數」。
   try {
-    const wallet = await platformWalletRequest(platform, token, "GET");
+    const wallet = await platformWalletRequest(platform, token, "GET", undefined, 6000);
     const rows = Array.isArray(wallet.data?.data) ? wallet.data.data : [];
     const transferable = rows
       .filter((x: any) => String(x?.game_code || "").trim())
@@ -1530,38 +1756,62 @@ async function readGameWalletLeftover(
   platform: "TZ" | "OFA",
   token: string,
 ) {
-  const wallet = await platformWalletRequest(platform, token, "GET");
+  const wallet = await platformWalletRequest(platform, token, "GET", undefined, 6000);
   const rows = Array.isArray(wallet.data?.data) ? wallet.data.data : [];
   return rows
     .filter((x: any) => String(x?.game_code || "").trim())
     .reduce((sum: number, x: any) => sum + (Number(x?.game_balance) || 0), 0);
 }
 
-/** POST {s:"all", t:0}. If TZ still shows game balances (e.g. MT 238906), retry once. */
+/** One POST {s:all,t:0} — used before enter so users are not stuck on multi-step sweep. */
+async function quickSweepToMain(platform: "TZ" | "OFA", token: string) {
+  try {
+    return await transferAllToMainWallet(platform, token, {
+      skipEmptyCheck: true,
+      timeoutMs: 6000,
+    });
+  } catch (error: any) {
+    return {
+      ok: false,
+      empty: true,
+      message: String(error?.message || "轉點逾時"),
+    };
+  }
+}
+
+/** POST {s:"all", t:0}. If TZ still shows game balances, retry leftovers in parallel. */
 async function pullAllGameWalletsToMain(
   platform: "TZ" | "OFA",
   token: string,
 ) {
   const first = await transferAllToMainWallet(platform, token, {
     skipEmptyCheck: true,
+    timeoutMs: 8000,
   });
   let leftover = 0;
   let rows: any[] = [];
   try {
-    const wallet = await platformWalletRequest(platform, token, "GET");
+    const wallet = await platformWalletRequest(platform, token, "GET", undefined, 6000);
     rows = Array.isArray(wallet.data?.data) ? wallet.data.data : [];
     leftover = rows
       .filter((x: any) => String(x?.game_code || "").trim())
       .reduce((sum: number, x: any) => sum + (Number(x?.game_balance) || 0), 0);
   } catch {}
   if (leftover > 0.000001) {
-    for (const row of rows) {
-      const code = String(row?.game_code || "").trim();
-      const bal = Number(row?.game_balance) || 0;
-      if (!code || bal <= 0.000001) continue;
-      await platformWalletRequest(platform, token, "POST", { s: code, t: 0 });
-    }
-    await transferAllToMainWallet(platform, token, { skipEmptyCheck: true });
+    await Promise.all(
+      rows.map(async (row: any) => {
+        const code = String(row?.game_code || "").trim();
+        const bal = Number(row?.game_balance) || 0;
+        if (!code || bal <= 0.000001) return;
+        try {
+          await platformWalletRequest(platform, token, "POST", { s: code, t: 0 }, 5000);
+        } catch {}
+      }),
+    );
+    await transferAllToMainWallet(platform, token, {
+      skipEmptyCheck: true,
+      timeoutMs: 6000,
+    });
     try {
       leftover = await readGameWalletLeftover(platform, token);
     } catch {
@@ -1578,16 +1828,132 @@ async function pullAllGameWalletsToMain(
 const GAME_WALLET_CODE: Record<PlatformKey, string> = {
   MT: "MTLI",
   DG: "DGLI",
-  AB: "AB01",
-  DB: "YABOZR",
+  // SALI follows MTLI/DGLI live naming; wallet/games list can override.
+  SA: "SALI",
+  // User-captured TZ code: POST /api/v2/game/LIVE77/login → registerAndLogin URL.
+  MV: "LIVE77",
 };
 
 const GAME_WALLET_LABEL: Record<PlatformKey, string> = {
   MT: "MT",
   DG: "DG",
-  AB: "歐博",
-  DB: "DB",
+  SA: "SA",
+  MV: "美女直播",
 };
+
+/** Demo / fallback only. Real enter uses TZ `/api/v2/game/{code}/login`. */
+const EXTERNAL_PLATFORM_URL: Record<"SA" | "MV", string> = {
+  SA: "https://ws2.labplatformplus.com/rm/featured",
+  MV: "https://tz02.score777.net/",
+};
+
+/** Homepage live rooms for 美女直播 — streamer cards (name / photo / status). */
+type MvRoomDto = {
+  id: string;
+  uid?: string;
+  name: string;
+  title: string;
+  live: boolean;
+  avatar: string;
+  roomUrl?: string;
+};
+
+const MV_LIVE_ROOM_FALLBACK: MvRoomDto[] = [
+  {
+    id: "MV-1161",
+    uid: "1161",
+    name: "雙雙",
+    title: "雙雙 GAME TIME 跟著雙雙一起贏大錢~",
+    live: true,
+    avatar: "/mv-hosts/69fe0d3d9793a.jpg",
+    roomUrl:
+      "https://tz02.score777.net/live/home/indexView?uid=1161&userid=42c9e6fa101c601fad97e56a91a39463",
+  },
+  {
+    id: "MV-YUNXI",
+    name: "沄曦",
+    title: "跟著沄曦走 荷包一直有 ~",
+    live: false,
+    avatar: "/mv-hosts/6a1d3ce1e6aa9.jpg",
+  },
+  {
+    id: "MV-QIANQIAN",
+    name: "淺淺",
+    title: "淺淺 9/20 GAME TIME",
+    live: false,
+    avatar: "/mv-hosts/69fe0d210ae8a.jpg",
+  },
+  {
+    id: "MV-MATCH",
+    name: "賽事直播",
+    title: "9/21 2:45 法甲 馬賽vs巴黎聖爾曼",
+    live: false,
+    avatar: "/mv-hosts/69fe0caf8fa97.jpg",
+  },
+];
+
+function mvRoomToTable(room: MvRoomDto): TableData {
+  return {
+    id: room.id,
+    apiId: room.id,
+    game: "直播",
+    name: room.name,
+    players: room.live ? "直播中" : "休息中",
+    shoe: "—",
+    round: 0,
+    banker: 0,
+    player: 0,
+    tie: 0,
+    results: [],
+    trend: room.title,
+    live: room.live,
+    roomId: room.uid || room.name,
+    category: "直播",
+    dealerPhoto: room.avatar,
+    streamUrl: room.roomUrl,
+  };
+}
+
+const MV_LIVE_ROOMS: TableData[] = MV_LIVE_ROOM_FALLBACK.map(mvRoomToTable);
+
+const EXTERNAL_GAME_CODE_CANDIDATES: Record<"SA" | "MV", string[]> = {
+  SA: ["SALI", "SA", "SA01", "SAGAME", "SAG"],
+  // LIVE77 first (user-captured TZ login). Keep older guesses as fallbacks.
+  MV: [
+    "LIVE77",
+    "GIRL",
+    "GIRLS",
+    "SEXY",
+    "MVLI",
+    "SALIVE",
+    "TZGIRL",
+    "LIVE",
+    "MZLI",
+  ],
+};
+
+function platformDisplayName(key: PlatformKey) {
+  return GAME_WALLET_LABEL[key] || key;
+}
+
+function isDemoPlatformToken(token: string) {
+  const t = String(token || "").trim().toLowerCase();
+  return !t || t === "demo" || t === "demo-local-token";
+}
+
+function openExternalPlatformTab(url: string) {
+  if (!url) return false;
+  if (Platform.OS === "web") {
+    try {
+      const win = window.open(url, "_blank", "noopener,noreferrer");
+      return !!win;
+    } catch {
+      return false;
+    }
+  }
+  void Linking.openURL(url).catch(() => undefined);
+  return true;
+}
 
 function walletRowLooksLikeGame(
   row: any,
@@ -1597,10 +1963,8 @@ function walletRowLooksLikeGame(
   const code = String(row?.game_code ?? "").trim().toUpperCase();
   const name = String(row?.name ?? row?.game_name ?? row?.title ?? "").trim();
   const wanted = String(gameCode).trim().toUpperCase();
-  if (code && code === wanted) return true;
+  if (code && wanted && code === wanted) return true;
   const hay = `${code} ${name}`;
-  if (key === "AB" || wanted === "AB01")
-    return code === "AB01" || /歐博真人|歐博|allbet|ab01/i.test(hay);
   if (key === "DG" || wanted === "DGLI")
     return (
       code === "DGLI" ||
@@ -1615,14 +1979,95 @@ function walletRowLooksLikeGame(
       /mt真人|mtli/i.test(hay) ||
       /^mt$/i.test(name)
     );
-  if (key === "DB" || wanted === "YABOZR")
+  if (key === "SA" || wanted === "SALI" || wanted === "SA" || wanted === "SA01")
     return (
-      code === "YABOZR" ||
-      code === "DB" ||
-      /db真人|yabozr/i.test(hay) ||
-      /^db$/i.test(name)
+      code === "SALI" ||
+      code === "SA" ||
+      code === "SA01" ||
+      code === "SAGAME" ||
+      code === "SAG" ||
+      /sa真人|沙龍|salon|sagaming|labplatform|^sa$/i.test(hay)
+    );
+  if (key === "MV" || wanted === "LIVE77")
+    return (
+      code === "LIVE77" ||
+      !!EXTERNAL_GAME_CODE_CANDIDATES.MV.includes(code) ||
+      /美女|直播|girl|score777|tz.?girl|sexy|live77|^mv$/i.test(hay)
     );
   return false;
+}
+
+function uniqueNonEmptyCodes(codes: Array<string | undefined | null>) {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of codes) {
+    const code = String(raw || "").trim();
+    if (!code) continue;
+    const key = code.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(code);
+  }
+  return out;
+}
+
+async function resolveExternalGameCodes(
+  platform: "TZ" | "OFA",
+  token: string,
+  key: "SA" | "MV",
+) {
+  const preferred = GAME_WALLET_CODE[key];
+  const seeds = uniqueNonEmptyCodes([
+    preferred,
+    ...EXTERNAL_GAME_CODE_CANDIDATES[key],
+  ]);
+  const found: string[] = [];
+  try {
+    const wallet = await platformWalletRequest(platform, token, "GET");
+    const rows = Array.isArray(wallet.data?.data) ? wallet.data.data : [];
+    for (const row of rows) {
+      if (!walletRowLooksLikeGame(row, preferred || seeds[0] || "", key)) continue;
+      const code = String(row?.game_code || "").trim();
+      if (code) found.push(code);
+    }
+  } catch {}
+  try {
+    const games = await fetchPlatformGamesList(platform, token);
+    for (const row of games) {
+      if (!walletRowLooksLikeGame(row, preferred || seeds[0] || "", key)) continue;
+      const code = String(row?.game_code || "").trim();
+      if (code) found.push(code);
+    }
+  } catch {}
+  return uniqueNonEmptyCodes([...found, ...seeds]);
+}
+
+async function getExternalLoginUrlFromPlatform(
+  platform: "TZ" | "OFA",
+  token: string,
+  key: "SA" | "MV",
+) {
+  const codes = await resolveExternalGameCodes(platform, token, key);
+  if (!codes.length)
+    throw new Error(`找不到 ${platformDisplayName(key)} 遊戲代碼`);
+  let lastError: any = null;
+  for (const code of codes) {
+    try {
+      return await getGameLoginUrlFromPlatform(
+        platform,
+        token,
+        code,
+        "Desktop",
+        key,
+      );
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw (
+    lastError ||
+    new Error(`取得 ${platformDisplayName(key)} 授權失敗`)
+  );
 }
 
 async function resolveWalletGameCode(
@@ -2138,8 +2583,22 @@ async function stopDgRelayServer(sessionId: string) {
     });
   } catch {}
 }
+async function stopSaRelayServer(sessionId: string) {
+  if (!sessionId) return;
+  try {
+    await fetch("/api/sa/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+      keepalive: true,
+    });
+  } catch {}
+}
 function resultKeyFromPayload(payload: any) {
   const b = payload?.body ?? payload?.msg ?? payload?.data ?? {};
+  // SA GameResult hand serial (gameId) is the stable settle key when present.
+  if (b?.game_sn != null && String(b.game_sn)) return `gs:${String(b.game_sn)}`;
+  if (b?.result_key != null && String(b.result_key)) return String(b.result_key);
   return `${String(b?.shoe ?? "")}|${String(b?.round ?? "")}`;
 }
 
@@ -2610,13 +3069,30 @@ function tableMatchesAssistId(table: { id?: string; apiId?: string; tableBadge?:
   return tableIdKeys(table).includes(want);
 }
 function assistRoomTitle(
-  table?: { apiId?: string; id?: string; roomId?: string; tableBadge?: string } | null,
+  table?: {
+    apiId?: string;
+    id?: string;
+    roomId?: string;
+    tableBadge?: string;
+    name?: string;
+  } | null,
   platform?: PlatformKey,
 ) {
   if (!table) return "";
   const id = String(table.apiId ?? table.id ?? "").trim();
   const room = String(table.roomId ?? "").trim();
-  if (platform === "AB" || platform === "DB") {
+  if (platform === "SA") {
+    // Prefer official D01/C01 label — never bare numeric hostId in float/選桌.
+    const label =
+      String(table.tableBadge ?? "").trim() ||
+      String(table.name ?? "").trim() ||
+      (room ? saTableLabel(room) : "") ||
+      String(table.id ?? "").trim();
+    if (label && !/^\d+$/.test(label)) return label;
+    if (room && /[\u4e00-\u9fff]/.test(room)) return room;
+    return label || room || id;
+  }
+  if (platform === "MV") {
     if (room && /[\u4e00-\u9fff]/.test(room)) return room;
     return room || id;
   }
@@ -2768,6 +3244,45 @@ export default function HomeScreen() {
     },
   );
   const logoutAccess = trpc.trackerAccess.logout.useMutation();
+  // Local demo: http://127.0.0.1:3847/?demo=1 — skips TZ login for UI checks only.
+  // Optional: &platform=MV|SA|DG|MT to land on that tab after demo enter.
+  useEffect(() => {
+    if (accessGranted || Platform.OS !== "web") return;
+    let cancelled = false;
+    let demoPlatform: PlatformKey | null = null;
+    try {
+      const u = new URL(window.location.href);
+      if (u.searchParams.get("demo") !== "1") return;
+      const host = u.hostname;
+      if (host !== "localhost" && host !== "127.0.0.1") return;
+      const p = String(u.searchParams.get("platform") || "")
+        .trim()
+        .toUpperCase();
+      if (p === "MT" || p === "DG" || p === "SA" || p === "MV")
+        demoPlatform = p;
+    } catch {
+      return;
+    }
+    void fetch("/api/demo/enter", { method: "POST" })
+      .then(async (r) => {
+        const data = await r.json().catch(() => null);
+        if (cancelled || !data?.ok || !data?.sessionId) return;
+        setAccessSessionId(String(data.sessionId));
+        platformTokenRef.current = String(data.platformToken || "demo");
+        setLoginPlatform("TZ");
+        setLoginSweepDone(true);
+        loginSweepDoneRef.current = true;
+        if (demoPlatform) {
+          setActivePlatform(demoPlatform);
+          setActiveCategory("一般");
+        }
+        setAccessGranted(true);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [accessGranted]);
   useEffect(() => {
     if (!accessGranted || !accessSessionId) return;
     if (accessSessionCheck.data && !accessSessionCheck.data.valid) {
@@ -2823,9 +3338,6 @@ export default function HomeScreen() {
       dgHasConnectedRef.current = false;
       dgForegroundRecoveryAttemptRef.current = 0;
       dgBridgeActiveRef.current = false;
-      abBridgeActiveRef.current = false;
-      dbBridgeActiveRef.current = false;
-      try { sessionStorage.removeItem("mt_ab_stay_ingame"); } catch {}
       suppressDgRecoveryRef.current = false;
       roadConnectBusyRef.current = false;
       setFloatingOpen(false);
@@ -2886,50 +3398,25 @@ export default function HomeScreen() {
   const dgFreshAuthorizationRequiredRef = useRef(false);
   const [dgNeedsRecovery, setDgNeedsRecovery] = useState(false);
   const dgBridgeActiveRef = useRef(false);
-  const abBridgeActiveRef = useRef(false);
-  const abKickReloginAtRef = useRef(0);
-  const abStayRestoreRef = useRef(false);
-  const dbBridgeActiveRef = useRef(false);
   const [dgConnectEpoch, setDgConnectEpoch] = useState(0);
   const dgHasConnectedRef = useRef(false);
   const dgForegroundRecoveryAttemptRef = useRef(0);
   const [dgTables, setDgTables] = useState<TableData[]>([]);
+  const [mvLiveRooms, setMvLiveRooms] = useState<TableData[]>(MV_LIVE_ROOMS);
+  const [saConnected, setSaConnected] = useState(false);
+  const [saStatus, setSaStatus] = useState("未連線");
+  const [saGameUrl, setSaGameUrl] = useState("");
+  const saGameUrlRef = useRef("");
+  const saAuthPromiseRef = useRef<Promise<string> | null>(null);
+  const [saTables, setSaTables] = useState<TableData[]>([]);
+  const saControllerRef = useRef<{ close: () => void } | null>(null);
+  const saHasConnectedRef = useRef(false);
+  const [saConnectEpoch, setSaConnectEpoch] = useState(0);
+  const saBridgeActiveRef = useRef(false);
   const dgControllerRef = useRef<{ close: () => void } | null>(null);
-  const [vendorTables, setVendorTables] = useState<
-    Record<VendorKind, TableData[]>
-  >({ AB: [], DB: [] });
-  const vendorTablesRef = useRef<Record<VendorKind, TableData[]>>({ AB: [], DB: [] });
-  const vendorPaintRef = useRef<number | null>(null);
-  const vendorDirtyRef = useRef<Record<VendorKind, boolean>>({ AB: false, DB: false });
   const activePlatformRef = useRef<PlatformKey>("MT");
   const mtOpenRef = useRef(false);
   const gameViewPlatformRef = useRef<PlatformKey>("MT");
-  const [vendorConnected, setVendorConnected] = useState<
-    Record<VendorKind, boolean>
-  >({ AB: false, DB: false });
-  const [vendorStatus, setVendorStatus] = useState<Record<VendorKind, string>>({
-    AB: "未連線",
-    DB: "未連線",
-  });
-  const [vendorMessage, setVendorMessage] = useState<Record<VendorKind, string>>({
-    AB: "尚未啟動",
-    DB: "尚未啟動",
-  });
-  const [vendorPnl, setVendorPnl] = useState<Record<VendorKind, number | null>>(
-    { AB: null, DB: null },
-  );
-  const [vendorUrls, setVendorUrls] = useState<Record<VendorKind, string>>({
-    AB: "",
-    DB: "",
-  });
-  const vendorControllersRef = useRef<
-    Partial<Record<VendorKind, { close: () => void | Promise<unknown> }>>
-  >({});
-  const [vendorEpoch, setVendorEpoch] = useState<Record<VendorKind, number>>({
-    AB: 0,
-    DB: 0,
-  });
-  const vendorForceRestartRef = useRef<Record<VendorKind, boolean>>({ AB: false, DB: false });
   useEffect(() => {
     activePlatformRef.current = activePlatform;
   }, [activePlatform]);
@@ -2939,15 +3426,6 @@ export default function HomeScreen() {
   useEffect(() => {
     gameViewPlatformRef.current = gameViewPlatform;
   }, [gameViewPlatform]);
-  useEffect(() => {
-    if (activePlatform !== "AB" && activePlatform !== "DB") return;
-    const latest = vendorTablesRef.current[activePlatform];
-    setVendorTables((current) =>
-      current[activePlatform] === latest
-        ? current
-        : { ...current, [activePlatform]: latest },
-    );
-  }, [activePlatform]);
   const platformTokenRef = useRef("");
   const roadConnectBusyRef = useRef(false);
   const suppressDgRecoveryRef = useRef(false);
@@ -2993,39 +3471,34 @@ export default function HomeScreen() {
       ? dgTables.length
         ? dgTables
         : dgPlaceholderTables
-      : activePlatform === "AB"
-        ? vendorTables.AB
-        : activePlatform === "DB"
-          ? vendorTables.DB
+      : activePlatform === "MV"
+        ? mvLiveRooms
+        : activePlatform === "SA"
+          ? // Only SA 「開桌」— never invent empty D01..N / 百家樂 1..N placeholders.
+            saTables.filter(isSaOpenTable)
           : mtSnapshotReady
             ? mtTables
             : initialTables;
-  const tables: TableData[] =
-    (activePlatform === "AB" || activePlatform === "DB") &&
-    activeCategory !== "所有"
-      ? allActiveTables.filter((t) => (t.category || "一般") === activeCategory)
-      : allActiveTables;
-  const assistPool: TableData[] =
-    activePlatform === "AB" || activePlatform === "DB"
-      ? allActiveTables
-      : tables;
+  const tables: TableData[] = allActiveTables;
+  // Float / 選桌: same open-only SA list.
+  const assistPool: TableData[] = tables;
   const availableTableCount =
     activePlatform === "DG"
       ? dgTables.length
-      : activePlatform === "AB"
-        ? vendorTables.AB.length
-        : activePlatform === "DB"
-          ? vendorTables.DB.length
+      : activePlatform === "MV"
+        ? mvLiveRooms.length
+        : activePlatform === "SA"
+          ? tables.length
           : mtSnapshotReady
             ? mtTables.length
             : 0;
   const activeConnected =
     activePlatform === "DG"
       ? dgConnected || dgTables.length > 0
-      : activePlatform === "AB"
-        ? vendorConnected.AB || vendorTables.AB.length > 0
-        : activePlatform === "DB"
-          ? vendorConnected.DB || vendorTables.DB.length > 0
+      : activePlatform === "SA"
+        ? saConnected || saTables.length > 0
+        : activePlatform === "MV"
+          ? false
           : connected;
   const [events, setEvents] = useState<string[]>([]);
   const [toast, setToast] = useState("");
@@ -3044,12 +3517,17 @@ export default function HomeScreen() {
   }, [baseBet]);
   const [todayPnl, setTodayPnl] = useState<number | null>(null);
   const [dgTodayPnl, setDgTodayPnl] = useState<DgDailyPnl | null>(null);
-  const activeTodayPnl =
-    activePlatform === "AB"
-      ? vendorPnl.AB
-      : activePlatform === "DB"
-        ? vendorPnl.DB
-        : platformTodayPnl(activePlatform, todayPnl, dgTodayPnl);
+  // SA 今日輸贏 / 輸贏報表 — isolated bucket (report.pnl.SA / report.history.SA).
+  const [saReport, setSaReport] = useState<PlatformReportBucket>(() =>
+    loadPlatformReport("SA"),
+  );
+  const saReportRef = useRef(saReport);
+  saReportRef.current = saReport;
+  const activeTodayPnl = selectPlatformTodayPnl(activePlatform, {
+    mt: todayPnl,
+    dg: dgTodayPnl,
+    sa: saReport.pnl,
+  });
   const todayPnlRef = useRef<number | null>(null);
   // Independent stop-loss reminder. It reads the official MT balance from the existing
   // authenticated game WebSocket and never changes the locked 今日輸贏 logic.
@@ -3063,6 +3541,10 @@ export default function HomeScreen() {
   const [stopLossAlertOpen, setStopLossAlertOpen] = useState(false);
   const [labSequence, setLabSequence] = useState<number[]>([1, 2, 3, 4]);
   const [pendingBet, setPendingBet] = useState<PendingBet>(null);
+  const pendingBetRef = useRef<PendingBet>(null);
+  useEffect(() => {
+    pendingBetRef.current = pendingBet;
+  }, [pendingBet]);
   const [records, setRecords] = useState<BetRecord[]>([]);
   const [peakBankroll, setPeakBankroll] = useState(100000);
   const lastBetReportOrderRef = useRef<string>("");
@@ -3741,9 +4223,17 @@ export default function HomeScreen() {
   const settlePending = (actual: Result, payload: any) => {
     setPendingBet((pending) => {
       if (!pending) return pending;
+      // SA 輸贏報表 settles only from sa-relay GameResult → SA bucket.
+      if (pending.reportPlatform === "SA") return pending;
       const body = payload?.body ?? payload?.msg ?? payload?.data ?? {};
       const tableId = String(body?.table_id ?? "");
-      if (tableId && tableId !== pending.tableId) return pending;
+      if (tableId && tableId !== pending.tableId) {
+        // SA aliases: D01 / SA901 / roomId — accept any key that matches pending.
+        const keys = Array.isArray(body?.table_keys)
+          ? body.table_keys.map((x: unknown) => String(x ?? "").trim()).filter(Boolean)
+          : [];
+        if (!keys.includes(pending.tableId)) return pending;
+      }
       const key = resultKeyFromPayload(payload);
       if (pending.resultKey && pending.resultKey === key) return pending;
       let pnl = 0;
@@ -3813,6 +4303,65 @@ export default function HomeScreen() {
       return null;
     });
   };
+
+  /** SA-only: GameResult feed → report.pnl.SA / report.history.SA (never MT/DG). */
+  const settleSaFromGameResult = (ev: SaWinReportResult) => {
+    setPendingBet((pending) => {
+      if (!pending) return pending;
+      if (pending.reportPlatform && pending.reportPlatform !== "SA") return pending;
+      if (!saResultMatchesPending(ev, pending.tableId)) return pending;
+      const key = `gs:${ev.gameId}`;
+      if (pending.resultKey && pending.resultKey === key) return pending;
+      const { pnl, outcome } = computeBaccaratBetPnl(
+        pending.side,
+        ev.road,
+        pending.amount,
+      );
+      const entry = {
+        side: pending.side,
+        result: ev.road as Result,
+        amount: pending.amount,
+        pnl,
+        at: Date.now(),
+        tableId: pending.tableId,
+        resultKey: key,
+        gameId: ev.gameId,
+      };
+      const next = applySaReportSettlement(saReportRef.current, entry);
+      saReportRef.current = next;
+      setSaReport(next);
+      setBankroll((v) => Math.round(v + pnl));
+      if (outcome !== "push") {
+        setStrategyLevel((level) => {
+          if (strategy === "馬丁") return level;
+          if (strategy === "達朗貝爾")
+            return outcome === "loss"
+              ? Math.min(level + 1, 20)
+              : Math.max(0, level - 1);
+          if (strategy === "Fibonacci")
+            return outcome === "loss"
+              ? Math.min(level + 1, 10)
+              : Math.max(0, level - 2);
+          if (strategy === "Paroli")
+            return outcome === "win" ? (level >= 2 ? 0 : level + 1) : 0;
+          if (strategy === "1-3-2-6")
+            return outcome === "win" ? (level >= 3 ? 0 : level + 1) : 0;
+          return level;
+        });
+      }
+      appendEvent(
+        `SA 輸贏報表 ${pending.tableId}：押${pending.side} ${pending.amount}，開${ev.road}，損益 ${pnl}`,
+      );
+      // Keep settlePending shape available for diagnostics (does not touch MT/DG stores).
+      void saWinReportToSettleBody(ev, pending.tableId);
+      return null;
+    });
+  };
+  const settleSaFromGameResultRef = useRef(settleSaFromGameResult);
+  settleSaFromGameResultRef.current = settleSaFromGameResult;
+
+  const settlePendingRef = useRef(settlePending);
+  settlePendingRef.current = settlePending;
 
   const readBetReportOrders = (payload: any): any[] => {
     const roots = [
@@ -4795,19 +5344,32 @@ export default function HomeScreen() {
     return promise;
   };
 
-  const reconnectVendor = (kind: VendorKind, forceRestart = false) => {
-    vendorForceRestartRef.current[kind] = forceRestart;
-    const current = vendorControllersRef.current[kind];
-    vendorControllersRef.current[kind] = undefined;
-    void Promise.resolve(current?.close());
-    setVendorConnected((v) => ({ ...v, [kind]: false }));
-    setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
-    setVendorMessage((v) => ({
-      ...v,
-      [kind]: "正在重新連線",
-    }));
-    setVendorEpoch((e) => ({ ...e, [kind]: e[kind] + 1 }));
+  const ensureSaAuthorization = async (force = false) => {
+    const platformToken = platformTokenRef.current;
+    if (!platformToken) throw new Error("登入授權已失效");
+    if (!force && saGameUrlRef.current) return saGameUrlRef.current;
+    if (saAuthPromiseRef.current) return saAuthPromiseRef.current;
+    const promise = getExternalLoginUrlFromPlatform(
+      loginPlatform,
+      platformToken,
+      "SA",
+    )
+      .then((url) => {
+        if (platformTokenRef.current !== platformToken)
+          throw new Error("登入工作階段已變更");
+        saGameUrlRef.current = url;
+        setSaGameUrl(url);
+        if (!saHasConnectedRef.current) setSaStatus("連線中");
+        return url;
+      })
+      .finally(() => {
+        if (saAuthPromiseRef.current === promise)
+          saAuthPromiseRef.current = null;
+      });
+    saAuthPromiseRef.current = promise;
+    return promise;
   };
+
 
   const connectRoadDashboard = async (force = false) => {
     if (!accessGranted || !accessSessionId || roadConnectBusyRef.current)
@@ -4841,21 +5403,26 @@ export default function HomeScreen() {
         setDgConnected(false);
         setDgStatus("連線中");
       }
-      reconnectVendor("AB");
-      reconnectVendor("DB");
     } else {
       if (!connected) setConnected(false);
       if (!dgForeground && !dgConnected) setDgStatus("連線中");
     }
     const needMt = force || !lockedMtUrlRef.current || !connected;
     const needDg = !dgForeground && (force || !dgGameUrl || !dgConnected);
-    const [mtResult, dgResult] = await Promise.allSettled([
+    const saForeground =
+      saBridgeActiveRef.current ||
+      (mtOpenRef.current && gameViewPlatformRef.current === "SA");
+    const needSa = !saForeground && (force || !saGameUrl || !saConnected);
+    const [mtResult, dgResult, saResult] = await Promise.allSettled([
       needMt
         ? getMtLoginUrlFromPlatform(loginPlatform, platformToken)
         : Promise.resolve(lockedMtUrlRef.current),
       needDg
         ? ensureDgAuthorization(force)
         : Promise.resolve(dgGameUrlRef.current || dgGameUrl),
+      needSa
+        ? ensureSaAuthorization(force)
+        : Promise.resolve(saGameUrlRef.current || saGameUrl),
     ]);
     if (platformTokenRef.current !== platformToken) {
       roadConnectBusyRef.current = false;
@@ -4881,6 +5448,17 @@ export default function HomeScreen() {
       setDgStatus("連線中");
       appendEvent(
         `DG 自動連線失敗：${String((dgResult.reason as any)?.message || dgResult.reason || "unknown")}`,
+      );
+    }
+    if (saResult.status === "fulfilled" && saResult.value) {
+      saGameUrlRef.current = saResult.value;
+      setSaGameUrl(saResult.value);
+      setSaStatus("連線中");
+    } else if (saResult.status === "rejected") {
+      setSaConnected(false);
+      setSaStatus("連線中");
+      appendEvent(
+        `SA 自動連線失敗：${String((saResult.reason as any)?.message || saResult.reason || "unknown")}`,
       );
     }
     roadConnectBusyRef.current = false;
@@ -4916,82 +5494,6 @@ export default function HomeScreen() {
     }
   };
 
-  const enterAbSameSessionProxy = async (
-    device: "Desktop" | "Mobile" = "Desktop",
-    opts?: { reuse?: boolean },
-  ) => {
-    if (!accessSessionId) return "";
-    try {
-      const r = await fetch("/api/vendor/ab/enter", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: accessSessionId,
-          device,
-          reuse: opts?.reuse === true,
-        }),
-      });
-      let data: any = null;
-      try {
-        data = await r.json();
-      } catch {}
-      if (!r.ok || !data?.ok || !data?.url)
-        throw new Error(String(data?.error || "歐博單工作階段入口啟動失敗"));
-      abBridgeActiveRef.current = true;
-      try { sessionStorage.setItem("mt_ab_stay_ingame", "1"); } catch {}
-      return String(data.url);
-    } catch (error: any) {
-      abBridgeActiveRef.current = false;
-      throw new Error(error?.message || "歐博單工作階段入口啟動失敗");
-    }
-  };
-
-  const enterDbSameSessionProxy = async (device: "Desktop" | "Mobile" = "Desktop") => {
-    if (!accessSessionId) return "";
-    try {
-      const r = await fetch("/api/vendor/db/enter", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: accessSessionId, device }),
-      });
-      let data: any = null;
-      try {
-        data = await r.json();
-      } catch {}
-      if (!r.ok || !data?.ok || !data?.url)
-        throw new Error(String(data?.error || "DB 單工作階段入口啟動失敗"));
-      dbBridgeActiveRef.current = true;
-      return String(data.url);
-    } catch (error: any) {
-      dbBridgeActiveRef.current = false;
-      throw new Error(error?.message || "DB 單工作階段入口啟動失敗");
-    }
-  };
-
-  const leaveAbSameSessionProxy = async () => {
-    if (!accessSessionId) return;
-    abBridgeActiveRef.current = false;
-    try { sessionStorage.removeItem("mt_ab_stay_ingame"); } catch {}
-    try {
-      await fetch("/api/vendor/ab/leave", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: accessSessionId }),
-      });
-    } catch {}
-  };
-
-  const leaveDbSameSessionProxy = async () => {
-    if (!accessSessionId) return;
-    dbBridgeActiveRef.current = false;
-    try {
-      await fetch("/api/vendor/db/leave", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: accessSessionId }),
-      });
-    } catch {}
-  };
 
   const leaveDgSameSessionProxy = async () => {
     if (!dgBridgeActiveRef.current || !accessSessionId) return;
@@ -5007,6 +5509,54 @@ export default function HomeScreen() {
     } catch {}
   };
 
+  const extProxyActiveRef = useRef(false);
+  const enterExternalSameOriginProxy = async (
+    gameUrl: string,
+    platform: "SA" | "MV",
+  ) => {
+    if (!accessSessionId || !gameUrl) return "";
+    try {
+      const r = await fetch("/api/ext/proxy/enter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: accessSessionId,
+          gameUrl,
+          platform,
+        }),
+      });
+      let data: any = null;
+      try {
+        data = await r.json();
+      } catch {}
+      if (!r.ok || !data?.ok || !data?.url)
+        throw new Error(String(data?.error || "同源代理啟動失敗"));
+      extProxyActiveRef.current = true;
+      return String(data.url);
+    } catch (error: any) {
+      extProxyActiveRef.current = false;
+      throw new Error(error?.message || "同源代理啟動失敗");
+    }
+  };
+
+  const leaveExternalSameOriginProxy = async (opts?: {
+    restoreRelay?: boolean;
+  }) => {
+    if (!extProxyActiveRef.current || !accessSessionId) return;
+    extProxyActiveRef.current = false;
+    saBridgeActiveRef.current = false;
+    try {
+      await fetch("/api/ext/proxy/leave", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: accessSessionId,
+          restoreRelay: opts?.restoreRelay !== false,
+        }),
+      });
+    } catch {}
+  };
+
   const runAutoSweepToMain = async (opts?: {
     skipEmptyCheck?: boolean;
     silent?: boolean;
@@ -5015,12 +5565,6 @@ export default function HomeScreen() {
     const platformToken = platformTokenRef.current;
     if (!platformToken || walletTransferBusyRef.current)
       return { ok: false, empty: true, message: "" };
-    if (Platform.OS === "web") {
-      try {
-        if (sessionStorage.getItem("mt_ab_stay_ingame") === "1")
-          return { ok: false, empty: true, message: "" };
-      } catch {}
-    }
     if (
       !opts?.force &&
       (mtOpenRef.current || enteringGameWalletRef.current)
@@ -5048,8 +5592,8 @@ export default function HomeScreen() {
     }
   };
 
-  // After TZ login: one sweep, then connect roads. Game logins auto-wallet
-  // into MT/DG, so one delayed sweep pulls that back. Not three times.
+  // After TZ login: quick one-shot sweep unlocks enter ASAP; leftover cleanup
+  // runs in the background so the user is not stuck on「轉點中」.
   useEffect(() => {
     if (!accessGranted || !accessSessionId) return;
     if (loginSweepDone) {
@@ -5079,8 +5623,26 @@ export default function HomeScreen() {
     }
     let cancelled = false;
     void (async () => {
-      await runAutoSweepToMain({ force: true });
-      if (!cancelled) {
+      const platformToken = platformTokenRef.current;
+      if (platformToken) {
+        walletTransferBusyRef.current = true;
+        setWalletTransferBusy(true);
+        try {
+          await quickSweepToMain(loginPlatform, platformToken);
+        } catch {
+        } finally {
+          if (!cancelled) {
+            walletTransferBusyRef.current = false;
+            setWalletTransferBusy(false);
+            loginSweepDoneRef.current = true;
+            setLoginSweepDone(true);
+          }
+        }
+        // Finish leftover cleanup in background; do not block enter again.
+        void pullAllGameWalletsToMain(loginPlatform, platformToken).catch(
+          () => {},
+        );
+      } else if (!cancelled) {
         loginSweepDoneRef.current = true;
         setLoginSweepDone(true);
       }
@@ -5163,191 +5725,101 @@ export default function HomeScreen() {
     };
   }, [accessGranted, accessSessionId, dgGameUrl, dgConnectEpoch]);
 
-  // 歐博與 DB 各自獨立連線：一邊失敗或重連，不會關掉另一邊。
-  const startVendorKind = (kind: VendorKind) => {
-    if (!accessGranted || !accessSessionId) return () => {};
-    const platformToken = platformTokenRef.current;
-    if (!platformToken) return () => {};
-    let cancelled = false;
-    if (!vendorTablesRef.current[kind].length) {
-      setVendorConnected((v) => ({ ...v, [kind]: false }));
-      setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
-      setVendorMessage((v) => ({
-        ...v,
-        [kind]: "正在取得平台授權並啟動即時牌路",
-      }));
+  // SA relay follows the TZ/SALI launch URL (token query).
+  useEffect(() => {
+    if (!accessGranted) return;
+    if (!saGameUrl) {
+      if (!saHasConnectedRef.current) setSaConnected(false);
+      return;
     }
-    Promise.resolve()
-      .then(async () => {
-        if (cancelled) return null;
-        const forceRestart = vendorForceRestartRef.current[kind] === true;
-        vendorForceRestartRef.current[kind] = false;
-        // TZ 授權必須在瀏覽器打，Render 機房 IP 代打 AB01/YABOZR 會被擋。
-        const launchUrl = await getVendorLoginUrlFromPlatform(
-          loginPlatform,
-          platformToken,
-          kind,
+    let cancelled = false;
+    try {
+      saControllerRef.current?.close();
+    } catch {}
+    saControllerRef.current = null;
+    if (!saHasConnectedRef.current) {
+      setSaConnected(false);
+      setSaStatus("連線中");
+    }
+    connectSaLive(saGameUrl, accessSessionId, {
+      onResult: (ev: SaWinReportResult) => {
+        if (cancelled) return;
+        settleSaFromGameResultRef.current(ev);
+      },
+      onTables: (next: SaTableData[]) => {
+        if (cancelled) return;
+        // Enforce official D01/C01 labels even if relay snapshot still has bare hostId.
+        setSaTables(
+          next.map((t) => {
+            const hostKey = String(t.roomId || "").replace(/^SA/i, "") || String(t.apiId || "").replace(/^SA/i, "");
+            const label = hostKey ? saTableLabel(hostKey) : "";
+            if (!label || label === hostKey) return t as TableData;
+            return {
+              ...(t as TableData),
+              id: label,
+              name: label,
+              tableBadge: label,
+            };
+          }),
         );
-        return connectVendorLive(kind, launchUrl, accessSessionId, {
-          onTables: (next: VendorTableData[]) => {
-            if (cancelled) return;
-            const merged = mergeVendorTables(
-              vendorTablesRef.current[kind],
-              next as TableData[],
-            );
-            if (merged === vendorTablesRef.current[kind]) return;
-            vendorTablesRef.current[kind] = merged;
-            if (merged.length) {
-              setVendorConnected((v) => ({ ...v, [kind]: true }));
-              setVendorStatus((v) =>
-                v[kind] === "連線失敗" ? v : { ...v, [kind]: "已連線" },
-              );
-            }
-            if (
-              activePlatformRef.current !== kind &&
-              gameViewPlatformRef.current !== kind
-            )
-              return;
-            vendorDirtyRef.current[kind] = true;
-            if (vendorPaintRef.current != null) return;
-            vendorPaintRef.current = requestAnimationFrame(() => {
-              vendorPaintRef.current = null;
-              setVendorTables((current) => {
-                const nextState = { ...current };
-                let changed = false;
-                if (vendorDirtyRef.current[kind]) {
-                  vendorDirtyRef.current[kind] = false;
-                  if (nextState[kind] !== vendorTablesRef.current[kind]) {
-                    nextState[kind] = vendorTablesRef.current[kind];
-                    changed = true;
-                  }
-                }
-                return changed ? nextState : current;
-              });
-            });
-          },
-          onPnl: (value) => {
-            if (!cancelled) setVendorPnl((v) => ({ ...v, [kind]: value }));
-          },
-          onStatus: (status, message) => {
-            if (!cancelled) {
-              setVendorConnected((v) => ({
-                ...v,
-                [kind]:
-                  status === "connected" ||
-                  (status !== "error" &&
-                    vendorTablesRef.current[kind].length > 0),
-              }));
-              setVendorStatus((v) => ({
-                ...v,
-                [kind]:
-                  status === "connected" ||
-                  (status !== "error" &&
-                    vendorTablesRef.current[kind].length > 0)
-                    ? "已連線"
-                    : status === "error" &&
-                        !/尚未收到可解析的桌台資料|官方暫時限流|官方限流|授權失效|背景連線不穩|重連中/.test(message || "")
-                      ? "連線失敗"
-                      : "連線中",
-              }));
-              setVendorMessage((v) => ({
-                ...v,
-                [kind]:
-                  message ||
-                  (status === "connected" ? "即時桌台同步完成" : "等待桌台資料"),
-              }));
-            }
-            if (
-              message &&
-              !cancelled &&
-              status === "error" &&
-              !/尚未收到可解析的桌台資料|官方暫時限流|官方限流|授權失效|背景連線不穩|重連中/.test(message)
-            )
-              appendEvent(message);
-          },
-          onEvent: (message) => {
-            if (
-              cancelled ||
-              !message ||
-              /擷取狀態|已收到解密物件|真實百家樂桌解析|解碼資料讀取|發現目標|主頁導向|監聽目標/.test(
-                message,
-              )
-            )
-              return;
-            appendEvent(message);
-          },
-        }, {
-          platform: loginPlatform,
-          platformToken,
-          resumeHall:
-            !forceRestart &&
-            gameViewPlatformRef.current !== kind &&
-            (kind === "AB" ? !abBridgeActiveRef.current : !dbBridgeActiveRef.current),
-          restart: forceRestart,
+      },
+      onStatus: (status, message) => {
+        if (cancelled) return;
+        if (status === "connected") {
+          saHasConnectedRef.current = true;
+          setSaConnected(true);
+          setSaStatus("已連線");
+          return;
+        }
+        if (status === "error" || status === "closed") {
+          if (
+            !saHasConnectedRef.current &&
+            !saBridgeActiveRef.current &&
+            !(mtOpenRef.current && gameViewPlatformRef.current === "SA")
+          ) {
+            setSaConnected(false);
+            setSaStatus(message || "連線中");
+          }
+        } else if (status === "connecting" || status === "loading") {
+          setSaStatus(message || "連線中");
+        }
+      },
+      onEvent: (message) => {
+        if (!cancelled) appendEvent(message);
+      },
+      onResult: (ev: SaWinReportResult) => {
+        if (cancelled || !ev?.road) return;
+        const pending = pendingBetRef.current;
+        if (!pending) return;
+        if (!saWinReportTableMatches(ev, pending.tableId)) return;
+        // Feed the same BetRecord path as MT show_win → settlePending.
+        settlePendingRef.current(ev.road, {
+          body: saWinReportToSettleBody(ev, pending.tableId),
         });
-      })
+      },
+    })
       .then((controller) => {
-        if (!controller) return;
-        if (cancelled) controller.close();
-        else {
-          vendorControllersRef.current[kind] = controller;
-          if (controller.host)
-            setVendorUrls((v) => ({
-              ...v,
-              [kind]: `https://${controller.host}/`,
-            }));
+        if (cancelled) {
+          controller.close();
+          return;
         }
+        saControllerRef.current = controller;
       })
-      .catch((e: any) => {
-        if (!cancelled) {
-          setVendorStatus((v) => ({ ...v, [kind]: "連線失敗" }));
-          setVendorMessage((v) => ({
-            ...v,
-            [kind]: String(e?.message || e || "未知錯誤"),
-          }));
-          appendEvent(
-            `${kind === "AB" ? "歐博" : "DB"} 自動連線失敗：${e?.message || e}`,
-          );
-        }
+      .catch((error: any) => {
+        if (cancelled) return;
+        setSaConnected(false);
+        setSaStatus("連線中");
+        appendEvent(`SA 背景連線待恢復：${error?.message || "unknown"}`);
       });
     return () => {
       cancelled = true;
-      const current = vendorControllersRef.current[kind];
-      vendorControllersRef.current[kind] = undefined;
-      void Promise.resolve(current?.close());
+      try {
+        saControllerRef.current?.close();
+      } catch {}
+      saControllerRef.current = null;
     };
-  };
+  }, [accessGranted, accessSessionId, saGameUrl, saConnectEpoch]);
 
-  useEffect(() => {
-    if (!accessGranted || !accessSessionId || Platform.OS !== "web") return;
-    let stay = false;
-    try { stay = sessionStorage.getItem("mt_ab_stay_ingame") === "1"; } catch {}
-    try { if (/(?:^|;\s*)mt_ab_proxy_sid=/.test(document.cookie || "")) stay = true; } catch {}
-    if (!stay || abStayRestoreRef.current) return;
-    abStayRestoreRef.current = true;
-    mtOpenRef.current = true;
-    abBridgeActiveRef.current = true;
-    gameViewPlatformRef.current = "AB";
-    setActivePlatform("AB");
-    setGameViewPlatform("AB");
-    setHasEnteredGame(true);
-    setMtOpen(true);
-    setPlatformLaunching(true);
-    void enterAbSameSessionProxy(width >= 1000 ? "Desktop" : "Mobile", { reuse: true })
-      .then((url) => {
-        if (!url) return;
-        gameViewUrlRef.current = url;
-        setGameViewUrl(url);
-        notify("已回到歐博遊戲");
-      })
-      .catch((error: any) => {
-        notify(error?.message || "歐博遊戲恢復失敗", 5000);
-      })
-      .finally(() => setPlatformLaunching(false));
-  }, [accessGranted, accessSessionId]);
-
-  useEffect(() => startVendorKind("AB"), [accessGranted, accessSessionId, loginPlatform, vendorEpoch.AB]);
-  useEffect(() => startVendorKind("DB"), [accessGranted, accessSessionId, loginPlatform, vendorEpoch.DB]);
 
   // 如果 DG 原生遊戲把背景 relay 踢掉：先用「同一個已取得的 DG token」
   // 重掛一次背景 relay，不再呼叫 DGLI/login 取得第二組 token。這樣可避免
@@ -5417,11 +5889,12 @@ export default function HomeScreen() {
     dgGameUrl,
   ]);
 
-  // Reuse the existing four-formula / parity tools with every non-MT live poker field.
+  // Reuse the existing four-formula / parity tools with DG/SA live poker fields.
   // This only updates when the actual dealt cards change, not on every countdown packet.
   useEffect(() => {
-    if (activePlatform === "MT") return;
-    const pokerTables = activePlatform === "DG" ? dgTables : vendorTables[activePlatform];
+    if (activePlatform !== "DG" && activePlatform !== "SA") return;
+    const pokerTables =
+      activePlatform === "DG" ? dgTables : (saTables as DgTableData[]);
     if (!pokerTables.length) return;
     let changed = false;
     const nextMap = { ...v38ByTableRef.current };
@@ -5429,6 +5902,10 @@ export default function HomeScreen() {
       const parsed = parseDgV38Poker(table);
       const keys = tableIdKeys(table);
       if (!parsed) {
+        // SA: table.poker may briefly be absent while road/round still tick.
+        // Keep last 算牌/奇偶 snapshot so floats do not drop to「等待完整 show_poker」
+        // while the SA video still shows the dealt hand (MT/DG paths unchanged).
+        if (activePlatform === "SA") continue;
         if (keys.some((k) => nextMap[k])) {
           for (const k of keys) delete nextMap[k];
           changed = true;
@@ -5460,7 +5937,7 @@ export default function HomeScreen() {
       v38ByTableRef.current = nextMap;
       setV38ByTable(nextMap);
     }
-  }, [activePlatform, dgTables, vendorTables]);
+  }, [activePlatform, dgTables, saTables]);
 
   useEffect(() => {
     const exists = assistPool.some((t) => tableMatchesAssistId(t, assistTableId));
@@ -5489,6 +5966,7 @@ export default function HomeScreen() {
     // Server session revocation is fire-and-forget so it can never block the screen change.
     const sessionToLogout = accessSessionId;
     void stopDgRelayServer(sessionToLogout);
+    void stopSaRelayServer(sessionToLogout);
     setAccessGranted(false);
     setAccessSessionId("");
     setAccessNotice("");
@@ -5510,17 +5988,6 @@ export default function HomeScreen() {
       dgControllerRef.current?.close();
     } catch {}
     dgControllerRef.current = null;
-    for (const controller of Object.values(vendorControllersRef.current) as Array<{close:()=>void}|undefined>) {
-      try { controller?.close(); } catch {}
-    }
-    vendorControllersRef.current = {};
-    vendorTablesRef.current = { AB: [], DB: [] };
-    setVendorTables({ AB: [], DB: [] });
-    setVendorConnected({ AB: false, DB: false });
-    setVendorStatus({ AB: "未連線", DB: "未連線" });
-    setVendorMessage({ AB: "尚未啟動", DB: "尚未啟動" });
-    setVendorPnl({ AB: null, DB: null });
-    setVendorUrls({ AB: "", DB: "" });
     setDgConnected(false);
     setDgStatus("未連線");
     dgGameUrlRef.current = "";
@@ -5530,6 +5997,18 @@ export default function HomeScreen() {
     dgFreshAuthorizationRequiredRef.current = false;
     setDgGameUrl("");
     setDgTables([]);
+    try {
+      saControllerRef.current?.close();
+    } catch {}
+    saControllerRef.current = null;
+    setSaConnected(false);
+    setSaStatus("未連線");
+    saGameUrlRef.current = "";
+    saAuthPromiseRef.current = null;
+    saHasConnectedRef.current = false;
+    saBridgeActiveRef.current = false;
+    setSaGameUrl("");
+    setSaTables([]);
     platformTokenRef.current = "";
     setActivePlatform("MT");
     setConnectionOpen(false);
@@ -5554,8 +6033,6 @@ export default function HomeScreen() {
     dgHasConnectedRef.current = false;
     dgForegroundRecoveryAttemptRef.current = 0;
     dgBridgeActiveRef.current = false;
-    abBridgeActiveRef.current = false;
-    dbBridgeActiveRef.current = false;
     suppressDgRecoveryRef.current = false;
     roadConnectBusyRef.current = false;
     // Revoke the server-side app session without awaiting it. The login screen is already active.
@@ -5571,10 +6048,14 @@ export default function HomeScreen() {
       else notify("DG 尚未連線");
       return;
     }
-    if (activePlatform === "AB" || activePlatform === "DB") {
-      if (activeConnected)
-        appendEvent(`${activePlatform === "AB" ? "歐博" : "DB"} 懸浮輔助已同步即時資料`);
-      else notify(`${activePlatform === "AB" ? "歐博" : "DB"} 尚未連線`);
+    if (activePlatform === "MV") {
+      notify("美女直播只開直播間，無牌路連線");
+      return;
+    }
+    if (activePlatform === "SA") {
+      if (saConnected || saTables.length > 0)
+        appendEvent("SA 懸浮輔助已同步即時資料");
+      else notify("SA 尚未連線");
       return;
     }
     const ws = socketRef.current;
@@ -5588,6 +6069,28 @@ export default function HomeScreen() {
       appendEvent("懸浮輔助已要求同步");
     } else notify("尚未連線");
   };
+
+  useEffect(() => {
+    if (activePlatform !== "MV") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch("/api/mv/rooms");
+        const data = await r.json();
+        if (cancelled || !data?.ok || !Array.isArray(data.rooms)) return;
+        const next = (data.rooms as MvRoomDto[])
+          .filter((room) => room?.name || room?.avatar)
+          .map(mvRoomToTable);
+        if (next.length) setMvLiveRooms(next);
+      } catch {
+        // Keep seeded catalog.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activePlatform]);
+
   const openCurrentPlatform = async (table?: TableData) => {
     if (table) setAssistTableId(table.apiId ?? table.id);
     if (platformLaunching) return;
@@ -5597,35 +6100,33 @@ export default function HomeScreen() {
       return;
     }
     setPlatformLaunching(true);
-    enteringGameWalletRef.current = true;
+    const liveOnly = activePlatform === "MV";
+    enteringGameWalletRef.current = !liveOnly;
     mtOpenRef.current = true;
     try {
-      const started = Date.now();
-      while (
-        (!loginSweepDoneRef.current || walletTransferBusyRef.current) &&
-        Date.now() - started < 25000
-      )
-        await new Promise((resolve) => setTimeout(resolve, 150));
-      if (!loginSweepDoneRef.current) {
-        notify("登入轉點尚未完成，請稍候再進", 5000);
-        enteringGameWalletRef.current = false;
-        mtOpenRef.current = mtOpen;
-        return;
-      }
-      walletTransferBusyRef.current = true;
-      setWalletTransferBusy(true);
-      try {
-        const pulled = await pullAllGameWalletsToMain(
-          loginPlatform,
-          platformToken,
-        );
-        if (!pulled.ok && !pulled.empty)
-          notify(pulled.message || "從遊戲錢包轉回主錢包失敗", 5000);
-      } catch (error: any) {
-        notify(error?.message || "轉回主錢包失敗，仍會進入平台", 5000);
-      } finally {
-        walletTransferBusyRef.current = false;
-        setWalletTransferBusy(false);
+      if (!liveOnly) {
+        // Max ~2s wait for any in-flight sweep; never block 25s on enter.
+        const started = Date.now();
+        while (
+          walletTransferBusyRef.current &&
+          Date.now() - started < 2000
+        )
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        // One quick POST all→main. Game login (MTLI/DGLI/SALI) auto-pulls from main.
+        walletTransferBusyRef.current = true;
+        setWalletTransferBusy(true);
+        try {
+          await quickSweepToMain(loginPlatform, platformToken);
+          if (!loginSweepDoneRef.current) {
+            loginSweepDoneRef.current = true;
+            setLoginSweepDone(true);
+          }
+        } catch {
+          // Still enter — platform login will handle wallet if main has balance.
+        } finally {
+          walletTransferBusyRef.current = false;
+          setWalletTransferBusy(false);
+        }
       }
       if (activePlatform === "MT") {
         const url = await getMtLoginUrlFromPlatform(
@@ -5671,33 +6172,127 @@ export default function HomeScreen() {
         setGameViewUrl(nextUrl);
         dgLiveHoldRef.current = false;
         setDgConnectEpoch((v) => v + 1);
-      } else if (activePlatform === "AB" && Platform.OS === "web") {
-        const proxyUrl = await enterAbSameSessionProxy(desktop ? "Desktop" : "Mobile");
-        notify("已轉入歐博");
-        setGameViewPlatform("AB");
-        gameViewUrlRef.current = proxyUrl;
-        setGameViewUrl(proxyUrl);
-      } else if (activePlatform === "DB" && Platform.OS === "web") {
-        const proxyUrl = await enterDbSameSessionProxy(isPhoneWebClient(width) ? "Mobile" : "Desktop");
-        notify("已轉入DB");
-        setGameViewPlatform("DB");
-        gameViewUrlRef.current = proxyUrl;
-        setGameViewUrl(proxyUrl);
-      } else {
-        const kind = activePlatform as VendorKind;
-        // The dashboard relay owns its background authorization. Entering the
-        // real vendor lobby gets a separate foreground authorization so a
-        // mobile browser receives the vendor's native mobile lobby instead of
-        // reusing the background Chromium desktop URL.
-        const url = await getVendorLoginUrlFromPlatform(
+      } else if (activePlatform === "MV") {
+        // Always open inside the app iframe — never window.open / 新分頁.
+        // TZ LIVE77 registerAndLogin is one-time: proxy must NOT prefetch it
+        // (see resolveLaunchUrl). Prefer proxy so cookies stick; else direct.
+        if (isDemoPlatformToken(platformToken)) {
+          notify(
+            "演示模式無法開啟美女直播：請用真實 TZ 帳號登入後再進 LIVE77",
+            5000,
+          );
+          gameViewUrlRef.current = "";
+          setGameViewUrl("");
+          setHasEnteredGame(false);
+          mtOpenRef.current = false;
+          setMtOpen(false);
+          return;
+        }
+        const url = await getExternalLoginUrlFromPlatform(
           loginPlatform,
           platformToken,
-          kind,
-          desktop ? "Desktop" : "Mobile",
+          "MV",
         );
-        setGameViewPlatform(kind);
-        gameViewUrlRef.current = url;
-        setGameViewUrl(url);
+        gameViewPlatformRef.current = "MV";
+        setGameViewPlatform("MV");
+        if (extProxyActiveRef.current) await leaveExternalSameOriginProxy();
+        let nextUrl = url;
+        let via: "proxy" | "direct" = "direct";
+        if (Platform.OS === "web") {
+          try {
+            const proxyUrl = await enterExternalSameOriginProxy(url, "MV");
+            if (proxyUrl) {
+              // Keep registerAndLogin as iframe src so TZ one-time auth runs
+              // in the browser (proxy no longer prefetches/consumes it).
+              nextUrl = proxyUrl;
+              via = "proxy";
+            }
+          } catch {
+            via = "direct";
+            nextUrl = url;
+          }
+        }
+        gameViewUrlRef.current = nextUrl;
+        setGameViewUrl(nextUrl);
+        setHasEnteredGame(true);
+        setMtOpen(true);
+        // After auth page loads, hop to the clicked room on the same proxy.
+        const roomUid = String(
+          table?.roomId ||
+            table?.streamUrl?.match(/[?&]uid=([^&]+)/i)?.[1] ||
+            "",
+        ).trim();
+        if (via === "proxy" && roomUid && /^\d+$/.test(roomUid)) {
+          setTimeout(() => {
+            if (gameViewPlatformRef.current !== "MV") return;
+            const roomPath = `/live/home/indexView?uid=${encodeURIComponent(roomUid)}`;
+            gameViewUrlRef.current = roomPath;
+            setGameViewUrl(roomPath);
+          }, 1600);
+        }
+        notify(
+          via === "proxy"
+            ? "已在程式內開啟美女直播"
+            : "已在程式內開啟美女直播（直連 TZ 授權網址）",
+        );
+        return;
+      } else if (activePlatform === "SA") {
+        // TZ 授權後走同源代理，剝掉 X-Frame，讓 SA 能嵌在站內 iframe。
+        // Mirror DG: mark bridge + stop background WS BEFORE setSaGameUrl /
+        // iframe load, otherwise /api/sa/start races the game and SA kicks
+        // the session with ERR26 (登錄時效已逾時).
+        // Demo has no SALI token — do not embed bare /rm/featured (Login Failed).
+        if (isDemoPlatformToken(platformToken)) {
+          notify(
+            "演示模式無法進入 SA 遊戲畫面：請用真實 TZ 帳號登入後取得 SALI 授權",
+            5000,
+          );
+          gameViewUrlRef.current = "";
+          setGameViewUrl("");
+          setHasEnteredGame(false);
+          mtOpenRef.current = false;
+          setMtOpen(false);
+          return;
+        }
+        gameViewPlatformRef.current = "SA";
+        setGameViewPlatform("SA");
+        saBridgeActiveRef.current = true;
+        if (extProxyActiveRef.current)
+          await leaveExternalSameOriginProxy({ restoreRelay: false });
+        saBridgeActiveRef.current = true;
+        const url = await getExternalLoginUrlFromPlatform(
+          loginPlatform,
+          platformToken,
+          "SA",
+        );
+        saGameUrlRef.current = url;
+        let nextUrl = url;
+        if (Platform.OS === "web") {
+          try {
+            const proxyUrl = await enterExternalSameOriginProxy(url, "SA");
+            if (proxyUrl) nextUrl = proxyUrl;
+            // Only after bridge is active on the server — reconnect SSE without
+            // opening a competing background PS_LOGIN.
+            setSaGameUrl(url);
+            setSaConnectEpoch((v) => v + 1);
+          } catch {
+            // Proxy failed (e.g. Cloudflare). Still stay in-app with direct iframe.
+            saBridgeActiveRef.current = true;
+            setSaGameUrl(url);
+            setSaConnectEpoch((v) => v + 1);
+            nextUrl = url;
+            notify(
+              `已在程式內開啟${platformDisplayName("SA")}（直連授權網址）`,
+            );
+          }
+        } else {
+          setSaGameUrl(url);
+        }
+        gameViewUrlRef.current = nextUrl;
+        setGameViewUrl(nextUrl);
+        notify(`已轉入${platformDisplayName("SA")}`);
+      } else {
+        throw new Error(`不支援的平台：${activePlatform}`);
       }
       setHasEnteredGame(true);
       setMtOpen(true);
@@ -5713,23 +6308,25 @@ export default function HomeScreen() {
   };
   const closeGameView = () => {
     const wasDg = gameViewPlatform === "DG";
-    const wasAb = gameViewPlatform === "AB";
-    const wasDb = gameViewPlatform === "DB";
+    const wasMv = gameViewPlatform === "MV";
+    const wasExt =
+      gameViewPlatform === "SA" || gameViewPlatform === "MV";
     enteringGameWalletRef.current = false;
     mtOpenRef.current = false;
     setMtOpen(false);
     // 回牌路只關掉遊戲 iframe，背景 SSE／桌台不要整條拆掉重連。
     const leaveJobs: Promise<void>[] = [];
     if (wasDg) leaveJobs.push(leaveDgSameSessionProxy());
-    if (wasAb) leaveJobs.push(leaveAbSameSessionProxy());
-    if (wasDb) leaveJobs.push(leaveDbSameSessionProxy());
+    if (wasExt) leaveJobs.push(leaveExternalSameOriginProxy());
     void Promise.all(leaveJobs);
+    // 美女直播不轉點。
+    if (wasMv) return;
     if (walletTransferBusyRef.current) return;
     const platformToken = platformTokenRef.current;
     if (!platformToken) return;
     walletTransferBusyRef.current = true;
     setWalletTransferBusy(true);
-    void pullAllGameWalletsToMain(loginPlatform, platformToken)
+    void quickSweepToMain(loginPlatform, platformToken)
       .then((result) => {
         if (result.ok) {
           suppressDgRecoveryRef.current = true;
@@ -5737,6 +6334,10 @@ export default function HomeScreen() {
           setDgNeedsRecovery(false);
           notify("已自動轉回主錢包");
         }
+        // Background leftover cleanup — do not block UI.
+        void pullAllGameWalletsToMain(loginPlatform, platformToken).catch(
+          () => {},
+        );
       })
       .catch(() => {})
       .finally(() => {
@@ -5802,7 +6403,14 @@ export default function HomeScreen() {
       notify("請先設定基本單注");
       return;
     }
-    setPendingBet({ tableId: assistTableId, side, amount: nextAmount });
+    const reportPlatform: ReportPlatformKey =
+      activePlatform === "SA" ? "SA" : activePlatform === "DG" ? "DG" : "MT";
+    setPendingBet({
+      tableId: assistTableId,
+      side,
+      amount: nextAmount,
+      reportPlatform,
+    });
     appendEvent(`統計下注 ${assistTableId}：${side} ${nextAmount}`);
     setAssistPage(2);
   };
@@ -5812,17 +6420,34 @@ export default function HomeScreen() {
     setStrategyLevel(0);
     setLabSequence([1, 2, 3, 4]);
     setPendingBet(null);
-    setRecords([]);
+    if (activePlatform === "SA") {
+      const cleared = resetPlatformReport("SA");
+      saReportRef.current = cleared;
+      setSaReport(cleared);
+    } else {
+      setRecords([]);
+    }
   };
-  const wins = records.filter((r) => r.pnl > 0).length,
-    losses = records.filter((r) => r.pnl < 0).length,
+  // 輸贏統計 history: SA uses isolated report.history.SA; MT/DG keep existing records.
+  const statsRecords: BetRecord[] =
+    activePlatform === "SA"
+      ? saReport.history.map((h) => ({
+          side: h.side,
+          result: h.result,
+          amount: h.amount,
+          pnl: h.pnl,
+          at: h.at,
+        }))
+      : records;
+  const wins = statsRecords.filter((r) => r.pnl > 0).length,
+    losses = statsRecords.filter((r) => r.pnl < 0).length,
     decisions = wins + losses;
   let streak = 0;
-  if (records.length) {
-    const win = records[0].pnl > 0,
-      loss = records[0].pnl < 0;
+  if (statsRecords.length) {
+    const win = statsRecords[0].pnl > 0,
+      loss = statsRecords[0].pnl < 0;
     if (win || loss) {
-      for (const r of records) {
+      for (const r of statsRecords) {
         if ((win && r.pnl > 0) || (loss && r.pnl < 0)) streak++;
         else break;
       }
@@ -6208,7 +6833,7 @@ export default function HomeScreen() {
           <Text style={s.microText}>
             {pendingBet
               ? `等待開獎：${pendingBet.side} ${pendingBet.amount.toLocaleString()}`
-              : `連${records[0]?.pnl > 0 ? "勝" : records[0]?.pnl < 0 ? "敗" : "續"} ${streak}　最大回撤 -${maxDrawdown.toLocaleString()}`}
+              : `連${statsRecords[0]?.pnl > 0 ? "勝" : statsRecords[0]?.pnl < 0 ? "敗" : "續"} ${streak}　最大回撤 -${maxDrawdown.toLocaleString()}`}
           </Text>
           <Pressable onPress={resetStats}>
             <Text style={s.resetText}>重置統計</Text>
@@ -6219,7 +6844,7 @@ export default function HomeScreen() {
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={s.historyRow}
         >
-          {records.slice(0, 8).map((r, i) => (
+          {statsRecords.slice(0, 8).map((r, i) => (
             <View key={i} style={s.historyChip}>
               <Text
                 style={{
@@ -6345,7 +6970,13 @@ export default function HomeScreen() {
               />
             </View>
             <Text style={s.selectorMeta}>
-              荷官 {assistTable?.name || "—"} · 第 {assistTable?.round ?? 0} 局
+              {activePlatform === "SA"
+                ? `房型 ${assistTable?.roomId || assistTable?.id || "—"} · 荷官 ${
+                    assistTable?.trend ||
+                    (assistTable?.players !== "—" ? assistTable?.players : "—") ||
+                    "—"
+                  } · 第 ${assistTable?.round ?? 0} 局`
+                : `荷官 ${assistTable?.name || "—"} · 第 ${assistTable?.round ?? 0} 局`}
             </Text>
           </Pressable>
           {roomDropdownOpen ? (
@@ -6406,7 +7037,11 @@ export default function HomeScreen() {
                       <View style={s.roomDropdownLeft}>
                         <Text style={s.roomDropdownText}>{assistRoomTitle(t, activePlatform) || id}</Text>
                         <Text numberOfLines={1} style={s.roomDropdownDealer}>
-                          荷官 {t.name || "—"}
+                          {activePlatform === "SA"
+                            ? `房型 ${t.roomId || t.id} · 荷官 ${
+                                t.trend || (t.players !== "—" ? t.players : "—") || "—"
+                              }`
+                            : `荷官 ${t.name || "—"}`}
                         </Text>
                       </View>
                       <View style={s.roomDropdownRight}>
@@ -6889,14 +7524,12 @@ export default function HomeScreen() {
       />
     );
 
-  const enterBlocked = !loginSweepDone || walletTransferBusy || platformLaunching;
-  const enterPlatformLabel = enterBlocked && !platformLaunching
-    ? "轉點中"
-    : activePlatform === "AB"
-      ? "進入歐博平台"
-      : activePlatform === "DB"
-        ? "進入DB平台"
-        : `進入${activePlatform}平台`;
+  const enterBlocked = platformLaunching;
+  const enterPlatformLabel = platformLaunching
+    ? "進入中…"
+    : activePlatform === "MV"
+      ? "開啟美女直播"
+      : `進入${platformDisplayName(activePlatform)}平台`;
 
   return (
     <ScreenContainer
@@ -6908,8 +7541,8 @@ export default function HomeScreen() {
         style={[
           s.screen,
           activePlatform === "DG" && s.screenDg,
-          activePlatform === "AB" && s.screenAb,
-          activePlatform === "DB" && s.screenDb,
+          activePlatform === "SA" && s.screenAb,
+          activePlatform === "MV" && s.screenDb,
           desktop && Platform.OS === "web" ? s.screenDesktopZoom : null,
         ]}
       >
@@ -6918,8 +7551,8 @@ export default function HomeScreen() {
             s.topbar,
             !desktop ? s.topbarMobile : null,
             activePlatform === "DG" && s.topbarDg,
-            activePlatform === "AB" && s.topbarAb,
-            activePlatform === "DB" && s.topbarDb,
+            activePlatform === "SA" && s.topbarAb,
+            activePlatform === "MV" && s.topbarDb,
           ]}
         >
           <View style={s.brandRow}>
@@ -6927,15 +7560,15 @@ export default function HomeScreen() {
               style={[
                 s.brandIcon,
                 activePlatform === "DG" && s.brandIconDg,
-                activePlatform === "AB" && s.brandIconAb,
-                activePlatform === "DB" && s.brandIconDb,
+                activePlatform === "SA" && s.brandIconAb,
+                activePlatform === "MV" && s.brandIconDb,
               ]}
             >
               <MatrixMark size={29} brand={activePlatform} />
             </View>
             <View style={{ minWidth: 0, flexShrink: 1 }}>
               {desktop ? (
-                <Text style={[s.kicker, activePlatform === "DG" && s.kickerDg, activePlatform === "AB" && s.kickerAb, activePlatform === "DB" && s.kickerDb]}>
+                <Text style={[s.kicker, activePlatform === "DG" && s.kickerDg, activePlatform === "SA" && s.kickerAb, activePlatform === "MV" && s.kickerDb]}>
                   LIVE TABLE ANALYTICS
                 </Text>
               ) : null}
@@ -6981,24 +7614,26 @@ export default function HomeScreen() {
               <MaterialIcons name="settings" size={desktop ? 16 : 14} color="#fff" />
               <Text style={[s.headerBtnText, !desktop && s.headerBtnTextMobile]}>連線</Text>
             </Pressable>
-            <Pressable
-              disabled={walletTransferBusy}
-              onPress={confirmTransferAll}
-              style={[
-                s.headerBtn,
-                !desktop && s.headerBtnMobile,
-                walletTransferBusy && s.headerBtnMuted,
-              ]}
-            >
-              <MaterialIcons
-                name="account-balance-wallet"
-                size={desktop ? 16 : 14}
-                color="#FFF1C6"
-              />
-              <Text style={s.headerBtnText}>
-                {walletTransferBusy ? "轉回中" : "轉回"}
-              </Text>
-            </Pressable>
+            {activePlatform !== "MV" ? (
+              <Pressable
+                disabled={walletTransferBusy}
+                onPress={confirmTransferAll}
+                style={[
+                  s.headerBtn,
+                  !desktop && s.headerBtnMobile,
+                  walletTransferBusy && s.headerBtnMuted,
+                ]}
+              >
+                <MaterialIcons
+                  name="account-balance-wallet"
+                  size={desktop ? 16 : 14}
+                  color="#FFF1C6"
+                />
+                <Text style={s.headerBtnText}>
+                  {walletTransferBusy ? "轉回中" : "轉回"}
+                </Text>
+              </Pressable>
+            ) : null}
           </View>
         </View>
         <ScrollView style={{ flex: 1 }} contentContainerStyle={s.content}>
@@ -7007,8 +7642,8 @@ export default function HomeScreen() {
               s.overview,
               !desktop && s.overviewMobile,
               activePlatform === "DG" && s.overviewDg,
-              activePlatform === "AB" && s.overviewAb,
-              activePlatform === "DB" && s.overviewDb,
+              activePlatform === "SA" && s.overviewAb,
+              activePlatform === "MV" && s.overviewDb,
             ]}
           >
             <View style={!desktop ? s.overviewTextMobile : undefined}>
@@ -7016,8 +7651,8 @@ export default function HomeScreen() {
                 style={[
                   s.overKicker,
                   activePlatform === "DG" && s.overKickerDg,
-                  activePlatform === "AB" && s.overKickerAb,
-                  activePlatform === "DB" && s.overKickerDb,
+                  activePlatform === "SA" && s.overKickerAb,
+                  activePlatform === "MV" && s.overKickerDb,
                 ]}
               >
                 REAL-TIME MONITORING
@@ -7037,8 +7672,8 @@ export default function HomeScreen() {
                     s.overStatCompact,
                     !desktop && s.overStatMobile,
                     activePlatform === "DG" && s.overStatDg,
-                    activePlatform === "AB" && s.overStatAb,
-                    activePlatform === "DB" && s.overStatDb,
+                    activePlatform === "SA" && s.overStatAb,
+                    activePlatform === "MV" && s.overStatDb,
                   ]}
                 >
                   <Text style={s.smallLabel}>連線狀態</Text>
@@ -7050,12 +7685,18 @@ export default function HomeScreen() {
                   >
                     {activeConnected
                       ? "已連線"
-                      : activePlatform === "AB" || activePlatform === "DB"
-                        ? vendorStatus[activePlatform]
-                        : "連線中"}
+                      : activePlatform === "MV"
+                        ? "僅直播"
+                        : activePlatform === "SA"
+                          ? saStatus === "未連線"
+                            ? "連線中"
+                            : saStatus
+                          : "連線中"}
                   </Text>
                   <Text style={s.overStatMeta}>
-                    {activePlatform} · {availableTableCount} 桌
+                    {activePlatform === "MV"
+                      ? "美女直播 · 無牌路"
+                      : `${platformDisplayName(activePlatform)} · ${availableTableCount} 桌`}
                   </Text>
                 </View>
                 <View style={s.platformSwitch}>
@@ -7090,7 +7731,7 @@ export default function HomeScreen() {
                     ))}
                   </View>
                   <View style={s.platformSwitchRow}>
-                    {(["AB", "DB"] as PlatformKey[]).map((p) => (
+                    {(["SA", "MV"] as PlatformKey[]).map((p) => (
                       <Pressable
                         key={p}
                         onPress={() => {
@@ -7100,17 +7741,17 @@ export default function HomeScreen() {
                         style={[
                           s.platformTab,
                           activePlatform === p &&
-                            (p === "AB" ? s.platformTabAbActive : s.platformTabDbActive),
+                            (p === "SA" ? s.platformTabAbActive : s.platformTabDbActive),
                         ]}
                       >
                         <Text
                           style={[
                             s.platformTabText,
                             activePlatform === p &&
-                              (p === "AB" ? s.platformTabTextAbActive : s.platformTabTextDbActive),
+                              (p === "SA" ? s.platformTabTextAbActive : s.platformTabTextDbActive),
                           ]}
                         >
-                          {p === "AB" ? "歐博" : p}
+                          {platformDisplayName(p)}
                         </Text>
                       </Pressable>
                     ))}
@@ -7124,9 +7765,9 @@ export default function HomeScreen() {
                   s.enterPlatformBtn,
                   activePlatform === "DG"
                     ? s.enterPlatformBtnDg
-                    : activePlatform === "AB"
+                    : activePlatform === "SA"
                       ? s.enterPlatformBtnAb
-                      : activePlatform === "DB"
+                      : activePlatform === "MV"
                         ? s.enterPlatformBtnDb
                         : s.enterPlatformBtnMt,
                   !desktop && s.enterPlatformBtnMobile,
@@ -7134,14 +7775,18 @@ export default function HomeScreen() {
                 ]}
               >
                 <MaterialIcons
-                  name="sports-esports"
+                  name={
+                    activePlatform === "MV"
+                      ? "videocam"
+                      : "sports-esports"
+                  }
                   size={desktop ? 15 : 14}
                   color={
                     activePlatform === "DG"
                       ? "#E8C778"
-                      : activePlatform === "AB"
+                      : activePlatform === "SA"
                         ? "#8EC4F0"
-                        : activePlatform === "DB"
+                        : activePlatform === "MV"
                           ? "#7EE0D2"
                           : "#7DCEF2"
                   }
@@ -7151,9 +7796,9 @@ export default function HomeScreen() {
                     s.enterPlatformBtnText,
                     activePlatform === "DG"
                       ? s.enterPlatformBtnTextDg
-                      : activePlatform === "AB"
+                      : activePlatform === "SA"
                         ? s.enterPlatformBtnTextAb
-                        : activePlatform === "DB"
+                        : activePlatform === "MV"
                           ? s.enterPlatformBtnTextDb
                           : s.enterPlatformBtnTextMt,
                     !desktop && s.enterPlatformBtnTextMobile,
@@ -7164,40 +7809,16 @@ export default function HomeScreen() {
               </Pressable>
             </View>
           </View>
-          {activePlatform === "AB" || activePlatform === "DB" ? (
-            <View style={s.categorySwitch}>
-              {(activePlatform === "AB"
-                ? ["一般", "快速", "免佣", "保險", "VIP", "所有"]
-                : ["極速", "經典", "完美", "共享", "包桌", "電投", "所有"]
-              ).map((category) => (
-                <Pressable
-                  key={category}
-                  onPress={() => setActiveCategory(category)}
-                  style={[
-                    s.categoryTab,
-                    activeCategory === category &&
-                      (activePlatform === "DB"
-                        ? s.categoryTabDbActive
-                        : s.categoryTabAbActive),
-                  ]}
-                >
-                  <Text
-                    numberOfLines={1}
-                    style={[
-                      s.categoryTabText,
-                      activeCategory === category && s.categoryTabTextActive,
-                    ]}
-                  >
-                    {category}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-          ) : null}
           <View style={s.listHead}>
-            <Text style={s.listTitle}>所有房型</Text>
+            <Text style={s.listTitle}>
+              {activePlatform === "MV" ? "直播牌卡" : "所有房型"}
+            </Text>
             <Text style={s.listHint}>
-              {activePlatform} · 歷史牌局 · 即時更新 · 荷官同步
+              {activePlatform === "MV"
+                ? "美女直播 · 程式內 iframe 開啟 · Cloudflare 擋代理時改直連仍留在站內 · 不轉點 · 無懸浮"
+                : activePlatform === "SA"
+                  ? `SA · 開桌 · ${tables.length} 桌｜同步 ${saTables.filter(isSaOpenTable).length} · 顯示 D01/C01`
+                  : `${platformDisplayName(activePlatform)} · 歷史牌局 · 即時更新 · 荷官同步`}
             </Text>
           </View>
           <View
@@ -7205,57 +7826,67 @@ export default function HomeScreen() {
               s.cardsGrid,
               desktop && s.cardsGridDesktop,
               desktop && s.cardsGridDesktopCentered,
-              !desktop && activePlatform === "DB" && s.cardsGridDbMobile,
+              !desktop && activePlatform === "MV" && s.cardsGridDbMobile,
             ]}
           >
-            {tables.length === 0 && (activePlatform === "AB" || activePlatform === "DB") ? (
+            {tables.length === 0 && activePlatform === "SA" ? (
               <View style={s.vendorEmptyState}>
-                <MaterialIcons name="sync" size={22} color="#58B8ED" />
+                <MaterialIcons name="sports-esports" size={22} color="#58B8ED" />
                 <Text style={s.vendorEmptyTitle}>
-                  {vendorStatus[activePlatform as VendorKind] === "連線失敗"
-                    ? "尚未取得真實桌台"
-                    : "正在同步真實桌台"}
+                  {saConnected ? "目前沒有 SA 開桌" : "SA 連線中"}
                 </Text>
-                <Text style={s.vendorEmptyText}>{vendorMessage[activePlatform as VendorKind]}</Text>
+                <Text style={s.vendorEmptyText}>
+                  {saConnected
+                    ? "已連線，只顯示大廳實際開桌（TableMode 開／GameStart／牌路）。關桌與空佔位不會列出。"
+                    : "正在經 TZ／SALI 授權連線。連上後只顯示開桌，不會預先塞入空桌。"}
+                </Text>
               </View>
             ) : null}
-            {tables.map((t) => (
-              <View
-                key={t.apiId}
-                style={
-                  desktop
-                    ? activePlatform === "AB" || activePlatform === "DB"
-                      ? s.cardWrapVendorDesktop
-                      : s.cardWrapDesktop
-                    : activePlatform === "DB"
-                      ? s.cardWrapDbMobile
-                      : s.cardWrap
-                }
-              >
-                <View
-                  style={
-                    desktop && (activePlatform === "AB" || activePlatform === "DB")
-                      ? s.vendorCardScaleDesktop
-                      : !desktop && activePlatform === "DB"
-                        ? s.dbCardScaleMobile
-                        : undefined
-                  }
-                >
-                  <MemoTableCard
-                    table={t}
-                    desktop={desktop}
-                    onAction={stableTableAction}
-                    connected={activeConnected}
-                    platform={activePlatform}
-                    scaled={
-                      desktop
-                        ? activePlatform === "AB" || activePlatform === "DB"
-                        : activePlatform === "DB"
+            {activePlatform === "MV"
+              ? tables.map((t) => (
+                  <View
+                    key={t.apiId}
+                    style={
+                      desktop ? s.liveCardWrapDesktop : s.liveCardWrapMobile
                     }
-                  />
-                </View>
-              </View>
-            ))}
+                  >
+                    <MemoLiveStreamCard
+                      table={t}
+                      desktop={desktop}
+                      busy={enterBlocked}
+                      onEnter={(table) => void openCurrentPlatform(table)}
+                    />
+                  </View>
+                ))
+              : tables.map((t) => (
+                  <View
+                    key={t.apiId}
+                    style={
+                      desktop
+                        ? activePlatform === "SA"
+                          ? s.cardWrapVendorDesktop
+                          : s.cardWrapDesktop
+                        : s.cardWrap
+                    }
+                  >
+                    <View
+                      style={
+                        desktop && activePlatform === "SA"
+                          ? s.vendorCardScaleDesktop
+                          : undefined
+                      }
+                    >
+                      <MemoTableCard
+                        table={t}
+                        desktop={desktop}
+                        onAction={stableTableAction}
+                        connected={activeConnected}
+                        platform={activePlatform}
+                        scaled={desktop && activePlatform === "SA"}
+                      />
+                    </View>
+                  </View>
+                ))}
           </View>
         </ScrollView>
 
@@ -7461,7 +8092,7 @@ export default function HomeScreen() {
                 </Pressable>
               </View>
               <Text style={s.modalNote}>
-                MT、DG、歐博、DB 進入牌路主頁後會自動連線。歐博與 DB 互不影響，一邊斷線或重連不會關掉另一邊。
+                MT、DG、SA 進入牌路主頁後會自動連線並顯示即時牌路與懸浮輔助。SA／DG／美女直播進入時皆在站內 iframe 遊玩（代理失敗則直連授權網址，仍不開新分頁）。美女直播不轉點、無懸浮輔助。
               </Text>
               <View style={s.connectionStatusRow}>
                 <View style={s.connectionStatusCard}>
@@ -7486,26 +8117,6 @@ export default function HomeScreen() {
                     {dgConnected || dgTables.length > 0 ? "已連線" : "連線中"}
                   </Text>
                 </View>
-                <View style={s.connectionStatusCard}>
-                  <Text style={s.fieldLabel}>歐博</Text>
-                  <Text style={[s.connectionStatusText, { color: vendorConnected.AB || vendorTables.AB.length > 0 ? "#4BD693" : vendorStatus.AB === "連線失敗" ? "#EF626A" : "#FFB54D" }]}>
-                    {vendorConnected.AB || vendorTables.AB.length > 0 ? "已連線" : vendorStatus.AB}
-                  </Text>
-                  <Text style={s.vendorDiagnosticText}>{vendorMessage.AB}</Text>
-                  <Pressable style={s.vendorReconnectBtn} onPress={() => reconnectVendor("AB", true)}>
-                    <Text style={s.vendorReconnectBtnText}>只重連歐博</Text>
-                  </Pressable>
-                </View>
-                <View style={s.connectionStatusCard}>
-                  <Text style={s.fieldLabel}>DB</Text>
-                  <Text style={[s.connectionStatusText, { color: vendorConnected.DB || vendorTables.DB.length > 0 ? "#4BD693" : vendorStatus.DB === "連線失敗" ? "#EF626A" : "#FFB54D" }]}>
-                    {vendorConnected.DB || vendorTables.DB.length > 0 ? "已連線" : vendorStatus.DB}
-                  </Text>
-                  <Text style={s.vendorDiagnosticText}>{vendorMessage.DB}</Text>
-                  <Pressable style={s.vendorReconnectBtn} onPress={() => reconnectVendor("DB", true)}>
-                    <Text style={s.vendorReconnectBtnText}>只重連 DB</Text>
-                  </Pressable>
-                </View>
               </View>
               <Text style={s.fieldLabel}>MT 即時牌路 WebSocket（固定）</Text>
               <TextInput
@@ -7528,10 +8139,6 @@ export default function HomeScreen() {
                 selectTextOnFocus
                 style={s.modalInput}
               />
-              <Text style={s.fieldLabel}>歐博牌路授權網址（唯讀）</Text>
-              <TextInput value={readonlyConnectionUrl(vendorUrls.AB)} editable={false} selectTextOnFocus style={s.modalInput} />
-              <Text style={s.fieldLabel}>DB 牌路授權網址（唯讀）</Text>
-              <TextInput value={readonlyConnectionUrl(vendorUrls.DB)} editable={false} selectTextOnFocus style={s.modalInput} />
               <Text style={s.fieldLabel}>最新連線紀錄</Text>
               <View style={s.logBox}>
                 <Text style={s.logText}>
@@ -7728,7 +8335,7 @@ export default function HomeScreen() {
                         numberOfLines={1}
                         style={[s.title, !desktop && s.titleMobile]}
                       >
-                        {gameViewPlatform} MATRIX
+                        {platformDisplayName(gameViewPlatform)} MATRIX
                       </Text>
                       {desktop ? <ThreadsSignature /> : null}
                     </View>
@@ -7756,12 +8363,14 @@ export default function HomeScreen() {
                     onPress={closeGameView}
                   >
                     <MaterialIcons name="arrow-back" size={desktop ? 16 : 14} color="#fff" />
-                    <Text style={[s.headerBtnText, !desktop && s.headerBtnTextMobile]}>回牌路</Text>
+                    <Text style={[s.headerBtnText, !desktop && s.headerBtnTextMobile]}>
+                      {gameViewPlatform === "MV" ? "返回" : "回牌路"}
+                    </Text>
                   </Pressable>
                 </View>
               </View>
               <View style={[s.iframeWrap, { pointerEvents: "auto" } as any]}>
-                {Platform.OS === "web" ? (
+                {Platform.OS === "web" && gameViewUrl ? (
                   <StableGameIframe
                     src={gameViewUrl}
                     style={{
@@ -7791,19 +8400,23 @@ export default function HomeScreen() {
           pointerEvents="box-none"
           style={[StyleSheet.absoluteFillObject, { zIndex: 10000 }]}
         >
-        {MultiTableRadar({ insideMt: mtOpen })}
-        {FloatingAssistant({ insideMt: mtOpen })}
-        {V38Calculator({ insideMt: mtOpen })}
-        {TerminalParityModel({ insideMt: mtOpen })}
-        <FloatingOrb
-          position={orbPosition}
-          responder={orbResponder}
-          size={orbSize}
-          iconSize={orbIconSize}
-          connected={activeConnected}
-          insideMt={mtOpen}
-          platform={activePlatform}
-        />
+        {activePlatform === "MV" || gameViewPlatform === "MV" ? null : (
+          <>
+            {MultiTableRadar({ insideMt: mtOpen })}
+            {FloatingAssistant({ insideMt: mtOpen })}
+            {V38Calculator({ insideMt: mtOpen })}
+            {TerminalParityModel({ insideMt: mtOpen })}
+            <FloatingOrb
+              position={orbPosition}
+              responder={orbResponder}
+              size={orbSize}
+              iconSize={orbIconSize}
+              connected={activeConnected}
+              insideMt={mtOpen}
+              platform={activePlatform}
+            />
+          </>
+        )}
         </View>
       </View>
     </ScreenContainer>
@@ -8008,6 +8621,8 @@ const s = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,.26)",
     borderWidth: 1,
     borderColor: "rgba(130,151,166,.22)",
+    zIndex: 5,
+    position: "relative" as any,
   },
   platformSwitchRow: { flexDirection: "row", gap: 4 },
   platformTab: {
@@ -8017,6 +8632,10 @@ const s = StyleSheet.create({
     borderRadius: 4,
     alignItems: "center",
     justifyContent: "center",
+    // Keep inactive tabs readable on SA/DG dark panels (avoid "missing" look).
+    borderWidth: 1,
+    borderColor: "rgba(180,198,214,.28)",
+    backgroundColor: "rgba(18,28,40,.55)",
   },
   platformTabMtActive: {
     backgroundColor: "#176FA7",
@@ -8039,8 +8658,8 @@ const s = StyleSheet.create({
     borderColor: "#3CB8A8",
   },
   platformTabText: {
-    color: "#7F909C",
-    fontSize: 9,
+    color: "#D7E2EA",
+    fontSize: 10,
     fontWeight: "900",
     letterSpacing: 0.5,
   },
@@ -8132,6 +8751,94 @@ const s = StyleSheet.create({
   },
   vendorEmptyTitle: { color: "#EAF8FF", fontSize: 14, fontWeight: "900" },
   vendorEmptyText: { color: "#91A7B8", fontSize: 10, textAlign: "center" },
+  liveCardWrapDesktop: {
+    width: "calc(33.333% - 7px)" as any,
+    minWidth: 210,
+  },
+  liveCardWrapMobile: {
+    width: "calc(50% - 3px)" as any,
+  },
+  liveCard: {
+    backgroundColor: "#0A1614",
+    borderWidth: 1,
+    borderColor: "#2E8A7A",
+    borderRadius: 10,
+    overflow: "hidden",
+    marginBottom: 8,
+  },
+  liveCardDesktop: { marginBottom: 0 },
+  liveCardMedia: {
+    // Square covers like score777 232×232; short landscape boxes crop faces.
+    aspectRatio: 1,
+    width: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#0E221E",
+    position: "relative",
+    overflow: "hidden",
+  },
+  liveCardPhoto: {
+    ...StyleSheet.absoluteFillObject,
+    width: "100%",
+    height: "100%",
+    resizeMode: "cover",
+  },
+  liveCardPhotoOff: {
+    opacity: 0.55,
+  },
+  liveCardGlow: {
+    position: "absolute",
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: "rgba(46,138,122,0.22)",
+  },
+  liveBadge: {
+    position: "absolute",
+    top: 8,
+    left: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "rgba(180,32,48,0.92)",
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 4,
+  },
+  liveBadgeOff: {
+    backgroundColor: "rgba(40,55,52,0.92)",
+  },
+  liveBadgeDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#fff",
+  },
+  liveBadgeText: {
+    color: "#fff",
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 0.6,
+  },
+  liveCardBody: { paddingHorizontal: 10, paddingVertical: 9, gap: 4 },
+  liveCardTitle: { color: "#EAF8FF", fontSize: 14, fontWeight: "800" },
+  liveCardMeta: { color: "#7FA79E", fontSize: 10, lineHeight: 14 },
+  liveCardCta: {
+    marginTop: 4,
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#1A6B5C",
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  liveCardCtaOff: {
+    backgroundColor: "#1A2A27",
+  },
+  liveCardCtaText: { color: "#E8FFF9", fontSize: 11, fontWeight: "800" },
+  liveCardCtaTextOff: { color: "#9BB8B0" },
   tableCard: {
     backgroundColor: "#08111A",
     borderWidth: 1,
@@ -9138,10 +9845,12 @@ const s = StyleSheet.create({
   },
   confidenceText: { fontSize: 8, fontWeight: "900", textShadowRadius: 7 },
   radarLauncher: {
+    // Right side below overview (not covering MT/DG tabs). Draggable via panHandlers.
     position: "absolute",
-    top: 66,
+    top: 175,
     right: 14,
-    zIndex: 90,
+    left: "auto" as any,
+    zIndex: 40,
     width: 210,
     height: 32,
     paddingHorizontal: 9,
@@ -9161,7 +9870,7 @@ const s = StyleSheet.create({
     cursor: "grab" as any,
   },
   radarLauncherMt: { zIndex: 9998 },
-  radarLauncherMobile: { top: 61, right: 8, width: 188 },
+  radarLauncherMobile: { top: 155, right: 8, left: "auto" as any, width: 188 },
   radarLauncherText: { color: "#EAF6FF", fontSize: 9, fontWeight: "900" },
   radarLauncherBestWrap: {
     marginLeft: "auto",
@@ -10022,6 +10731,49 @@ const s = StyleSheet.create({
   },
   mtTitle: { color: "#fff", fontSize: 15, fontWeight: "900" },
   iframeWrap: { flex: 1, minHeight: 0, position: "relative", backgroundColor: "#000" },
+  externalLaunchPanel: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 28,
+    gap: 12,
+    backgroundColor: "#071018",
+  },
+  externalLaunchTitle: {
+    color: "#EAF8FF",
+    fontSize: 22,
+    fontWeight: "900",
+    letterSpacing: 0.4,
+  },
+  externalLaunchText: {
+    color: "#9BB4C6",
+    fontSize: 13,
+    lineHeight: 20,
+    textAlign: "center",
+    maxWidth: 420,
+  },
+  externalLaunchBtn: {
+    marginTop: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#1F6FEB",
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  externalLaunchBtnText: {
+    color: "#F4FBFF",
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  externalLaunchUrl: {
+    marginTop: 8,
+    color: "#5F7A8D",
+    fontSize: 11,
+    textAlign: "center",
+    maxWidth: 520,
+  },
   nativeMtFallback: { flex: 1, alignItems: "center", justifyContent: "center" },
   toast: {
     position: "absolute",

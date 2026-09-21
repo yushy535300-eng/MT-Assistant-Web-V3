@@ -75,7 +75,13 @@ http://localhost:3000
 ## TZ 白名單資料庫（Render PostgreSQL）
 本版白名單已改為 PostgreSQL。Render 建立 PostgreSQL 後，把 Web Service 的 `DATABASE_URL` 設為該資料庫的 Internal Database URL（同區域優先），並設定 `TZ_WHITELIST_ENABLED=true`。第一次成功連線會自動建立白名單資料表並匯入第一批 98 個 TZ 帳號；之後新增、停用、刪除都直接寫入 PostgreSQL，不需要重新部署。
 
-## v18 — TZ/OFA 雙平台登入＋止損提醒
+## 平台進入方式
+
+- **MT / DG**：原流程（牌路連線 + iframe 進桌），請勿改動。
+- **SA（沙龍）**：主頁顯示即時牌路桌卡與懸浮輔助（後端連 `wss://scs*.connect2explorer.com`）；進入遊戲仍經 TZ `game/login` → 同源代理 iframe；進站時背景 WS 改吃代理上游封包以免雙重登入。
+- **美女直播**：只看直播、**不連牌路**；TZ `LIVE77` `/api/v2/game/LIVE77/login` → `registerAndLogin?userid=&time=&sign=` 於**新分頁**開啟（Cloudflare 無法經伺服器代理）；主頁 LIVE 牌卡同樣先走 TZ 授權；不轉點、無懸浮輔助。演示模式無法進 LIVE77，需真實 TZ 登入。
+- 本機 UI 可用 `http://127.0.0.1:PORT/?demo=1` 略過登入，但演示模式無法真正進站。
+
 - 登入介面仍維持「TZ 帳號 / TZ 密碼」，不改原本 UI。
 - 後台白名單以平台下拉選單選擇 TZ / OFA，登入時依白名單平台走對應驗證。
 - 白名單不綁定裝置。

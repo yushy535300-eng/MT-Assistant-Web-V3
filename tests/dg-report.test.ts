@@ -44,6 +44,9 @@ describe("DG daily report isolation", () => {
     expect(platformTodayPnl("DG", 999, report, now)).toBe(0);
     expect(platformTodayPnl("MT", 999, report, now)).toBe(999);
     expect(platformTodayPnl("DG", 999, report, now + 86400000)).toBeNull();
+    // SA / MV must never inherit the MT total.
+    expect(platformTodayPnl("SA", 999, report, now)).toBeNull();
+    expect(platformTodayPnl("MV", 999, null, now)).toBeNull();
   });
   it("decodes protobuf doubles in packed and unpacked forms", () => {
     for (const packed of [false, true]) {

@@ -372,7 +372,16 @@ export function registerDgGameProxy(options: RegisterOptions) {
     // before the foreground browser establishes the one replacement DG session.
     await new Promise(resolve => setTimeout(resolve, 250));
     proxySessions.set(sessionId, { sessionId, origin, launchUrl: gameUrl, lastUsed: Date.now() });
-    res.setHeader("Set-Cookie", `${COOKIE_NAME}=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=14400${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
+    const xf = String(req.headers["x-forwarded-proto"] || "")
+      .split(",")[0]
+      .trim()
+      .toLowerCase();
+    const secure =
+      xf === "https" ||
+      (!xf && (req.secure || String(req.protocol || "").toLowerCase() === "https"))
+        ? "; Secure"
+        : "";
+    res.setHeader("Set-Cookie", `${COOKIE_NAME}=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=14400${secure}`);
     return res.json({ ok: true, url: url.pathname + url.search });
   });
 
@@ -380,7 +389,17 @@ export function registerDgGameProxy(options: RegisterOptions) {
     const sessionId = String(req.body?.sessionId || "");
     if (!sessionId || (!hasActiveSession(sessionId) && !getRelay(sessionId))) return res.status(401).json({ ok: false, error: "session_invalid" });
     proxySessions.delete(sessionId);
-    res.setHeader("Set-Cookie", `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
+    const xfLeave = String(req.headers["x-forwarded-proto"] || "")
+      .split(",")[0]
+      .trim()
+      .toLowerCase();
+    const secureLeave =
+      xfLeave === "https" ||
+      (!xfLeave &&
+        (req.secure || String(req.protocol || "").toLowerCase() === "https"))
+        ? "; Secure"
+        : "";
+    res.setHeader("Set-Cookie", `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureLeave}`);
     const relay = getRelay(sessionId);
     if (relay) {
       try { await relay.leaveBridgeMode(); }

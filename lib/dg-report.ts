@@ -25,6 +25,13 @@ export function parseDgDailyPnl(bean: any, requestDay: string, now = Date.now())
   return { value: bean.dList[2], day: requestDay, updatedAt: now };
 }
 
+/**
+ * MT / DG display selector. SA must not fall back to MT — use
+ * `selectPlatformTodayPnl` in lib/platform-report.ts for SA.
+ */
 export function platformTodayPnl(platform: string, mt: number | null, dg: DgDailyPnl | null, now = Date.now()) {
-  return platform === "DG" ? (dg?.day === dgReportDay(now) ? dg.value : null) : mt;
+  if (platform === "DG") return dg?.day === dgReportDay(now) ? dg.value : null;
+  if (platform === "MT") return mt;
+  // SA / MV / unknown: never mix into the MT bucket.
+  return null;
 }

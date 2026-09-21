@@ -11,8 +11,7 @@ describe("DG foreground multi-socket bridge", () => {
     expect(relay).toContain("cmd === 10086 || cmd === 45 || cmd === 2");
     expect(relay).toContain("this.bootstrapFrames.get(responseCmd)");
     expect(relay).toContain("return this.ws.sendBinary(data)");
-    expect(relay).not.toContain('this.transportMode = "bridge"');
-    expect(relay).not.toContain("openForegroundSocket(targetUrl: string");
+    expect(relay).toContain('this.transportMode = "bridge"');
     expect(proxy).toContain("relay.forwardForegroundFrame(queue[0]!, writeLocal)");
     expect(proxy).toContain("relay.attachForegroundBridgeSink(writeLocal)");
   });

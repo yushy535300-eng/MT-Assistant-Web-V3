@@ -1,49 +1,35 @@
 # Render 部署
 
-## 1. 先把程式推到 GitHub
+MT／DG 輔助程式。Docker 部署較穩（DG 背景可能用到 Chromium）。
 
-本專案推上去之後，在 Render 選 **New Web Service** → 連這個 GitHub repo。
+## 建議：Docker Web Service
 
-## 2. Render 設定
+1. Render → **New Web Service** → 連 GitHub repo  
+2. **Language / Runtime:** Docker  
+3. 使用本 repo 的 `Dockerfile`  
+4. 第一次勾 **Clear build cache & deploy**
 
-- **Runtime:** Node
-- **Root Directory:** 空白
-- **Build Command:**
+## 備案：Native Node
 
-```bash
-pnpm install --frozen-lockfile && pnpm build
-```
+- **Build Command:** `pnpm install --frozen-lockfile && pnpm build`
+- **Start Command:** `pnpm start`
 
-- **Start Command:**
+部署後打開 `https://你的網域/api/health` 確認 `ok: true`。
 
-```bash
-pnpm start
-```
-
-第一次或新增 `postinstall`（安裝 Chromium）後，請勾 **Clear build cache & deploy**。只重啟舊服務不會裝 Chrome，歐博／DB 背景擷取會失敗。
-
-## 3. Environment Variables
-
-最少要設：
+## Environment Variables
 
 | 變數 | 說明 |
 |------|------|
 | `TZ_WHITELIST_ENABLED` | 第一次先 `false`，確認能登入後再改 `true` |
-| `ADMIN_PASSWORD` | `/admin` 後台密碼，請用長且唯一的密碼 |
-| `DATABASE_URL` | Render PostgreSQL 的 Internal Database URL（啟用白名單時必填） |
+| `ADMIN_PASSWORD` | `/admin` 後台密碼 |
+| `DATABASE_URL` | Render PostgreSQL Internal URL（啟用白名單時必填） |
+| `DG_CHROME_PATH` | 可選，指定 Chrome 路徑 |
+| `PORT` | Render 自動給 |
 
-可選：
+登入用 TZ／OFA 帳密；白名單在 `/admin` 管理。
 
-| 變數 | 說明 |
-|------|------|
-| `DG_CHROME_PATH` | 若機器已有 Chrome，可指定執行檔路徑 |
-| `PORT` | Render 會自動給，不必自設 |
+## 平台
 
-登入仍用 TZ／OFA 帳密；白名單帳號在 `/admin` 管理。
-
-## 4. 建議流程
-
-1. 建 Render PostgreSQL（與 Web Service 同區域）。
-2. Web Service 的 `DATABASE_URL` 貼 Internal URL。
-3. `TZ_WHITELIST_ENABLED=false` 先部署並登入 `/admin`，把你的 TZ 帳號加進白名單。
-4. 再把 `TZ_WHITELIST_ENABLED` 改成 `true` 後 Redeploy。
+- **MT / DG**：牌路連線與進桌（勿隨意改動）
+- **SA**：主頁即時牌路（connect2explorer relay）+ 懸浮輔助；進入 → TZ `/api/v2/game/{code}/login` → 同源代理內嵌（剝 X-Frame），進站時轉 bridge 吃遊戲 WS。
+- **美女直播**：登入後按進入 → TZ `LIVE77` 授權 → 新分頁 `registerAndLogin`；主頁牌卡點進、不轉點、無懸浮球
