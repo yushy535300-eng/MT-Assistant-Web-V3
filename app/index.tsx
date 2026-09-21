@@ -6255,17 +6255,15 @@ export default function HomeScreen() {
                 overscrollBehavior: "contain",
                 transformOrigin: "top left",
                 pointerEvents: "auto",
-                ...(!desktop ? { zoom: panelMobileScale } : null),
               } as any)
             : null,
           {
-            transform:
-              !desktop && Platform.OS !== "web"
-                ? [
-                    ...panelPosition.getTranslateTransform(),
-                    { scale: panelMobileScale },
-                  ]
-                : panelPosition.getTranslateTransform(),
+            transform: !desktop
+              ? [
+                  ...panelPosition.getTranslateTransform(),
+                  { scale: panelMobileScale },
+                ]
+              : panelPosition.getTranslateTransform(),
           },
         ]}
       >
