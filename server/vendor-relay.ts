@@ -496,8 +496,18 @@ class VendorRelay{
       this.transport=null;
       if(current)await Promise.resolve(current.stop()).catch(()=>{});
       if(this.launchAuth){
-        this.gameUrl=await fetchVendorLaunchUrl({...this.launchAuth,kind:"AB"});
-        this.persistRuntime();
+        try{
+          this.gameUrl=await fetchVendorLaunchUrl({...this.launchAuth,kind:"AB"});
+          this.persistRuntime();
+        }catch(authError:any){
+          // Render 機房 IP 代打 TZ 常被擋；授權失效時必須請瀏覽器重拿 session。
+          if(reason==="6076"||reason==="leave"||/授權|SessionID|6076/i.test(String(reason))){
+            this.setStatus("error","歐博授權失效，請重新整理頁面（勿依賴伺服器代打 TZ）");
+            this.event(`歐博授權代打失敗｜${authError?.message||authError}`);
+            return;
+          }
+          this.event(`伺服器代打授權失敗，沿用現有網址｜${authError?.message||authError}`);
+        }
       }
       if(this.pausedForGame||this.isThisAbForeground()||this.stopped)return;
       await this.start();
@@ -528,26 +538,38 @@ class VendorRelay{
     this.startJob=(async()=>{
       if(this.pausedForGame||this.isThisAbForeground()||this.transport)return;
       this.stopped=false;
-      const transport=await startVendorBrowserTransport({sessionId:this.key,gameUrl:this.gameUrl,label:this.kind,
-        shouldAbort:()=>this.pausedForGame||this.isThisAbForeground()||this.stopped||(this.kind==="DB"&&this.isDbRateLimited()&&!this.map.size),
-        onLog:m=>{
-          this.event(m);
-          if(this.kind==="AB"&&!this.map.size&&!this.isThisAbForeground()&&isAbSessionBlockedCapture(m))void this.recoverAbHall("6076");
-          if(this.kind==="DB"&&!this.map.size&&isDbHallBlockedCapture(m)){
-            if(!this.isDbRateLimited())this.markDbWaf();
-            else this.setStatus("error","DB 官方暫時限流，請稍後再連");
-          }
-        },onObject:o=>this.handle(o),onFailure:m=>{
-          if(this.transport===transport)this.transport=null;
-          if(this.pausedForGame||this.isThisAbForeground())return;
-          if(this.kind==="DB"){
-            if(this.isDbRateLimited()){this.scheduleDbUnblockStart();return;}
-            void this.recoverDbHall("chrome");
-            return;
-          }
-          this.setStatus("error",m);
-          if(this.kind==="AB"&&!this.isThisAbForeground())void this.recoverAbHall("chrome");
-        }});
+      this.setStatus("connecting",`${this.kind==="AB"?"歐博":"DB"} 正在啟動背景瀏覽器`);
+      let transport:VendorBrowserTransport;
+      try{
+        transport=await startVendorBrowserTransport({sessionId:this.key,gameUrl:this.gameUrl,label:this.kind,
+          shouldAbort:()=>this.pausedForGame||this.isThisAbForeground()||this.stopped||(this.kind==="DB"&&this.isDbRateLimited()&&!this.map.size),
+          onLog:m=>{
+            this.event(m);
+            if(this.kind==="AB"&&!this.map.size&&!this.isThisAbForeground()&&isAbSessionBlockedCapture(m))void this.recoverAbHall("6076");
+            if(this.kind==="DB"&&!this.map.size&&isDbHallBlockedCapture(m)){
+              if(!this.isDbRateLimited())this.markDbWaf();
+              else this.setStatus("error","DB 官方暫時限流，請稍後再連");
+            }
+          },onObject:o=>this.handle(o),onFailure:m=>{
+            if(this.transport===transport)this.transport=null;
+            if(this.pausedForGame||this.isThisAbForeground())return;
+            if(this.kind==="DB"){
+              if(this.isDbRateLimited()){this.scheduleDbUnblockStart();return;}
+              void this.recoverDbHall("chrome");
+              return;
+            }
+            this.setStatus("error",m);
+            if(this.kind==="AB"&&!this.isThisAbForeground())void this.recoverAbHall("chrome");
+          }});
+      }catch(error:any){
+        const msg=String(error?.message||error||"背景瀏覽器啟動失敗");
+        const chromeHint=/找不到 Chrome|Chromium|shared librar|postinstall/i.test(msg)
+          ? `${this.kind==="AB"?"歐博":"DB"} 連線失敗：${msg}`
+          : `${this.kind==="AB"?"歐博":"DB"} 背景瀏覽器啟動失敗：${msg}`;
+        this.setStatus("error",chromeHint);
+        this.event(chromeHint);
+        throw error;
+      }
       if(this.pausedForGame&&this.kind==="DB"){
         this.transport=transport;
         await Promise.resolve(transport.park?.()).catch(()=>{});
@@ -904,6 +926,8 @@ export async function startVendorRelay(sessionId:string,kind:VendorKind,gameUrl:
     return old;
   }
   const relay=new VendorRelay(key,kind,gameUrl,launchAuth);relays.set(key,relay);
+  // Keep fire-and-forget so /api/vendor/start still returns quickly and SSE can
+  // stream connecting/error. start() itself now sets status=error on Chrome failure.
   void relay.start().catch((e:any)=>{
     console.error(`[Vendor ${kind}] start failed｜${e?.message||e}`);
   });

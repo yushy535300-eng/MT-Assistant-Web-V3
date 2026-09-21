@@ -15,7 +15,7 @@ import { registerAbGameProxy, hasAbForegroundCookie, restoreAbProxySession, endA
 import { registerDbGameProxy, hasDbForegroundCookie, restoreDbProxySession, endDbProxyForeground } from "../vendor-db-proxy";
 import { getVendorRelay, startVendorRelay, adoptPausedVendorRelay, stopVendorRelay, sweepVendorRelays, shouldIgnorePausedVendorStart, setAbGameForeground, type VendorKind } from "../vendor-relay";
 import { fetchVendorLaunchUrl, vendorLaunchIsReady } from "../vendor-launch";
-import { killLeftoverVendorChrome } from "../vendor-chromium";
+import { killLeftoverVendorChrome, getChromeStatus } from "../vendor-chromium";
 import { loadPersistedVendors } from "../vendor-persist";
 import { restoreTrackerSessions } from "../sessions";
 
@@ -52,7 +52,16 @@ async function startServer() {
 
   app.get("/api/health", (_req, res) => {
     const mem=process.memoryUsage();
-    res.json({ ok: true, timestamp: Date.now(), memoryMb: { rss: Math.round(mem.rss/1048576), heapUsed: Math.round(mem.heapUsed/1048576) } });
+    const chrome=getChromeStatus();
+    res.json({
+      ok: true,
+      timestamp: Date.now(),
+      chrome,
+      memoryMb: { rss: Math.round(mem.rss/1048576), heapUsed: Math.round(mem.heapUsed/1048576) },
+    });
+  });
+  app.get("/api/vendor/chrome", (_req, res) => {
+    res.json({ ok: true, ...getChromeStatus() });
   });
 
   const dgSweepTimer=setInterval(()=>{

@@ -37,13 +37,15 @@ export type VendorBrowserTransport = {
 type CdpMessage = { id?: number; method?: string; params?: any; result?: any; error?: any; sessionId?: string };
 type RequestMeta = { url: string; type: string; method: string };
 
-function findChromeExecutable() {
+export function findChromeExecutable() {
   const root = process.cwd();
   const localApp = process.env.LOCALAPPDATA || '';
   const candidates = [
     process.env.DG_CHROME_PATH,
     process.env.CHROME_PATH,
     path.join(root, '.chrome', 'opt', 'google', 'chrome', 'google-chrome'),
+    path.join(root, '.chrome', 'chrome-linux64', 'chrome'),
+    path.join(root, '.chrome', 'chrome-headless-shell-linux64', 'chrome-headless-shell'),
     '/usr/bin/google-chrome-stable',
     '/usr/bin/google-chrome',
     '/usr/bin/chromium',
@@ -63,6 +65,25 @@ function findChromeExecutable() {
     if (first && fs.existsSync(first)) return first;
   } catch {}
   return "";
+}
+
+export function getChromeStatus() {
+  const executable = findChromeExecutable();
+  return {
+    available: !!executable,
+    executable: executable || null,
+    hint: executable
+      ? null
+      : "找不到 Chrome/Chromium；請 Clear build cache 後重新部署，或改用 Docker（見 RENDER_DEPLOY.md）",
+  };
+}
+
+/** Serialize Chrome launches so AB+DB don't OOM the Render free tier at the same instant. */
+let chromeLaunchTail: Promise<unknown> = Promise.resolve();
+function withChromeLaunchLock<T>(job: () => Promise<T>): Promise<T> {
+  const run = chromeLaunchTail.then(job, job);
+  chromeLaunchTail = run.then(() => undefined, () => undefined);
+  return run;
 }
 
 function isDgWs(url: string) {
@@ -165,67 +186,73 @@ class CdpClient {
 }
 
 async function launchChrome(executable: string, sessionId: string, onLog: (message: string) => void, extraArgs: string[] = []) {
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), `dg-chrome-${sessionId.slice(0, 8)}-`));
-  const args = [
-    '--headless=new',
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-gpu',
-    '--disable-component-update',
-    '--disable-default-apps',
-    '--disable-extensions',
-    '--disable-sync',
-    '--disable-features=TranslateUI',
-    '--disable-blink-features=AutomationControlled',
-    '--metrics-recording-only',
-    '--mute-audio',
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--password-store=basic',
-    '--use-mock-keychain',
-    '--autoplay-policy=no-user-gesture-required',
-    '--lang=zh-TW',
-    '--remote-debugging-address=127.0.0.1',
-    '--remote-debugging-port=0',
-    `--user-data-dir=${profile}`,
-    `--user-agent=${NORMAL_CHROME_UA}`,
-    '--window-size=1280,720',
-    ...extraArgs,
-    'about:blank',
-  ];
+  return withChromeLaunchLock(async () => {
+    const profile = fs.mkdtempSync(path.join(os.tmpdir(), `dg-chrome-${sessionId.slice(0, 8)}-`));
+    const args = [
+      '--headless=new',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-component-update',
+      '--disable-default-apps',
+      '--disable-extensions',
+      '--disable-sync',
+      '--disable-features=TranslateUI',
+      '--disable-blink-features=AutomationControlled',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--password-store=basic',
+      '--use-mock-keychain',
+      '--autoplay-policy=no-user-gesture-required',
+      '--lang=zh-TW',
+      '--remote-debugging-address=127.0.0.1',
+      '--remote-debugging-port=0',
+      `--user-data-dir=${profile}`,
+      `--user-agent=${NORMAL_CHROME_UA}`,
+      '--window-size=1280,720',
+      ...extraArgs,
+      'about:blank',
+    ];
 
-  const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'] }) as ChildProcessWithoutNullStreams;
-  let stderr = '';
-  let resolved = false;
-  const wsUrl = await new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      if (resolved) return;
-      resolved = true;
-      try { child.kill('SIGKILL'); } catch {}
-      reject(new Error(`Chromium launch timeout${stderr ? `: ${stderr.slice(-500)}` : ''}`));
-    }, 12000);
-    const inspect = (chunk: Buffer) => {
-      const text = chunk.toString('utf8'); stderr += text;
-      const m = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/i);
-      if (m?.[1] && !resolved) {
-        resolved = true; clearTimeout(timer); resolve(m[1]);
-      }
-    };
-    child.stderr.on('data', inspect);
-    child.stdout.on('data', inspect);
-    child.once('exit', (code, signal) => {
-      if (resolved) return;
-      resolved = true; clearTimeout(timer);
-      reject(new Error(`Chromium exited before DevTools was ready (code=${code}, signal=${signal})${stderr ? `: ${stderr.slice(-500)}` : ''}`));
+    const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'] }) as ChildProcessWithoutNullStreams;
+    let stderr = '';
+    let resolved = false;
+    const wsUrl = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (resolved) return;
+        resolved = true;
+        try { child.kill('SIGKILL'); } catch {}
+        reject(new Error(`Chromium launch timeout${stderr ? `: ${stderr.slice(-500)}` : ''}`));
+      }, 12000);
+      const inspect = (chunk: Buffer) => {
+        const text = chunk.toString('utf8'); stderr += text;
+        const m = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/i);
+        if (m?.[1] && !resolved) {
+          resolved = true; clearTimeout(timer); resolve(m[1]);
+        }
+      };
+      child.stderr.on('data', inspect);
+      child.stdout.on('data', inspect);
+      child.once('exit', (code, signal) => {
+        if (resolved) return;
+        resolved = true; clearTimeout(timer);
+        const missingLib = stderr.match(/error while loading shared libraries:\s*([^\s:]+)/i)?.[1];
+        const hint = missingLib
+          ? `缺少系統函式庫 ${missingLib}（請改用 Docker 部署，見 RENDER_DEPLOY.md）`
+          : stderr.slice(-500);
+        reject(new Error(`Chromium exited before DevTools was ready (code=${code}, signal=${signal})${hint ? `: ${hint}` : ''}`));
+      });
+      child.once('error', err => {
+        if (resolved) return;
+        resolved = true; clearTimeout(timer); reject(err);
+      });
     });
-    child.once('error', err => {
-      if (resolved) return;
-      resolved = true; clearTimeout(timer); reject(err);
-    });
+    onLog(`Chromium 已啟動｜pid=${child.pid}｜exe=${executable}`);
+    return { child, profile, wsUrl };
   });
-  onLog(`Chromium 已啟動｜pid=${child.pid}｜exe=${executable}`);
-  return { child, profile, wsUrl };
 }
 
 type LaunchedChrome = Awaited<ReturnType<typeof launchChrome>>;
