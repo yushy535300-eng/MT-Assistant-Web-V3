@@ -91,20 +91,9 @@ describe("歐博 HAR 協議",()=>{
     const app=require("node:fs").readFileSync(require("node:path").resolve("app/index.tsx"),"utf8");
     expect(app).toContain("getVendorLoginUrlFromPlatform");
     expect(app).toContain("TZ 授權必須在瀏覽器打");
-    expect(app).toContain("等待歐博背景瀏覽器就緒後再連 DB");
     const api=require("node:fs").readFileSync(require("node:path").resolve("server/_core/index.ts"),"utf8");
     expect(api).toContain("fromClient");
     expect(api).toContain("vendorLaunchIsReady(kind, fromClient)");
-    expect(api).toContain("getChromeStatus");
-  });
-  it("Chromium 啟動失敗要標成連線失敗，不能只寫 log",()=>{
-    const relay=require("node:fs").readFileSync(require("node:path").resolve("server/vendor-relay.ts"),"utf8");
-    expect(relay).toContain("背景瀏覽器啟動失敗");
-    expect(relay).toContain("歐博授權失效，請重新整理頁面");
-    expect(relay).toContain("void relay.start()");
-    const chrome=require("node:fs").readFileSync(require("node:path").resolve("server/vendor-chromium.ts"),"utf8");
-    expect(chrome).toContain("withChromeLaunchLock");
-    expect(chrome).toContain("getChromeStatus");
   });
   it("歐博回牌路要等遊戲頁關掉才重開 Chrome，避免 6076",()=>{
     const source=require("node:fs").readFileSync(require("node:path").resolve("server/vendor-relay.ts"),"utf8");

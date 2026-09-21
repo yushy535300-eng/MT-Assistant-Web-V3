@@ -1328,8 +1328,6 @@ async function getGameLoginUrlFromPlatform(
     });
   };
   try {
-    // Keep the original probe-then-auth order so existing TZ/OFA CORS behavior
-    // stays the same. Only retry with Bearer when the first response is 401/403.
     let response = await request(false);
     let data: any = null;
     try {
@@ -5166,25 +5164,19 @@ export default function HomeScreen() {
   }, [accessGranted, accessSessionId, dgGameUrl, dgConnectEpoch]);
 
   // 歐博與 DB 各自獨立連線：一邊失敗或重連，不會關掉另一邊。
-  // 部署環境（Render）同時開兩個 Chromium 容易 OOM，DB 延後幾秒再啟動。
   const startVendorKind = (kind: VendorKind) => {
     if (!accessGranted || !accessSessionId) return () => {};
     const platformToken = platformTokenRef.current;
     if (!platformToken) return () => {};
     let cancelled = false;
-    let delayTimer: ReturnType<typeof setTimeout> | null = null;
     if (!vendorTablesRef.current[kind].length) {
       setVendorConnected((v) => ({ ...v, [kind]: false }));
       setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
       setVendorMessage((v) => ({
         ...v,
-        [kind]:
-          kind === "DB"
-            ? "等待歐博背景瀏覽器就緒後再連 DB"
-            : "正在取得平台授權並啟動即時牌路",
+        [kind]: "正在取得平台授權並啟動即時牌路",
       }));
     }
-    const begin = () => {
     Promise.resolve()
       .then(async () => {
         if (cancelled) return null;
@@ -5318,15 +5310,8 @@ export default function HomeScreen() {
           );
         }
       });
-    };
-    if (kind === "DB") {
-      delayTimer = setTimeout(begin, 8000);
-    } else {
-      begin();
-    }
     return () => {
       cancelled = true;
-      if (delayTimer) clearTimeout(delayTimer);
       const current = vendorControllersRef.current[kind];
       vendorControllersRef.current[kind] = undefined;
       void Promise.resolve(current?.close());
@@ -6270,15 +6255,17 @@ export default function HomeScreen() {
                 overscrollBehavior: "contain",
                 transformOrigin: "top left",
                 pointerEvents: "auto",
+                ...(!desktop ? { zoom: panelMobileScale } : null),
               } as any)
             : null,
           {
-            transform: !desktop
-              ? [
-                  ...panelPosition.getTranslateTransform(),
-                  { scale: panelMobileScale },
-                ]
-              : panelPosition.getTranslateTransform(),
+            transform:
+              !desktop && Platform.OS !== "web"
+                ? [
+                    ...panelPosition.getTranslateTransform(),
+                    { scale: panelMobileScale },
+                  ]
+                : panelPosition.getTranslateTransform(),
           },
         ]}
       >
