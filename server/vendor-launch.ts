@@ -4,7 +4,7 @@ function platformBase(platform: "TZ" | "OFA") {
   return platform === "OFA" ? "https://www.ofa1188.net" : "https://www.tz6868.cc";
 }
 
-export function pickLaunchUrl(data: any, kind: VendorKind) {
+export function pickLaunchUrl(data: any, kind: VendorKind, device: "Desktop" | "Mobile" = "Desktop") {
   const providerName = kind === "AB" ? "歐博" : "DB";
   const rawCandidates: any[] = [
     data?.data?.game_url,
@@ -27,11 +27,33 @@ export function pickLaunchUrl(data: any, kind: VendorKind) {
       const credentialOk =
         kind === "AB" ? !!u.searchParams.get("sessionId") : !!u.searchParams.get("params");
       if (u.protocol === "https:" && credentialOk) {
-        return kind === "DB" ? preferDbVueUrl(u.toString()) : u.toString();
+        if (kind === "DB") return device === "Mobile" ? preferDbMobileUrl(u.toString()) : preferDbVueUrl(u.toString());
+        return u.toString();
       }
     } catch {}
   }
   throw new Error(`找不到 ${providerName} 有效授權網址`);
+}
+
+export function vendorLaunchIsReady(kind: VendorKind, url: string) {
+  try {
+    const u = new URL(url);
+    return kind === "AB" ? !!u.searchParams.get("sessionId") : !!u.searchParams.get("params");
+  } catch {
+    return false;
+  }
+}
+
+export function preferDbMobileUrl(url: string) {
+  try {
+    const u = new URL(url);
+    if (/\/egret\/hall/i.test(u.pathname) || /\/play\/?$/i.test(u.pathname) || u.pathname === "/" || u.pathname === "") {
+      u.pathname = "/h5/";
+    }
+    return u.toString();
+  } catch {
+    return url;
+  }
 }
 
 export function preferDbVueUrl(url: string) {
@@ -53,9 +75,11 @@ export async function fetchVendorLaunchUrl(opts: {
   platform: "TZ" | "OFA";
   platformToken: string;
   kind: VendorKind;
+  device?: "Desktop" | "Mobile";
 }) {
   const provider = opts.kind === "AB" ? "AB01" : "YABOZR";
   const providerName = opts.kind === "AB" ? "歐博" : "DB";
+  const device = opts.device === "Mobile" ? "Mobile" : "Desktop";
   const base = platformBase(opts.platform);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
@@ -71,8 +95,8 @@ export async function fetchVendorLaunchUrl(opts: {
         game_return_url: base,
         game_kind: "",
         game_type: "",
-        device: "Desktop",
-        game_device: "Desktop",
+        device,
+        game_device: device,
       }),
       signal: controller.signal,
     });
@@ -85,7 +109,12 @@ export async function fetchVendorLaunchUrl(opts: {
         String(data?.message ?? data?.msg ?? `取得 ${providerName} 授權失敗`),
       );
     }
-    return pickLaunchUrl(data, opts.kind);
+    const launchUrl = pickLaunchUrl(data, opts.kind, device);
+    try {
+      const u = new URL(launchUrl);
+      console.log(`[Vendor launch] kind=${opts.kind}｜device=${device}｜host=${u.host}｜path=${u.pathname}`);
+    } catch {}
+    return launchUrl;
   } catch (error: any) {
     if (error?.name === "AbortError") throw new Error(`${providerName} 授權逾時`);
     throw error;

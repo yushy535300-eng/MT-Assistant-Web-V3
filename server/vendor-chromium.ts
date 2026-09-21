@@ -1,7 +1,8 @@
 import fs from 'node:fs';
+import { rememberDbChromeResponse } from './vendor-db-cache';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, execFileSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 
 const NORMAL_CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
 const DG_HOST_RE = /(?:^|\.)(?:kindlestone\.com|taxyss\.com|ywjxi\.com|20299999\.com|dingdangmail\.com)$/i;
@@ -24,9 +25,14 @@ export type VendorBrowserHooks = {
   onLog: (message: string) => void;
   onObject: (value: any) => void;
   onFailure?: (message: string) => void;
+  shouldAbort?: () => boolean;
 };
 
-export type VendorBrowserTransport = { stop: () => void };
+export type VendorBrowserTransport = {
+  stop: () => Promise<void> | void;
+  park?: () => Promise<void> | void;
+  fetchUrl?: (url: string) => Promise<{ status: number; contentType: string; body: Buffer } | null>;
+};
 
 type CdpMessage = { id?: number; method?: string; params?: any; result?: any; error?: any; sessionId?: string };
 type RequestMeta = { url: string; type: string; method: string };
@@ -48,11 +54,15 @@ function findChromeExecutable() {
   ].filter((x): x is string => !!x);
   for (const p of candidates) {
     try {
-      fs.accessSync(p, fs.constants.F_OK);
-      return p;
+      if (p && fs.existsSync(p)) return p;
     } catch {}
   }
-  return '';
+  try {
+    const out = execFileSync("where", ["chrome"], { encoding: "utf8", timeout: 4000, windowsHide: true });
+    const first = String(out).split(/\r?\n/).map((s) => s.trim()).find((s) => /\.exe$/i.test(s));
+    if (first && fs.existsSync(first)) return first;
+  } catch {}
+  return "";
 }
 
 function isDgWs(url: string) {
@@ -65,13 +75,13 @@ function isDgWs(url: string) {
 function redactUrl(value: string) {
   try {
     const u = new URL(value);
-    for (const key of ['token', 'sign', 'auth', 'authorization', 'session', 'sessionId', 'params']) {
+    for (const key of ['token', 'sign', 'auth', 'authorization', 'session', 'sessionId', 'params', 'jwtToken', 'signature']) {
       if (u.searchParams.has(key)) u.searchParams.set(key, '***');
     }
     return u.toString();
   } catch {
     return String(value || '')
-      .replace(/([?&](?:token|sign|auth|authorization|session|sessionId)=)[^&#\s]+/gi, '$1***')
+      .replace(/([?&](?:token|sign|auth|authorization|session|sessionId|jwtToken|signature)=)[^&#\s]+/gi, '$1***')
       .slice(0, 800);
   }
 }
@@ -222,6 +232,52 @@ type LaunchedChrome = Awaited<ReturnType<typeof launchChrome>>;
 let warmChrome: LaunchedChrome | null = null;
 let warmChromePromise: Promise<LaunchedChrome> | null = null;
 let warmChromeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function killChromeTree(child: ChildProcessWithoutNullStreams) {
+  const pid = child.pid;
+  if (!pid) return;
+  if (process.platform === "win32") {
+    try { execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, timeout: 8000 }); } catch {}
+    return;
+  }
+  try { child.kill("SIGKILL"); } catch {}
+}
+
+function waitUntilChromeDead(child: ChildProcessWithoutNullStreams, timeoutMs = 8000) {
+  if (child.exitCode != null) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearInterval(tick);
+      resolve();
+    };
+    const tick = setInterval(() => {
+      if (child.exitCode != null) return finish();
+      killChromeTree(child);
+    }, 400);
+    child.once("exit", finish);
+    killChromeTree(child);
+    setTimeout(finish, timeoutMs).unref?.();
+    tick.unref?.();
+  });
+}
+
+export function killLeftoverVendorChrome() {
+  if (process.platform === "win32") {
+    try {
+      execFileSync("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | Where-Object { $_.CommandLine -like '*dg-chrome-*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+      ], { stdio: "ignore", windowsHide: true, timeout: 12000 });
+    } catch {}
+    return;
+  }
+  try { execFileSync("pkill", ["-f", "dg-chrome-"], { stdio: "ignore", timeout: 8000 }); } catch {}
+}
 
 function chromeAlive(chrome: LaunchedChrome | null) {
   return !!chrome && chrome.child.exitCode == null && !chrome.child.killed;
@@ -594,6 +650,12 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     hooks.onLog,
     ['--timezone=Asia/Taipei', '--lang=zh-TW'],
   );
+  if (hooks.shouldAbort?.()) {
+    hooks.onLog(`${hooks.label} 進桌已暫停，背景瀏覽器未導向登入頁`);
+    killChromeTree(launched.child);
+    try { fs.rmSync(launched.profile, { recursive: true, force: true }); } catch {}
+    return { stop: async () => {} };
+  }
   const cdp = new CdpClient(launched.wsUrl);
   await cdp.ready();
   const vendorSessions = new Set<string>();
@@ -606,26 +668,37 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
   if (!pageSessionId) throw new Error(`${hooks.label} Chromium target attach failed`);
   vendorSessions.add(pageSessionId);
   let stopped = false;
+  let parked = false;
+  let mainFrameId = "";
   let poll: ReturnType<typeof setInterval> | null = null;
   let diagnostics: ReturnType<typeof setInterval> | null = null;
   const stop = () => {
-    if (stopped) return; stopped = true;
-    if (poll) clearInterval(poll);
-    if (diagnostics) clearInterval(diagnostics);
+    stopped = true;
+    if (poll) { clearInterval(poll); poll = null; }
+    if (diagnostics) { clearInterval(diagnostics); diagnostics = null; }
     try { cdp.close(); } catch {}
-    try { launched.child.kill('SIGTERM'); } catch {}
-    setTimeout(() => { try { if (!launched.child.killed) launched.child.kill('SIGKILL'); } catch {} }, 1200).unref?.();
-    try { fs.rmSync(launched.profile, { recursive: true, force: true }); } catch {}
+    return waitUntilChromeDead(launched.child).then(() => {
+      try { fs.rmSync(launched.profile, { recursive: true, force: true }); } catch {}
+    });
   };
   launched.child.once('exit', (code, signal) => {
     if (!stopped) hooks.onFailure?.(`${hooks.label} Chromium 意外結束 (code=${code}, signal=${signal})`);
   });
   const counters={targets:1,contexts:0,ws:0,frames:0,binary:0,json:0,objects:0,responses:0};
-  const responseRequests=new Map<string,{requestId:string,mime:string}>();
+  const responseRequests=new Map<string,{requestId:string,mime:string,kind:"json"|"asset",url?:string}>();
   const source = `(() => {
     const root=globalThis;
-    if (root.__MT_VENDOR_TAP__) return;
-    const q=[];
+    const q=root.__MT_VENDOR_TAP__&&root.__MT_VENDOR_TAP__.q||[];
+    const nativeParse=root.JSON&&root.JSON.parse&&!root.JSON.parse.__mtVendor?root.JSON.parse.bind(root.JSON):root.__MT_VENDOR_NATIVE_PARSE__||(root.JSON?root.JSON.parse.bind(root.JSON):null);
+    if(nativeParse) root.__MT_VENDOR_NATIVE_PARSE__=nativeParse;
+    const toObj=(v)=>{
+      if(!v||typeof v!=='object')return v;
+      if(v instanceof Map) return Object.fromEntries([...v.entries()].slice(0,800));
+      if(typeof v.keys==='function'&&typeof v.get==='function'&&typeof v.forEach==='function'&&!(v instanceof Map)){
+        try{const o={};v.forEach((val,key)=>{if(o&&Object.keys(o).length<800)o[String(key)]=val});if(Object.keys(o).length)return o;}catch{}
+      }
+      return v;
+    };
     const emit=(v)=>{
       try{
         const json=JSON.stringify(v,(k,val)=>{
@@ -634,34 +707,45 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
           if(typeof val==='bigint') return Number(val);
           return val;
         });
-        if(!json||json.length>3000000)return;
+        if(!json||json.length>1200000)return;
         if(typeof root.__mtVendorPush==='function')root.__mtVendorPush(json);
-        else {q.push(JSON.parse(json));if(q.length>2000)q.splice(0,q.length-1500)}
+        else {q.push((nativeParse||JSON.parse)(json));if(q.length>2000)q.splice(0,q.length-1500)}
       }catch{}
+    };
+    const emitChunks=(key,raw)=>{
+      const obj=toObj(raw);
+      if(!obj||typeof obj!=='object')return;
+      const entries=Array.isArray(obj)?obj.map((t,i)=>[String(i),t]):Object.entries(obj);
+      for(let i=0;i<entries.length;i+=40){
+        const chunk={}; for(const [k,val] of entries.slice(i,i+40)) chunk[k]=val;
+        emit({[key]:chunk});
+      }
     };
     const keep=(v,depth=0,seen=new WeakSet())=>{
       if(depth>8||v==null)return;
-      if(typeof v==='string' && (v.trim().startsWith('{')||v.trim().startsWith('['))){try{keep(parse(v),depth+1)}catch{}return}
+      if(typeof v==='string' && (v.trim().startsWith('{')||v.trim().startsWith('['))){try{keep((nativeParse||JSON.parse)(v),depth+1,seen)}catch{}return}
       if(typeof v!=='object')return;
       if(seen.has(v))return; seen.add(v);
       try{
         if(v.__v_isRef){keep(v.value,depth+1,seen);return}
-        const map=v.gameTableMap||v.tableMap||v.tablesMap||v.roadPaperCacheMap;
-        if(map){
-          emit({gameTableMap: map instanceof Map ? Object.fromEntries(map) : (v.gameTableMap||v.tableMap||v.tablesMap||undefined), roadPaperCacheMap: v.roadPaperCacheMap instanceof Map ? Object.fromEntries(v.roadPaperCacheMap) : v.roadPaperCacheMap});
-        }
+        if(v.gameTableMap) emitChunks('gameTableMap', v.gameTableMap);
+        if(v.tableMap) emitChunks('gameTableMap', v.tableMap);
+        if(v.tablesMap) emitChunks('gameTableMap', v.tablesMap);
+        if(v.roadPaperCacheMap) emitChunks('roadPaperCacheMap', v.roadPaperCacheMap);
         if(v.protocolId!=null || v.jsonData!=null){
           try{
-            let json=v.jsonData; if(typeof json==='string') json=JSON.parse(json);
+            let json=v.jsonData; if(typeof json==='string') json=(nativeParse||JSON.parse)(json);
             let data=json&&json.data!=null?json.data:v.data;
-            if(typeof data==='string') data=JSON.parse(data);
+            if(typeof data==='string') data=(nativeParse||JSON.parse)(data);
             const flat=Object.assign({}, v, json&&typeof json==='object'?json:{}, data&&typeof data==='object'?data:{});
             if(data&&data.gameTypeId!=null&&Number(data.gameTypeId)!==2013) flat.gameTypeId=data.gameTypeId;
             else if(Number(flat.gameTypeId)===2013) delete flat.gameTypeId;
-            emit(flat);
+            if(flat.gameTableMap) emitChunks('gameTableMap', flat.gameTableMap);
+            else if(flat.roadPaperCacheMap) emitChunks('roadPaperCacheMap', flat.roadPaperCacheMap);
+            else emit(flat);
           }catch{ emit(v); }
         }
-        if(typeof v.c==='string' || v.protocolId!=null || v.jsonData!=null || v.gameTableMap || v.tableMap || v.roadPaperCacheMap || v.roadPaper || v.tableId!=null || v.tableNo!=null || v.gameId!=null || v.roads || v.roadmaps || v.gameCode || v.tableCode || v.cmd || v.WW3 || v.beatPlateRoad || v.tableList || v.gameTableList){
+        if(typeof v.c==='string' || v.protocolId!=null || v.jsonData!=null || v.gameTableMap || v.tableMap || v.roadPaperCacheMap || v.roadPaper || v.tableId!=null || v._tableId!=null || v.gameId!=null || v.roads || v.roadmaps || v.gameCode || v.cmd || v.WW3 || v.beatPlateRoad || v.tableList || v.gameTableList || v.currentRoundExtInfos || v.currentRoundExtInfo || (v.cardNumber!=null && v.cardOwner!=null) || v.bootIndex!=null){
           emit(v);
         }
         if(v instanceof Map){for(const x of v.values())keep(x,depth+1,seen)}
@@ -669,51 +753,67 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
         else for(const k of Object.keys(v).slice(0,400))keep(v[k],depth+1,seen);
       }catch{}
     };
-    const parse=root.JSON.parse;
-    JSON.parse=function(){ const v=parse.apply(this,arguments); try{keep(v)}catch{} return v };
-    const NativeWS=root.WebSocket;
-    if(NativeWS){class TapWS extends NativeWS {
-      constructor(url,protocols){ if(arguments.length>1)super(url,protocols);else super(url);
-        this.addEventListener('message',e=>{try{if(typeof e.data==='string')keep(parse(e.data));else if(e.data&&typeof e.data.arrayBuffer==='function')e.data.arrayBuffer().then(b=>emit({__binary:Array.from(new Uint8Array(b)).slice(0,200000)})).catch(()=>{})}catch{}});
-      }
-      for(const k of ['CONNECTING','OPEN','CLOSING','CLOSED'])try{Object.defineProperty(TapWS,k,{value:NativeWS[k]})}catch{}
-      root.WebSocket=TapWS;
-    }
-    const scan=()=>{
+    const hunt=()=>{
       try{
-        if(typeof document==='undefined')return;
-        for(const el of document.querySelectorAll('*')){
-          const c=el.__vueParentComponent||el.__vue__;
-          if(c){keep(c.setupState);keep(c.data);keep(c.ctx);keep(c.proxy&&c.proxy.$data);keep(c.proxy&&c.proxy.$store&&c.proxy.$store.state)}
-          const app=el.__vue_app__;
-          if(app){
-            keep(app._context&&app._context.provides);
-            const pinia=app.config&&app.config.globalProperties&&app.config.globalProperties.$pinia;
-            if(pinia&&pinia.state)keep(pinia.state.value||pinia.state);
+        const seen=new WeakSet();
+        const walk=(v,depth)=>{
+          if(!v||depth>6||typeof v!=='object'||seen.has(v))return;
+          seen.add(v);
+          try{
+            if(v.gameTableMap||v.tableMap||v.tablesMap||v.roadPaperCacheMap||v.protocolId!=null||v.jsonData!=null||v.beatPlateRoad||v.roadPaper||v._tableId!=null||v._roadPaperDataMap||v.currentRoundExtInfos||v.currentRoundExtInfo||v.bootIndex!=null||(v.tableId!=null&&v.cardNumber!=null)) keep(v);
+            if(depth>=5)return;
+            const keys=Object.keys(v).slice(0,120);
+            for(const k of keys){
+              if(/table|hall|room|proto|socket|cache|road|gameType|jsonData|map|card|round|boot/i.test(k)) walk(v[k],depth+1);
+            }
+          }catch{}
+        };
+        for(const k of Object.getOwnPropertyNames(root).slice(0,400)){
+          if(/egret|game|hall|table|socket|net|app|main|db|live|room/i.test(k)) walk(root[k],0);
+        }
+      }catch{}
+    };
+    if(root.JSON&&typeof nativeParse==='function'&&!root.JSON.parse.__mtVendor){
+      const hooked=function(){ const v=nativeParse.apply(root.JSON,arguments); try{keep(v)}catch{} return v };
+      hooked.__mtVendor=true;
+      try{root.JSON.parse=hooked;}catch{}
+    }
+    try{
+      const NativeWS=root.WebSocket;
+      if(NativeWS&&!NativeWS.__mtVendor){
+        class TapWS extends NativeWS {
+          constructor(url,protocols){ if(arguments.length>1)super(url,protocols);else super(url);
+            this.addEventListener('message',e=>{try{
+              if(typeof e.data==='string')keep((nativeParse||JSON.parse)(e.data));
+              else if(e.data&&typeof e.data.arrayBuffer==='function')e.data.arrayBuffer().then(b=>{
+                try{
+                  const bytes=new Uint8Array(b);
+                  const text=(typeof TextDecoder==='function'?new TextDecoder('utf-8',{fatal:false}):null)?.decode(bytes.subarray(0,Math.min(bytes.length,400000)))||'';
+                  const start=text.indexOf('{');
+                  if(start>=0){const slice=text.slice(start).trim(); if(slice.includes('gameTableMap')||slice.includes('protocolId')||slice.includes('jsonData')||slice.includes('roadPaper')||slice.includes('beatPlateRoad')||slice.includes('currentRoundExtInfos')||slice.includes('cardNumber')||slice.includes('bootIndex')||slice.includes('"tableId"')) keep(slice);}
+                }catch{}
+                const n=Date.now(); if(!root.__MT_VENDOR_HUNT_AT__||n-root.__MT_VENDOR_HUNT_AT__>800){root.__MT_VENDOR_HUNT_AT__=n;hunt();}
+              }).catch(()=>{});
+            }catch{}});
           }
         }
-      }catch{}
+        TapWS.__mtVendor=true;
+        for(const k of ['CONNECTING','OPEN','CLOSING','CLOSED'])try{Object.defineProperty(TapWS,k,{value:NativeWS[k]})}catch{}
+        root.WebSocket=TapWS;
+      }
+    }catch{}
+    const scan=()=>{
+      try{hunt()}catch{}
     };
-    const snapshot=()=>{
-      try{
-        scan();
-        for(const el of document.querySelectorAll('*')){
-          const app=el.__vue_app__;
-          const pinia=app&&app.config&&app.config.globalProperties&&app.config.globalProperties.$pinia;
-          if(pinia&&pinia.state)keep(pinia.state.value||pinia.state);
-        }
-      }catch{}
-    };
-    if(typeof document!=='undefined')setInterval(scan,1000);
-    root.__MT_VENDOR_TAP__={drain:()=>q.splice(0,250),keep,scan,snapshot};
+    const snapshot=()=>{try{scan();}catch{}};
+    if(typeof document!=='undefined'&&!root.__MT_VENDOR_SCAN__){root.__MT_VENDOR_SCAN__=1;setInterval(scan,1000)}
+    root.__MT_VENDOR_TAP__={q,drain:()=>q.splice(0,120),keep,scan,snapshot,hunt};
   })();`;
   const probeSource = `(() => {
     try {
       const text=(document.body&&document.body.innerText||'').replace(/\\s+/g,' ').trim().slice(0,180);
       const iframes=[...document.querySelectorAll('iframe')].map(f=>String(f.src||'')).filter(Boolean).slice(0,6);
-      const hit=[...document.querySelectorAll('button,a,[role=button],input[type=button]')].find(el=>/進[入場]|开始|開始|进入游戏|ENTER/i.test(el.innerText||el.value||''));
-      if(hit) hit.click();
-      return {href:String(location.href||''),title:String(document.title||''),ready:String(document.readyState||''),iframes,text,clicked:!!hit,tap:!!window.__MT_VENDOR_TAP__};
+      return {href:String(location.href||''),title:String(document.title||''),ready:String(document.readyState||''),iframes,text,clicked:false,tap:!!window.__MT_VENDOR_TAP__};
     } catch (e) { return {error:String(e&&e.message||e)}; }
   })()`;
   const instrumentSession=async(sessionId:string)=>{
@@ -723,9 +823,11 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     await cdp.send('Runtime.enable',{},sessionId).catch(()=>{});
     await cdp.send('Runtime.addBinding',{name:'__mtVendorPush'},sessionId).catch(()=>{});
     await cdp.send('Page.enable',{},sessionId).catch(()=>{});
-    await cdp.send('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:true,flatten:true},sessionId).catch(()=>{});
+    await cdp.send('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:false,flatten:true},sessionId).catch(()=>{});
     await cdp.send('Page.addScriptToEvaluateOnNewDocument',{source},sessionId).catch(()=>{});
-    await cdp.send('Runtime.evaluate',{expression:source},sessionId,8000).catch(()=>{});
+    const injected=await cdp.send('Runtime.evaluate',{expression:source,returnByValue:true},sessionId,8000).catch((e)=>({error:e}));
+    const injectErr=injected?.exceptionDetails?.text||injected?.exceptionDetails?.exception?.description||injected?.error?.message;
+    if(injectErr)hooks.onLog(`頁面注入失敗｜${safeText(injectErr,180)}`);
     await cdp.send('Network.setUserAgentOverride',{userAgent:ua,acceptLanguage:'zh-TW,zh;q=0.9,en;q=0.8',platform:'Windows'},sessionId).catch(()=>{});
     await cdp.send('Network.setExtraHTTPHeaders',{headers:{'Accept-Language':'zh-TW,zh;q=0.9,en;q=0.8'}},sessionId).catch(()=>{});
     await cdp.send('Runtime.runIfWaitingForDebugger',{},sessionId).catch(()=>{});
@@ -736,7 +838,9 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     if(message.method==='Target.attachedToTarget'){
       counters.targets++;
       const info=message.params?.targetInfo||{};
-      hooks.onLog(`發現目標｜type=${safeText(info.type,30)}｜url=${redactUrl(String(info.url||'')).slice(0,220)}`);
+      const kind=String(info.type||'');
+      hooks.onLog(`發現目標｜type=${safeText(kind,30)}｜url=${redactUrl(String(info.url||'')).slice(0,220)}`);
+      if(kind==='service_worker'||kind==='worker'||kind==='shared_worker')return;
       void instrumentSession(String(message.params?.sessionId||''));
       return;
     }
@@ -744,6 +848,7 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
       const url=String(message.params?.frame?.url||'');
       const sid=String(message.sessionId||pageSessionId);
       if(url&&message.params?.frame?.parentId==null){
+        mainFrameId=String(message.params?.frame?.id||mainFrameId);
         hooks.onLog(`主頁導向｜${redactUrl(url).slice(0,260)}`);
         void cdp.send('Runtime.evaluate',{expression:source},sid,8000).catch(()=>{});
       }
@@ -772,23 +877,63 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
       hooks.onLog(`偵測即時 WebSocket｜${redactUrl(String(message.params?.url||'')).slice(0,260)}`);
       return;
     }
+    if(message.method==='Network.webSocketClosed'){
+      hooks.onLog(`WebSocket 已關閉｜code=${safeText(message.params?.code,12)}`);
+      return;
+    }
     if(message.method==='Network.webSocketFrameReceived'){
       counters.frames++;
       const response=message.params?.response||{};
-      if(Number(response.opcode)!==1){counters.binary++;return}
+      const opcode=Number(response.opcode);
+      if(opcode!==1){
+        counters.binary++;
+        if(opcode===2&&typeof response.payloadData==='string'&&hooks.label==='DB'){
+          try{
+            const buf=Buffer.from(response.payloadData,'base64');
+            const text=buf.toString('utf8');
+            const start=text.indexOf('{');
+            if(start>=0){
+              const slice=text.slice(start).trim();
+              if(/(gameTableMap|protocolId|jsonData|roadPaper|beatPlateRoad|currentRoundExtInfos|currentRoundExtInfo|bootIndex|"tableId"|cardNumber)/.test(slice)){
+                counters.json++;
+                hooks.onObject(JSON.parse(slice));
+              }
+            }
+          }catch{}
+        }
+        return;
+      }
       if(typeof response.payloadData!=='string')return;
       try{counters.json++;hooks.onObject(JSON.parse(response.payloadData))}catch{}
       return;
     }
     if(message.method==='Network.responseReceived'){
       const p=message.params||{},type=String(p.type||''),mime=String(p.response?.mimeType||'');
-      if((type==='XHR'||type==='Fetch')&&/json|text/i.test(mime))responseRequests.set(`${sessionId}:${p.requestId}`,{requestId:String(p.requestId),mime});
+      const status=Number(p.response?.status);
+      const url=String(p.response?.url||'');
+      const reqKey=`${sessionId}:${p.requestId}`;
+      if(hooks.label==='DB'&&type==='Document'&&status===403){
+        hooks.onLog(`擷取狀態｜title=403 Forbidden｜text=Denied by http_ratelimit`);
+      }
+      if(hooks.label==='DB'&&status===200&&(
+        type==='Document'||type==='Script'||type==='Stylesheet'||type==='Font'||type==='Wasm'||
+        /\.(?:js|mjs|css|woff2?|ttf|otf|wasm)(?:\?|$)/i.test(url)||
+        (type==='XHR'||type==='Fetch')&&/\/egret\//i.test(url)&&!/\/api\/live/i.test(url)
+      )){
+        responseRequests.set(reqKey,{requestId:String(p.requestId),mime,kind:"asset",url});
+      }
+      if((type==='XHR'||type==='Fetch')&&/json|text/i.test(mime))responseRequests.set(reqKey,{requestId:String(p.requestId),mime,kind:"json"});
       return;
     }
     if(message.method==='Network.loadingFinished'){
       const key=`${sessionId}:${message.params?.requestId}`,meta=responseRequests.get(key);
       if(!meta)return;responseRequests.delete(key);
       void cdp.send('Network.getResponseBody',{requestId:meta.requestId},sessionId,5000).then(body=>{
+        if(meta.kind==="asset"&&meta.url){
+          const buf=body?.base64Encoded?Buffer.from(String(body?.body||''),'base64'):Buffer.from(String(body?.body||''),'utf8');
+          rememberDbChromeResponse(meta.url,200,meta.mime,buf);
+          return;
+        }
         let value:any=String(body?.body||'');
         if(body?.base64Encoded)value=Buffer.from(value,'base64').toString('utf8');
         try{value=JSON.parse(value)}catch{return}
@@ -798,22 +943,31 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
     }
   });
   await instrumentSession(pageSessionId);
-  await cdp.send('Page.navigate', { url: hooks.gameUrl }, pageSessionId, 15000);
+  if (hooks.shouldAbort?.()) {
+    hooks.onLog(`${hooks.label} 進桌已暫停，背景瀏覽器未導向登入頁`);
+    await stop();
+    return { stop };
+  }
+  await cdp.send('Page.navigate', { url: hooks.gameUrl }, pageSessionId, 15000).catch((error:any)=>{
+    hooks.onLog(`頁面導向逾時，改為背景等待載入｜${safeText(error?.message||error,160)}`);
+  });
   hooks.onLog(`${hooks.label} 真實頁面已啟動`);
+  const drainSource=`(()=>{try{if(!window.__MT_VENDOR_TAP__)return{needInject:true,items:[]};return{needInject:false,items:window.__MT_VENDOR_TAP__.drain()}}catch(e){return{needInject:true,items:[]}}})()`;
   let busy=false;
   poll=setInterval(async()=>{
     if(stopped||busy)return; busy=true;
     try{
-      for(const sessionId of Array.from(vendorSessions)){
-        const out=await cdp.send('Runtime.evaluate',{expression:`(()=>{try{if(window.__MT_VENDOR_TAP__&&window.__MT_VENDOR_TAP__.snapshot)window.__MT_VENDOR_TAP__.snapshot()}catch{}return typeof window!=='undefined'&&window.__MT_VENDOR_TAP__?window.__MT_VENDOR_TAP__.drain():[]})()`,returnByValue:true},sessionId,4000).catch(()=>null);
-        const values=out?.result?.value;
-        if(Array.isArray(values))for(const value of values)hooks.onObject(value);
-      }
+      const out=await cdp.send('Runtime.evaluate',{expression:drainSource,returnByValue:true},pageSessionId,8000).catch(()=>null);
+      const value=out?.result?.value;
+      if(value?.needInject)await cdp.send('Runtime.evaluate',{expression:source,returnByValue:true},pageSessionId,8000).catch(()=>{});
+      const values=value?.items;
+      if(Array.isArray(values))for(const item of values)hooks.onObject(item);
     }catch(e:any){ if(!stopped)hooks.onLog(`${hooks.label} 解碼資料讀取重試：${safeText(e?.message||e,160)}`); }
     finally{busy=false}
-  },120);
+  },200);
   poll.unref?.();
   diagnostics=setInterval(async()=>{
+    if(stopped)return;
     let page='';
     try{
       const probe=await cdp.send('Runtime.evaluate',{expression:probeSource,returnByValue:true},pageSessionId,4000);
@@ -821,7 +975,31 @@ export async function startVendorBrowserTransport(hooks: VendorBrowserHooks): Pr
       page=`｜url=${redactUrl(String(v.href||'')).slice(0,180)}｜title=${safeText(v.title,40)}｜iframes=${Array.isArray(v.iframes)?v.iframes.length:0}｜tap=${v.tap?'1':'0'}｜text=${safeText(v.text,80)}`;
     }catch{}
     hooks.onLog(`擷取狀態｜targets=${counters.targets}｜contexts=${counters.contexts}｜ws=${counters.ws}｜frames=${counters.frames}｜binary=${counters.binary}｜json=${counters.json}｜xhr=${counters.responses}｜objects=${counters.objects}${page}`);
-  },5000);
+  },15000);
   diagnostics.unref?.();
-  return { stop };
+  const park = async () => {
+    if (stopped || parked) return;
+    parked = true;
+    await cdp.send("Page.stopLoading", {}, pageSessionId, 4000).catch(() => {});
+  };
+  const fetchUrl = async (url: string) => {
+    if (stopped) return null;
+    try {
+      const out = await cdp.send("Runtime.evaluate", {
+        expression: `(async()=>{try{const r=await fetch(${JSON.stringify(url)},{credentials:"include",cache:"force-cache"});const buf=await r.arrayBuffer();if(buf.byteLength>12000000)return{status:r.status,type:r.headers.get("content-type")||"",b64:""};const bytes=new Uint8Array(buf);let bin="";for(let i=0;i<bytes.length;i+=32768)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+32768));return{status:r.status,type:r.headers.get("content-type")||"",b64:btoa(bin)};}catch(e){return{status:0,type:"",b64:"",err:String(e&&e.message||e)}}} )()`,
+        awaitPromise: true,
+        returnByValue: true,
+      }, pageSessionId, 25000);
+      const v = out?.result?.value;
+      if (!v || Number(v.status) !== 200 || !v.b64) return null;
+      return {
+        status: 200,
+        contentType: String(v.type || "application/octet-stream"),
+        body: Buffer.from(String(v.b64), "base64"),
+      };
+    } catch {
+      return null;
+    }
+  };
+  return { stop, park, fetchUrl };
 }

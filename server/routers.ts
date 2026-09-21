@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { authorizeWhitelist, getWhitelistPlatform } from "./whitelist";
 import {
   deleteTrackerSession,
+  findTrackerSessionByUser,
   hasActiveTrackerSession,
   loadTrackerSession,
   saveTrackerSession,
@@ -32,7 +33,8 @@ export const appRouter = router({
         const access = await authorizeWhitelist(username, platform);
         if (!access.allowed) return { success: false, sessionId: "", reason: access.reason } as const;
 
-        const sessionId = randomUUID();
+        const existing = await findTrackerSessionByUser(platform, username);
+        const sessionId = existing?.sessionId || randomUUID();
         await saveTrackerSession({ sessionId, platform, username });
         return { success: true, sessionId } as const;
       }),

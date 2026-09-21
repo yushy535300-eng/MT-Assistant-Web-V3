@@ -46,6 +46,7 @@ import {
 import { connectDgLive, type DgTableData } from "@/lib/dg-live";
 import { collectConfirmedMtTableIds } from "@/lib/mt-table-membership";
 import { platformTodayPnl, type DgDailyPnl } from "@/lib/dg-report";
+import { mtTodayReportRange } from "@/lib/mt-report";
 import {
   connectVendorLive,
   type VendorKind,
@@ -53,6 +54,34 @@ import {
 } from "@/lib/vendor-live";
 
 type PlatformKey = "MT" | "DG" | "AB" | "DB";
+
+/** Set iframe.src only when the URL actually changes. Rewriting the same src
+ *  on every React render reloads DG (spinner / digital table / live video flash). */
+function StableGameIframe({
+  src,
+  style,
+  allow,
+}: {
+  src: string;
+  style: Record<string, unknown>;
+  allow: string;
+}) {
+  const frameRef = useRef<any>(null);
+  const appliedSrcRef = useRef("");
+  useEffect(() => {
+    const node = frameRef.current;
+    if (!node || !src || appliedSrcRef.current === src) return;
+    appliedSrcRef.current = src;
+    try {
+      node.src = src;
+    } catch {}
+  }, [src]);
+  return createElement("iframe" as any, {
+    ref: frameRef,
+    style,
+    allow,
+  });
+}
 
 type Result = RoadResult;
 type TableData = {
@@ -632,6 +661,9 @@ function RoadGrid({
   platform?: PlatformKey;
 }) {
   const dg = platform === "DG";
+  const ab = platform === "AB";
+  const db = platform === "DB";
+  const roadCellTheme = dg ? s.roadCellDg : ab ? s.roadCellAb : db ? s.roadCellDb : null;
   const beads = useMemo(
     () => buildSlidingBeadGrid(table.results),
     [table.results],
@@ -650,19 +682,31 @@ function RoadGrid({
   );
   return (
     <View
-      style={[s.roadArea, desktop && s.roadAreaDesktop, dg && s.roadAreaDg]}
+      style={[
+        s.roadArea,
+        desktop && s.roadAreaDesktop,
+        dg && s.roadAreaDg,
+        ab && s.roadAreaAb,
+        db && s.roadAreaDb,
+      ]}
     >
       <View
-        style={[s.beadPane, desktop && s.beadPaneDesktop, dg && s.beadPaneDg]}
+        style={[
+          s.beadPane,
+          desktop && s.beadPaneDesktop,
+          dg && s.beadPaneDg,
+          ab && s.beadPaneAb,
+          db && s.beadPaneDb,
+        ]}
       >
-        <View style={[s.beadGrid, dg && s.beadGridDg]}>
+        <View style={[s.beadGrid, dg && s.beadGridDg, ab && s.beadGridAb, db && s.beadGridDb]}>
           {Array.from({ length: 36 }, (_, i) => (
             <View
               key={i}
               style={[
                 s.beadCell,
                 desktop && s.beadCellDesktop,
-                dg && s.roadCellDg,
+                roadCellTheme,
               ]}
             >
               {beads[i] ? (
@@ -684,7 +728,7 @@ function RoadGrid({
                 style={[
                   s.bigCell,
                   desktop && s.bigCellDesktop,
-                  dg && s.roadCellDg,
+                  roadCellTheme,
                 ]}
               >
                 {m ? (
@@ -720,10 +764,20 @@ function RoadGrid({
             s.lowerArea,
             desktop && s.lowerAreaDesktop,
             dg && s.lowerAreaDg,
+            ab && s.lowerAreaAb,
+            db && s.lowerAreaDb,
           ]}
         >
           {lower.map((road, ri) => (
-            <View key={ri} style={[s.lowerPane, dg && s.lowerPaneDg]}>
+            <View
+              key={ri}
+              style={[
+                s.lowerPane,
+                dg && s.lowerPaneDg,
+                ab && s.lowerPaneAb,
+                db && s.lowerPaneDb,
+              ]}
+            >
               {Array.from({ length: 60 }, (_, i) => {
                 const row = Math.floor(i / 10),
                   col = i % 10,
@@ -735,7 +789,7 @@ function RoadGrid({
                       style={[
                         s.lowerCell,
                         desktop && s.lowerCellDesktop,
-                        dg && s.roadCellDg,
+                        roadCellTheme,
                       ]}
                     />
                   );
@@ -746,7 +800,7 @@ function RoadGrid({
                     style={[
                       s.lowerCell,
                       desktop && s.lowerCellDesktop,
-                      dg && s.roadCellDg,
+                      roadCellTheme,
                     ]}
                   >
                     {ri === 0 ? (
@@ -774,16 +828,19 @@ function RoadGrid({
 function CountdownBadge({
   count,
   updatedAt,
+  tick = true,
 }: {
   count?: number;
   updatedAt?: number;
+  tick?: boolean;
 }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
+    if (!tick || count == null) return;
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
-  }, []);
-  const elapsed = updatedAt ? Math.floor((now - updatedAt) / 1000) : 0;
+  }, [tick, count]);
+  const elapsed = tick && updatedAt ? Math.floor((now - updatedAt) / 1000) : 0;
   return (
     <View style={s.countWrap}>
       <MaterialIcons name="schedule" size={11} color="#DDE8F0" />
@@ -944,6 +1001,8 @@ function TableCard({
   scaled?: boolean;
 }) {
   const dg = platform === "DG";
+  const ab = platform === "AB";
+  const db = platform === "DB";
   const tableId = table.apiId ?? `BAG${table.id}`;
   const [videoEnabled, setVideoEnabled] = useState(() => {
     if (Platform.OS !== "web" || typeof window === "undefined") return false;
@@ -969,18 +1028,21 @@ function TableCard({
         s.tableCard,
         desktop && s.tableCardDesktop,
         dg && s.tableCardDg,
+        ab && s.tableCardAb,
+        db && s.tableCardDb,
         scaled && s.tableCardScaled,
       ]}
     >
-      <View style={[s.tableHead, dg && s.tableHeadDg]}>
+      <View style={[s.tableHead, dg && s.tableHeadDg, ab && s.tableHeadAb, db && s.tableHeadDb]}>
         <View style={s.row}>
           <Text style={s.game}>百家樂</Text>
-          <Text style={[s.tableId, dg && s.tableIdDg]}>{table.id}</Text>
+          <Text style={[s.tableId, dg && s.tableIdDg, ab && s.tableIdAb, db && s.tableIdDb]}>{table.id}</Text>
           <MaterialIcons name="person" size={12} color="#fff" />
           <Text style={s.headText}>{table.players}</Text>
           <CountdownBadge
             count={table.countdown}
             updatedAt={table.countdownUpdatedAt}
+            tick={platform === "MT" || platform === "DG"}
           />
         </View>
         <View style={s.row}>
@@ -1004,7 +1066,18 @@ function TableCard({
             <Text style={s.miniBtnText}>關注</Text>
           </Pressable>
           <Pressable
-            style={[s.miniBtn, { backgroundColor: dg ? "#9A7332" : "#1681C7" }]}
+            style={[
+              s.miniBtn,
+              {
+                backgroundColor: dg
+                  ? "#9A7332"
+                  : ab
+                    ? "#4A3488"
+                    : db
+                      ? "#1A6B5C"
+                      : "#1681C7",
+              },
+            ]}
             onPress={() => onAction("平台", table)}
           >
             <Text style={s.miniBtnText}>{platform}平台</Text>
@@ -1016,6 +1089,8 @@ function TableCard({
           s.tableBody,
           desktop ? s.tableBodyDesktop : s.tableBodyMobile,
           dg && s.tableBodyDg,
+          ab && s.tableBodyAb,
+          db && s.tableBodyDb,
         ]}
       >
         <View
@@ -1023,6 +1098,8 @@ function TableCard({
             s.dealer,
             desktop ? s.dealerDesktop : s.dealerMobile,
             dg && s.dealerDg,
+            ab && s.dealerAb,
+            db && s.dealerDb,
           ]}
         >
           <View style={[s.photo, desktop ? s.photoDesktop : s.photoMobile]}>
@@ -1032,7 +1109,7 @@ function TableCard({
               connected={connected}
             />
           </View>
-          <Text style={[s.dealerName, dg && s.dealerNameDg]}>
+          <Text style={[s.dealerName, dg && s.dealerNameDg, ab && s.dealerNameAb, db && s.dealerNameDb]}>
             {table.name || "—"}
           </Text>
           <Text style={s.meta}>房間 {table.roomId || table.id}</Text>
@@ -1082,13 +1159,20 @@ function MatrixMark({
           style={[
             s.matrixMarkText,
             brand === "DG" && s.matrixMarkTextDg,
+            brand === "AB" && s.matrixMarkTextAb,
+            brand === "DB" && s.matrixMarkTextDb,
             { fontSize: Math.max(10, size * 0.34) },
           ]}
         >
           {brand}
         </Text>
         <View
-          style={[s.matrixMarkAccent, brand === "DG" && s.matrixMarkAccentDg]}
+          style={[
+            s.matrixMarkAccent,
+            brand === "DG" && s.matrixMarkAccentDg,
+            brand === "AB" && s.matrixMarkAccentAb,
+            brand === "DB" && s.matrixMarkAccentDb,
+          ]}
         />
       </View>
     </View>
@@ -1237,6 +1321,7 @@ async function getGameLoginUrlFromPlatform(
         game_return_url: base,
         game_kind: "",
         game_type: "",
+        device,
         game_device: device,
       }),
       signal: controller.signal,
@@ -1378,33 +1463,19 @@ async function platformWalletRequest(
     return fetch(`${base}/api/v1/user/wallet`, {
       method,
       mode: "cors",
+      credentials: "omit",
       headers,
       body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
       signal: controller.signal,
     });
   };
   try {
-    let response = await request(false);
+    let response = token ? await request(true) : await request(false);
     let text = await response.text();
     let data: any = null;
     try {
       data = text ? JSON.parse(text) : null;
     } catch {}
-    const code = Number(data?.code);
-    if (
-      token &&
-      (response.status === 401 ||
-        response.status === 403 ||
-        code === 401 ||
-        code === 403)
-    ) {
-      response = await request(true);
-      text = await response.text();
-      data = null;
-      try {
-        data = text ? JSON.parse(text) : null;
-      } catch {}
-    }
     return { response, data };
   } catch (error: any) {
     if (error?.name === "AbortError")
@@ -1415,7 +1486,11 @@ async function platformWalletRequest(
   }
 }
 
-async function transferAllToMainWallet(platform: "TZ" | "OFA", token: string) {
+async function transferAllToMainWallet(
+  platform: "TZ" | "OFA",
+  token: string,
+  opts?: { skipEmptyCheck?: boolean },
+) {
   const result = await platformWalletRequest(platform, token, "POST", {
     s: "all",
     t: 0,
@@ -1427,6 +1502,9 @@ async function transferAllToMainWallet(platform: "TZ" | "OFA", token: string) {
       empty: false,
       message: String(result.data?.message ?? "轉回成功"),
     };
+
+  if (opts?.skipEmptyCheck)
+    return { ok: false, empty: true, message: String(result.data?.message ?? "轉回失敗") };
 
   // TZ 在沒有可轉回點數時可能只回 422/9999「失敗」。
   // 再讀一次遊戲錢包；如果所有遊戲錢包都是 0，就顯示成「目前無可轉回點數」。
@@ -1446,6 +1524,156 @@ async function transferAllToMainWallet(platform: "TZ" | "OFA", token: string) {
       `轉回失敗 (${result.response.status})`,
   ).replace(/^"|"$/g, "");
   return { ok: false, empty: false, message: message || "轉回失敗" };
+}
+
+async function readGameWalletLeftover(
+  platform: "TZ" | "OFA",
+  token: string,
+) {
+  const wallet = await platformWalletRequest(platform, token, "GET");
+  const rows = Array.isArray(wallet.data?.data) ? wallet.data.data : [];
+  return rows
+    .filter((x: any) => String(x?.game_code || "").trim())
+    .reduce((sum: number, x: any) => sum + (Number(x?.game_balance) || 0), 0);
+}
+
+/** POST {s:"all", t:0}. If TZ still shows game balances (e.g. MT 238906), retry once. */
+async function pullAllGameWalletsToMain(
+  platform: "TZ" | "OFA",
+  token: string,
+) {
+  const first = await transferAllToMainWallet(platform, token, {
+    skipEmptyCheck: true,
+  });
+  let leftover = 0;
+  let rows: any[] = [];
+  try {
+    const wallet = await platformWalletRequest(platform, token, "GET");
+    rows = Array.isArray(wallet.data?.data) ? wallet.data.data : [];
+    leftover = rows
+      .filter((x: any) => String(x?.game_code || "").trim())
+      .reduce((sum: number, x: any) => sum + (Number(x?.game_balance) || 0), 0);
+  } catch {}
+  if (leftover > 0.000001) {
+    for (const row of rows) {
+      const code = String(row?.game_code || "").trim();
+      const bal = Number(row?.game_balance) || 0;
+      if (!code || bal <= 0.000001) continue;
+      await platformWalletRequest(platform, token, "POST", { s: code, t: 0 });
+    }
+    await transferAllToMainWallet(platform, token, { skipEmptyCheck: true });
+    try {
+      leftover = await readGameWalletLeftover(platform, token);
+    } catch {
+      leftover = 0;
+    }
+  }
+  if (first.ok || leftover <= 0.000001)
+    return leftover <= 0.000001 && !first.ok
+      ? { ok: false, empty: true, message: first.message }
+      : { ok: true, empty: false, message: first.message || "轉回成功" };
+  return { ok: false, empty: false, message: first.message || "轉回失敗" };
+}
+
+const GAME_WALLET_CODE: Record<PlatformKey, string> = {
+  MT: "MTLI",
+  DG: "DGLI",
+  AB: "AB01",
+  DB: "YABOZR",
+};
+
+const GAME_WALLET_LABEL: Record<PlatformKey, string> = {
+  MT: "MT",
+  DG: "DG",
+  AB: "歐博",
+  DB: "DB",
+};
+
+function walletRowLooksLikeGame(
+  row: any,
+  gameCode: string,
+  key?: PlatformKey,
+) {
+  const code = String(row?.game_code ?? "").trim().toUpperCase();
+  const name = String(row?.name ?? row?.game_name ?? row?.title ?? "").trim();
+  const wanted = String(gameCode).trim().toUpperCase();
+  if (code && code === wanted) return true;
+  const hay = `${code} ${name}`;
+  if (key === "AB" || wanted === "AB01")
+    return code === "AB01" || /歐博真人|歐博|allbet|ab01/i.test(hay);
+  if (key === "DG" || wanted === "DGLI")
+    return (
+      code === "DGLI" ||
+      code === "DG" ||
+      /dg真人|dgli/i.test(hay) ||
+      /^dg$/i.test(name)
+    );
+  if (key === "MT" || wanted === "MTLI")
+    return (
+      code === "MTLI" ||
+      code === "MT" ||
+      /mt真人|mtli/i.test(hay) ||
+      /^mt$/i.test(name)
+    );
+  if (key === "DB" || wanted === "YABOZR")
+    return (
+      code === "YABOZR" ||
+      code === "DB" ||
+      /db真人|yabozr/i.test(hay) ||
+      /^db$/i.test(name)
+    );
+  return false;
+}
+
+async function resolveWalletGameCode(
+  platform: "TZ" | "OFA",
+  token: string,
+  gameCode: string,
+  key?: PlatformKey,
+) {
+  const wallet = await platformWalletRequest(platform, token, "GET");
+  const rows = Array.isArray(wallet.data?.data) ? wallet.data.data : [];
+  const hit = rows.find((row: any) => walletRowLooksLikeGame(row, gameCode, key));
+  const resolved = String(hit?.game_code || "").trim();
+  return resolved || gameCode;
+}
+
+async function transferIntoGameWallet(
+  platform: "TZ" | "OFA",
+  token: string,
+  gameCode: string,
+  key?: PlatformKey,
+) {
+  const postIn = async (code: string) => {
+    const result = await platformWalletRequest(platform, token, "POST", {
+      s: code,
+      t: 1,
+    });
+    const ok = result.response.ok && Number(result.data?.code) === 200;
+    const message = String(
+      result.data?.message ??
+        result.data?.msg ??
+        result.data?.error ??
+        `轉入失敗 (${result.response.status})`,
+    ).replace(/^"|"$/g, "");
+    return { ok, message: message || (ok ? "轉入成功" : "轉入失敗"), result };
+  };
+  const first = await postIn(gameCode);
+  if (first.ok)
+    return { ok: true, empty: false, message: first.message };
+  let realCode = gameCode;
+  try {
+    realCode = await resolveWalletGameCode(platform, token, gameCode, key);
+  } catch {}
+  if (realCode && realCode !== gameCode) {
+    const retry = await postIn(realCode);
+    if (retry.ok)
+      return { ok: true, empty: false, message: retry.message };
+    const empty = /不足|無可|沒有|0/.test(retry.message);
+    return { ok: false, empty, message: retry.message || "轉入失敗" };
+  }
+  const empty = /不足|無可|沒有|0/.test(first.message);
+  return { ok: false, empty, message: first.message || "轉入失敗" };
 }
 
 function getTzLoginDeviceId() {
@@ -1648,11 +1876,13 @@ function AccessScreen({
           </View>
           <View style={[s.loginHero, !desktop ? s.loginHeroMobile : null]}>
             <View style={[s.loginBrand, !desktop ? s.loginBrandMobile : null]}>
-              <View style={s.loginIcon}>
-                <MatrixMark size={42} />
+              <View style={[s.loginIcon, !desktop ? s.loginIconMobile : null]}>
+                <MatrixMark size={desktop ? 42 : 32} />
               </View>
               <View style={s.loginBrandCopy}>
-                <Text style={s.loginKicker}>REAL-TIME CONTROL ROOM</Text>
+                {desktop ? (
+                  <Text style={s.loginKicker}>REAL-TIME CONTROL ROOM</Text>
+                ) : null}
                 <Text
                   style={[s.loginTitle, !desktop ? s.loginTitleMobile : null]}
                   numberOfLines={1}
@@ -1693,7 +1923,7 @@ function AccessScreen({
           </View>
           <View style={s.loginDivider} />
           <View style={s.loginHintRow}>
-            <Text style={s.loginHint}>
+            <Text style={s.loginHint} numberOfLines={1}>
               請輸入 TZ 帳號與密碼，驗證成功即可進入。
             </Text>
             <Pressable
@@ -2379,6 +2609,55 @@ function tableMatchesAssistId(table: { id?: string; apiId?: string; tableBadge?:
   if (!want) return false;
   return tableIdKeys(table).includes(want);
 }
+function assistRoomTitle(
+  table?: { apiId?: string; id?: string; roomId?: string; tableBadge?: string } | null,
+  platform?: PlatformKey,
+) {
+  if (!table) return "";
+  const id = String(table.apiId ?? table.id ?? "").trim();
+  const room = String(table.roomId ?? "").trim();
+  if (platform === "AB" || platform === "DB") {
+    if (room && /[\u4e00-\u9fff]/.test(room)) return room;
+    return room || id;
+  }
+  if (platform === "DG") {
+    if (room && room !== "—" && !/^\d+$/.test(room)) return room;
+    return id;
+  }
+  return id;
+}
+function vendorRowUnchanged(a?: TableData, b?: TableData) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.apiId === b.apiId &&
+    a.round === b.round &&
+    a.poker === b.poker &&
+    a.countdown === b.countdown &&
+    a.name === b.name &&
+    a.roomId === b.roomId &&
+    a.players === b.players &&
+    a.shoe === b.shoe &&
+    a.banker === b.banker &&
+    a.player === b.player &&
+    a.tie === b.tie &&
+    a.results.length === b.results.length &&
+    a.results[a.results.length - 1] === b.results[b.results.length - 1]
+  );
+}
+function mergeVendorTables(prev: TableData[], next: TableData[]) {
+  if (prev === next) return prev;
+  if (prev.length === next.length && prev.every((row, i) => vendorRowUnchanged(row, next[i]))) return prev;
+  const byId = new Map(prev.map((row) => [row.apiId, row]));
+  let changed = prev.length !== next.length;
+  const out = next.map((row) => {
+    const old = byId.get(row.apiId);
+    if (old && vendorRowUnchanged(old, row)) return old;
+    changed = true;
+    return row;
+  });
+  return changed ? out : prev;
+}
 
 function parsePokerFace(token: string): string | null {
   const value = String(token || "").trim().toUpperCase();
@@ -2442,6 +2721,16 @@ function parseDgV38Poker(table: DgTableData): V38PokerState | null {
     };
   } catch {
     return null;
+  }
+}
+
+function isPhoneWebClient(width: number) {
+  if (width < 1000) return true;
+  if (Platform.OS !== "web") return false;
+  try {
+    return /Mobi|Android|iPhone|iPod|iPad|webOS/i.test(String(navigator.userAgent || ""));
+  } catch {
+    return false;
   }
 }
 
@@ -2521,14 +2810,22 @@ export default function HomeScreen() {
       lockedMtUrlRef.current = "";
       setHasEnteredGame(false);
       setDgWasOpened(false);
+      gameViewUrlRef.current = "";
       setGameViewUrl("");
       setPlatformLaunching(false);
       setWalletTransferOpen(false);
       setWalletTransferBusy(false);
+      walletTransferBusyRef.current = false;
+      enteringGameWalletRef.current = false;
+      loginSweepDoneRef.current = false;
+      setLoginSweepDone(false);
       setDgNeedsRecovery(false);
       dgHasConnectedRef.current = false;
       dgForegroundRecoveryAttemptRef.current = 0;
       dgBridgeActiveRef.current = false;
+      abBridgeActiveRef.current = false;
+      dbBridgeActiveRef.current = false;
+      try { sessionStorage.removeItem("mt_ab_stay_ingame"); } catch {}
       suppressDgRecoveryRef.current = false;
       roadConnectBusyRef.current = false;
       setFloatingOpen(false);
@@ -2557,11 +2854,16 @@ export default function HomeScreen() {
   const [mtOpen, setMtOpen] = useState(false);
   const [gameViewPlatform, setGameViewPlatform] = useState<PlatformKey>("MT");
   const [gameViewUrl, setGameViewUrl] = useState("");
+  const gameViewUrlRef = useRef("");
   const [platformLaunching, setPlatformLaunching] = useState(false);
   const [hasEnteredGame, setHasEnteredGame] = useState(false);
   const [dgWasOpened, setDgWasOpened] = useState(false);
   const [walletTransferOpen, setWalletTransferOpen] = useState(false);
   const [walletTransferBusy, setWalletTransferBusy] = useState(false);
+  const walletTransferBusyRef = useRef(false);
+  const enteringGameWalletRef = useRef(false);
+  const [loginSweepDone, setLoginSweepDone] = useState(false);
+  const loginSweepDoneRef = useRef(false);
   const [floatingOpen, setFloatingOpen] = useState(false);
   const [roomDropdownOpen, setRoomDropdownOpen] = useState(false);
   const roomDropdownOpenRef = useRef(false);
@@ -2579,13 +2881,15 @@ export default function HomeScreen() {
   const dgAuthPromiseRef = useRef<Promise<string> | null>(null);
   const dgLastAuthAtRef = useRef(0);
   const dgSameTokenRetryRef = useRef(0);
-  // A successful "transfer all back" moves the balance out of the current
-  // game wallet. DG normally reuses its existing DGLI URL to avoid duplicate
-  // sessions, but the next explicit DG launch must authenticate once so the
-  // platform can transfer the main-wallet balance into DG again.
+  // After a sweep-to-main, block DG recovery from issuing a new DGLI/login
+  // that would pull the main-wallet balance back into DG.
   const dgFreshAuthorizationRequiredRef = useRef(false);
   const [dgNeedsRecovery, setDgNeedsRecovery] = useState(false);
   const dgBridgeActiveRef = useRef(false);
+  const abBridgeActiveRef = useRef(false);
+  const abKickReloginAtRef = useRef(0);
+  const abStayRestoreRef = useRef(false);
+  const dbBridgeActiveRef = useRef(false);
   const [dgConnectEpoch, setDgConnectEpoch] = useState(0);
   const dgHasConnectedRef = useRef(false);
   const dgForegroundRecoveryAttemptRef = useRef(0);
@@ -2594,6 +2898,12 @@ export default function HomeScreen() {
   const [vendorTables, setVendorTables] = useState<
     Record<VendorKind, TableData[]>
   >({ AB: [], DB: [] });
+  const vendorTablesRef = useRef<Record<VendorKind, TableData[]>>({ AB: [], DB: [] });
+  const vendorPaintRef = useRef<number | null>(null);
+  const vendorDirtyRef = useRef<Record<VendorKind, boolean>>({ AB: false, DB: false });
+  const activePlatformRef = useRef<PlatformKey>("MT");
+  const mtOpenRef = useRef(false);
+  const gameViewPlatformRef = useRef<PlatformKey>("MT");
   const [vendorConnected, setVendorConnected] = useState<
     Record<VendorKind, boolean>
   >({ AB: false, DB: false });
@@ -2613,11 +2923,35 @@ export default function HomeScreen() {
     DB: "",
   });
   const vendorControllersRef = useRef<
-    Partial<Record<VendorKind, { close: () => void }>>
+    Partial<Record<VendorKind, { close: () => void | Promise<unknown> }>>
   >({});
+  const [vendorEpoch, setVendorEpoch] = useState<Record<VendorKind, number>>({
+    AB: 0,
+    DB: 0,
+  });
+  const vendorForceRestartRef = useRef<Record<VendorKind, boolean>>({ AB: false, DB: false });
+  useEffect(() => {
+    activePlatformRef.current = activePlatform;
+  }, [activePlatform]);
+  useEffect(() => {
+    mtOpenRef.current = mtOpen;
+  }, [mtOpen]);
+  useEffect(() => {
+    gameViewPlatformRef.current = gameViewPlatform;
+  }, [gameViewPlatform]);
+  useEffect(() => {
+    if (activePlatform !== "AB" && activePlatform !== "DB") return;
+    const latest = vendorTablesRef.current[activePlatform];
+    setVendorTables((current) =>
+      current[activePlatform] === latest
+        ? current
+        : { ...current, [activePlatform]: latest },
+    );
+  }, [activePlatform]);
   const platformTokenRef = useRef("");
   const roadConnectBusyRef = useRef(false);
   const suppressDgRecoveryRef = useRef(false);
+  const dgLiveHoldRef = useRef(false);
   const [loginPlatform, setLoginPlatform] = useState<"TZ" | "OFA">("TZ");
   const [token, setToken] = useState("");
   const [mtUrl, setMtUrl] = useState("");
@@ -2687,11 +3021,11 @@ export default function HomeScreen() {
             : 0;
   const activeConnected =
     activePlatform === "DG"
-      ? dgConnected
+      ? dgConnected || dgTables.length > 0
       : activePlatform === "AB"
-        ? vendorConnected.AB
+        ? vendorConnected.AB || vendorTables.AB.length > 0
         : activePlatform === "DB"
-          ? vendorConnected.DB
+          ? vendorConnected.DB || vendorTables.DB.length > 0
           : connected;
   const [events, setEvents] = useState<string[]>([]);
   const [toast, setToast] = useState("");
@@ -2768,9 +3102,11 @@ export default function HomeScreen() {
     setEvents((e) =>
       [`[${new Date().toLocaleTimeString()}] ${x}`, ...e].slice(0, 40),
     );
-  const notify = (x: string) => {
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const notify = (x: string, ms = 1800) => {
     setToast(x);
-    setTimeout(() => setToast(""), 1800);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(""), ms);
   };
   const stopLossPrincipalValue = useMemo(() => {
     const value = Number(
@@ -2850,8 +3186,7 @@ export default function HomeScreen() {
   );
   const liveV38 = useMemo(() => {
     if (activePlatform !== "MT" && assistTable) {
-      const parsed = parseDgV38Poker(assistTable as DgTableData);
-      if (parsed) return parsed;
+      return parseDgV38Poker(assistTable as DgTableData) || undefined;
     }
     return (
       v38ByTable[assistTableId] ||
@@ -3949,13 +4284,7 @@ export default function HomeScreen() {
     };
 
     const reportPayload = () => {
-      // Match MT/ROAD X exactly: current LOCAL calendar date with literal Z boundaries.
-      // Recomputed for every request, so 00:00 automatically switches to the new day's report.
-      const now = new Date();
-      const y = now.getFullYear(),
-        m = String(now.getMonth() + 1).padStart(2, "0"),
-        d = String(now.getDate()).padStart(2, "0");
-      const day = `${y}-${m}-${d}`;
+      const { begin_at, end_at } = mtTodayReportRange();
       return {
         method: "GET",
         action: {
@@ -3965,9 +4294,9 @@ export default function HomeScreen() {
           path: "/api/v1/gametype/3/game/1/bet/history",
         },
         body: {
-          begin_at: `${day}T00:00:00.000Z`,
+          begin_at,
           cur: 1,
-          end_at: `${day}T23:59:59.000Z`,
+          end_at,
           room_id: 1,
           s: 8,
           table_id: 0,
@@ -4454,7 +4783,8 @@ export default function HomeScreen() {
         dgLastAuthAtRef.current = Date.now();
         dgSameTokenRetryRef.current = 0;
         setDgGameUrl(url);
-        setDgStatus("連線中");
+        if (!dgLiveHoldRef.current && !dgHasConnectedRef.current)
+          setDgStatus("連線中");
         return url;
       })
       .finally(() => {
@@ -4465,13 +4795,30 @@ export default function HomeScreen() {
     return promise;
   };
 
+  const reconnectVendor = (kind: VendorKind, forceRestart = false) => {
+    vendorForceRestartRef.current[kind] = forceRestart;
+    const current = vendorControllersRef.current[kind];
+    vendorControllersRef.current[kind] = undefined;
+    void Promise.resolve(current?.close());
+    setVendorConnected((v) => ({ ...v, [kind]: false }));
+    setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
+    setVendorMessage((v) => ({
+      ...v,
+      [kind]: "正在重新連線",
+    }));
+    setVendorEpoch((e) => ({ ...e, [kind]: e[kind] + 1 }));
+  };
+
   const connectRoadDashboard = async (force = false) => {
     if (!accessGranted || !accessSessionId || roadConnectBusyRef.current)
       return;
     const platformToken = platformTokenRef.current;
     if (!platformToken) return;
+    const dgForeground =
+      dgBridgeActiveRef.current ||
+      (mtOpenRef.current && gameViewPlatformRef.current === "DG");
     roadConnectBusyRef.current = true;
-    suppressDgRecoveryRef.current = false;
+    if (!dgForeground) suppressDgRecoveryRef.current = false;
     if (force) {
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
@@ -4485,19 +4832,23 @@ export default function HomeScreen() {
       } catch {}
       setSocket(null);
       setConnected(false);
-      try {
-        dgControllerRef.current?.close();
-      } catch {}
-      dgControllerRef.current = null;
-      await stopDgRelayServer(accessSessionId);
-      setDgConnected(false);
-      setDgStatus("連線中");
+      if (!dgForeground) {
+        try {
+          dgControllerRef.current?.close();
+        } catch {}
+        dgControllerRef.current = null;
+        await stopDgRelayServer(accessSessionId);
+        setDgConnected(false);
+        setDgStatus("連線中");
+      }
+      reconnectVendor("AB");
+      reconnectVendor("DB");
     } else {
       if (!connected) setConnected(false);
-      if (!dgConnected) setDgStatus("連線中");
+      if (!dgForeground && !dgConnected) setDgStatus("連線中");
     }
     const needMt = force || !lockedMtUrlRef.current || !connected;
-    const needDg = force || !dgGameUrl || !dgConnected;
+    const needDg = !dgForeground && (force || !dgGameUrl || !dgConnected);
     const [mtResult, dgResult] = await Promise.allSettled([
       needMt
         ? getMtLoginUrlFromPlatform(loginPlatform, platformToken)
@@ -4565,6 +4916,83 @@ export default function HomeScreen() {
     }
   };
 
+  const enterAbSameSessionProxy = async (
+    device: "Desktop" | "Mobile" = "Desktop",
+    opts?: { reuse?: boolean },
+  ) => {
+    if (!accessSessionId) return "";
+    try {
+      const r = await fetch("/api/vendor/ab/enter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: accessSessionId,
+          device,
+          reuse: opts?.reuse === true,
+        }),
+      });
+      let data: any = null;
+      try {
+        data = await r.json();
+      } catch {}
+      if (!r.ok || !data?.ok || !data?.url)
+        throw new Error(String(data?.error || "歐博單工作階段入口啟動失敗"));
+      abBridgeActiveRef.current = true;
+      try { sessionStorage.setItem("mt_ab_stay_ingame", "1"); } catch {}
+      return String(data.url);
+    } catch (error: any) {
+      abBridgeActiveRef.current = false;
+      throw new Error(error?.message || "歐博單工作階段入口啟動失敗");
+    }
+  };
+
+  const enterDbSameSessionProxy = async (device: "Desktop" | "Mobile" = "Desktop") => {
+    if (!accessSessionId) return "";
+    try {
+      const r = await fetch("/api/vendor/db/enter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: accessSessionId, device }),
+      });
+      let data: any = null;
+      try {
+        data = await r.json();
+      } catch {}
+      if (!r.ok || !data?.ok || !data?.url)
+        throw new Error(String(data?.error || "DB 單工作階段入口啟動失敗"));
+      dbBridgeActiveRef.current = true;
+      return String(data.url);
+    } catch (error: any) {
+      dbBridgeActiveRef.current = false;
+      throw new Error(error?.message || "DB 單工作階段入口啟動失敗");
+    }
+  };
+
+  const leaveAbSameSessionProxy = async () => {
+    if (!accessSessionId) return;
+    abBridgeActiveRef.current = false;
+    try { sessionStorage.removeItem("mt_ab_stay_ingame"); } catch {}
+    try {
+      await fetch("/api/vendor/ab/leave", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: accessSessionId }),
+      });
+    } catch {}
+  };
+
+  const leaveDbSameSessionProxy = async () => {
+    if (!accessSessionId) return;
+    dbBridgeActiveRef.current = false;
+    try {
+      await fetch("/api/vendor/db/leave", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: accessSessionId }),
+      });
+    } catch {}
+  };
+
   const leaveDgSameSessionProxy = async () => {
     if (!dgBridgeActiveRef.current || !accessSessionId) return;
     dgBridgeActiveRef.current = false;
@@ -4579,19 +5007,95 @@ export default function HomeScreen() {
     } catch {}
   };
 
-  // 一進牌路主頁就自動連 MT / DG，跟舊版一樣。
-  // 這裡只負責牌路資料連線；MT平台 / DG平台按鈕仍然是另外的遊戲入口。
+  const runAutoSweepToMain = async (opts?: {
+    skipEmptyCheck?: boolean;
+    silent?: boolean;
+    force?: boolean;
+  }) => {
+    const platformToken = platformTokenRef.current;
+    if (!platformToken || walletTransferBusyRef.current)
+      return { ok: false, empty: true, message: "" };
+    if (Platform.OS === "web") {
+      try {
+        if (sessionStorage.getItem("mt_ab_stay_ingame") === "1")
+          return { ok: false, empty: true, message: "" };
+      } catch {}
+    }
+    if (
+      !opts?.force &&
+      (mtOpenRef.current || enteringGameWalletRef.current)
+    )
+      return { ok: false, empty: true, message: "" };
+    walletTransferBusyRef.current = true;
+    walletTransferBusyRef.current = true;
+    setWalletTransferBusy(true);
+    try {
+      const result = opts?.skipEmptyCheck
+        ? await pullAllGameWalletsToMain(loginPlatform, platformToken)
+        : await transferAllToMainWallet(loginPlatform, platformToken);
+      if (result.ok) {
+        suppressDgRecoveryRef.current = true;
+        dgFreshAuthorizationRequiredRef.current = true;
+        setDgNeedsRecovery(false);
+        if (!opts?.silent) notify("已自動轉回主錢包");
+      }
+      return result;
+    } catch {
+      return { ok: false, empty: true, message: "自動轉回未完成" };
+    } finally {
+      walletTransferBusyRef.current = false;
+      setWalletTransferBusy(false);
+    }
+  };
+
+  // After TZ login: one sweep, then connect roads. Game logins auto-wallet
+  // into MT/DG, so one delayed sweep pulls that back. Not three times.
   useEffect(() => {
     if (!accessGranted || !accessSessionId) return;
-    void connectRoadDashboard(false);
-  }, [accessGranted, accessSessionId, loginPlatform]);
+    if (loginSweepDone) {
+      let cancelled = false;
+      let delayed: ReturnType<typeof setTimeout> | null = null;
+      void (async () => {
+        await connectRoadDashboard(false);
+        if (cancelled) return;
+        suppressDgRecoveryRef.current = true;
+        dgFreshAuthorizationRequiredRef.current = true;
+        delayed = setTimeout(() => {
+          if (cancelled || mtOpenRef.current || enteringGameWalletRef.current)
+            return;
+          void runAutoSweepToMain({
+            skipEmptyCheck: true,
+            silent: true,
+          }).then(() => {
+            suppressDgRecoveryRef.current = true;
+            dgFreshAuthorizationRequiredRef.current = true;
+          });
+        }, 1800);
+      })();
+      return () => {
+        cancelled = true;
+        if (delayed) clearTimeout(delayed);
+      };
+    }
+    let cancelled = false;
+    void (async () => {
+      await runAutoSweepToMain({ force: true });
+      if (!cancelled) {
+        loginSweepDoneRef.current = true;
+        setLoginSweepDone(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [accessGranted, accessSessionId, loginPlatform, loginSweepDone]);
 
   // DG relay follows the automatically obtained background DG URL.
   useEffect(() => {
     if (!accessGranted) return;
-    setDgTodayPnl(null);
+    if (dgLiveHoldRef.current) return;
     if (!dgGameUrl) {
-      setDgConnected(false);
+      if (!dgHasConnectedRef.current) setDgConnected(false);
       return;
     }
     let cancelled = false;
@@ -4599,8 +5103,10 @@ export default function HomeScreen() {
       dgControllerRef.current?.close();
     } catch {}
     dgControllerRef.current = null;
-    setDgConnected(false);
-    setDgStatus("連線中");
+    if (!dgHasConnectedRef.current) {
+      setDgConnected(false);
+      setDgStatus("連線中");
+    }
     connectDgLive(dgGameUrl, accessSessionId, {
       onPnl: (report) => {
         if (!cancelled) setDgTodayPnl(report);
@@ -4610,15 +5116,24 @@ export default function HomeScreen() {
       },
       onStatus: (status, message) => {
         if (cancelled) return;
-        const online = status === "connected";
-        setDgConnected(online);
-        setDgStatus(online ? "已連線" : "連線中");
-        if (online) {
+        if (status === "connected") {
           dgHasConnectedRef.current = true;
+          setDgConnected(true);
+          setDgStatus("已連線");
           setDgNeedsRecovery(false);
-        } else if (status === "error" || status === "closed") {
+          return;
+        }
+        if (status === "error" || status === "closed") {
           setDgNeedsRecovery(true);
           if (message) appendEvent(`DG 背景連線待恢復：${message}`);
+          if (
+            !dgHasConnectedRef.current &&
+            !dgBridgeActiveRef.current &&
+            !(mtOpenRef.current && gameViewPlatformRef.current === "DG")
+          ) {
+            setDgConnected(false);
+            setDgStatus("連線中");
+          }
         }
       },
       onEvent: (message) => {
@@ -4648,65 +5163,121 @@ export default function HomeScreen() {
     };
   }, [accessGranted, accessSessionId, dgGameUrl, dgConnectEpoch]);
 
-  // 登入牌路主頁後，歐博與 DB 各自取得授權並在獨立背景頁啟動。
-  // 平台按鈕只切換顯示內容，不負責建立連線，因此不必先點進遊戲。
-  useEffect(() => {
-    if (!accessGranted || !accessSessionId) return;
-    let cancelled = false;
+  // 歐博與 DB 各自獨立連線：一邊失敗或重連，不會關掉另一邊。
+  const startVendorKind = (kind: VendorKind) => {
+    if (!accessGranted || !accessSessionId) return () => {};
     const platformToken = platformTokenRef.current;
-    if (!platformToken) return;
-    const startKind = (kind: VendorKind) => {
-      if (vendorControllersRef.current[kind]) return;
+    if (!platformToken) return () => {};
+    let cancelled = false;
+    if (!vendorTablesRef.current[kind].length) {
       setVendorConnected((v) => ({ ...v, [kind]: false }));
       setVendorStatus((v) => ({ ...v, [kind]: "連線中" }));
-      setVendorMessage((v) => ({ ...v, [kind]: "正在取得平台授權並啟動即時牌路" }));
-      Promise.resolve()
-      .then(() => {
+      setVendorMessage((v) => ({
+        ...v,
+        [kind]: "正在取得平台授權並啟動即時牌路",
+      }));
+    }
+    Promise.resolve()
+      .then(async () => {
         if (cancelled) return null;
+        const forceRestart = vendorForceRestartRef.current[kind] === true;
+        vendorForceRestartRef.current[kind] = false;
         return connectVendorLive(kind, "", accessSessionId, {
           onTables: (next: VendorTableData[]) => {
-            if (!cancelled)
-              setVendorTables((v) => ({ ...v, [kind]: next as TableData[] }));
+            if (cancelled) return;
+            const merged = mergeVendorTables(
+              vendorTablesRef.current[kind],
+              next as TableData[],
+            );
+            if (merged === vendorTablesRef.current[kind]) return;
+            vendorTablesRef.current[kind] = merged;
+            if (merged.length) {
+              setVendorConnected((v) => ({ ...v, [kind]: true }));
+              setVendorStatus((v) =>
+                v[kind] === "連線失敗" ? v : { ...v, [kind]: "已連線" },
+              );
+            }
+            if (
+              activePlatformRef.current !== kind &&
+              gameViewPlatformRef.current !== kind
+            )
+              return;
+            vendorDirtyRef.current[kind] = true;
+            if (vendorPaintRef.current != null) return;
+            vendorPaintRef.current = requestAnimationFrame(() => {
+              vendorPaintRef.current = null;
+              setVendorTables((current) => {
+                const nextState = { ...current };
+                let changed = false;
+                if (vendorDirtyRef.current[kind]) {
+                  vendorDirtyRef.current[kind] = false;
+                  if (nextState[kind] !== vendorTablesRef.current[kind]) {
+                    nextState[kind] = vendorTablesRef.current[kind];
+                    changed = true;
+                  }
+                }
+                return changed ? nextState : current;
+              });
+            });
           },
           onPnl: (value) => {
             if (!cancelled) setVendorPnl((v) => ({ ...v, [kind]: value }));
-          },
-          onSettlement: (settlement) => {
-            if (!cancelled && Number.isFinite(settlement.pnl))
-              setVendorPnl((v) => ({
-                ...v,
-                [kind]: (v[kind] ?? 0) + settlement.pnl,
-              }));
           },
           onStatus: (status, message) => {
             if (!cancelled) {
               setVendorConnected((v) => ({
                 ...v,
-                [kind]: status === "connected",
+                [kind]:
+                  status === "connected" ||
+                  (status !== "error" &&
+                    vendorTablesRef.current[kind].length > 0),
               }));
               setVendorStatus((v) => ({
                 ...v,
                 [kind]:
-                  status === "connected"
+                  status === "connected" ||
+                  (status !== "error" &&
+                    vendorTablesRef.current[kind].length > 0)
                     ? "已連線"
-                    : status === "error"
+                    : status === "error" &&
+                        !/尚未收到可解析的桌台資料|官方暫時限流|官方限流|授權失效|背景連線不穩|重連中/.test(message || "")
                       ? "連線失敗"
                       : "連線中",
               }));
               setVendorMessage((v) => ({
                 ...v,
-                [kind]: message || (status === "connected" ? "即時桌台同步完成" : "等待桌台資料"),
+                [kind]:
+                  message ||
+                  (status === "connected" ? "即時桌台同步完成" : "等待桌台資料"),
               }));
             }
-            if (message && !cancelled && status === "error")
+            if (
+              message &&
+              !cancelled &&
+              status === "error" &&
+              !/尚未收到可解析的桌台資料|官方暫時限流|官方限流|授權失效|背景連線不穩|重連中/.test(message)
+            )
               appendEvent(message);
           },
           onEvent: (message) => {
-            if (!cancelled && message) appendEvent(message);
+            if (
+              cancelled ||
+              !message ||
+              /擷取狀態|已收到解密物件|真實百家樂桌解析|解碼資料讀取|發現目標|主頁導向|監聽目標/.test(
+                message,
+              )
+            )
+              return;
+            appendEvent(message);
           },
         }, {
           platform: loginPlatform,
           platformToken,
+          resumeHall:
+            !forceRestart &&
+            gameViewPlatformRef.current !== kind &&
+            (kind === "AB" ? !abBridgeActiveRef.current : !dbBridgeActiveRef.current),
+          restart: forceRestart,
         });
       })
       .then((controller) => {
@@ -4733,13 +5304,44 @@ export default function HomeScreen() {
           );
         }
       });
-    };
-    startKind("AB");
-    startKind("DB");
     return () => {
       cancelled = true;
+      const current = vendorControllersRef.current[kind];
+      vendorControllersRef.current[kind] = undefined;
+      void Promise.resolve(current?.close());
     };
-  }, [accessGranted, accessSessionId, loginPlatform]);
+  };
+
+  useEffect(() => {
+    if (!accessGranted || !accessSessionId || Platform.OS !== "web") return;
+    let stay = false;
+    try { stay = sessionStorage.getItem("mt_ab_stay_ingame") === "1"; } catch {}
+    try { if (/(?:^|;\s*)mt_ab_proxy_sid=/.test(document.cookie || "")) stay = true; } catch {}
+    if (!stay || abStayRestoreRef.current) return;
+    abStayRestoreRef.current = true;
+    mtOpenRef.current = true;
+    abBridgeActiveRef.current = true;
+    gameViewPlatformRef.current = "AB";
+    setActivePlatform("AB");
+    setGameViewPlatform("AB");
+    setHasEnteredGame(true);
+    setMtOpen(true);
+    setPlatformLaunching(true);
+    void enterAbSameSessionProxy(width >= 1000 ? "Desktop" : "Mobile", { reuse: true })
+      .then((url) => {
+        if (!url) return;
+        gameViewUrlRef.current = url;
+        setGameViewUrl(url);
+        notify("已回到歐博遊戲");
+      })
+      .catch((error: any) => {
+        notify(error?.message || "歐博遊戲恢復失敗", 5000);
+      })
+      .finally(() => setPlatformLaunching(false));
+  }, [accessGranted, accessSessionId]);
+
+  useEffect(() => startVendorKind("AB"), [accessGranted, accessSessionId, loginPlatform, vendorEpoch.AB]);
+  useEffect(() => startVendorKind("DB"), [accessGranted, accessSessionId, loginPlatform, vendorEpoch.DB]);
 
   // 如果 DG 原生遊戲把背景 relay 踢掉：先用「同一個已取得的 DG token」
   // 重掛一次背景 relay，不再呼叫 DGLI/login 取得第二組 token。這樣可避免
@@ -4752,29 +5354,13 @@ export default function HomeScreen() {
       walletTransferBusy ||
       !dgNeedsRecovery ||
       suppressDgRecoveryRef.current ||
-      dgBridgeActiveRef.current
+      dgBridgeActiveRef.current ||
+      enteringGameWalletRef.current ||
+      (mtOpen && gameViewPlatform === "DG")
     )
       return;
     if (!dgGameUrl) return;
     let cancelled = false;
-
-    // DG 真實遊戲開著時，先只重掛一次「同 token」relay。這個動作不會重新
-    // 呼叫 TZ 的 DGLI/login，因此不會再建立另一組遊戲授權。
-    if (mtOpen && gameViewPlatform === "DG") {
-      if (dgForegroundRecoveryAttemptRef.current >= 1) return;
-      const timer = setTimeout(() => {
-        if (cancelled) return;
-        dgForegroundRecoveryAttemptRef.current += 1;
-        setDgNeedsRecovery(false);
-        setDgStatus("連線中");
-        setDgConnectEpoch((v) => v + 1);
-        appendEvent("DG 遊戲中使用原工作階段恢復牌路連線");
-      }, 1200);
-      return () => {
-        cancelled = true;
-        clearTimeout(timer);
-      };
-    }
 
     // 主頁斷線時先重用 SAME DG token，避免短時間內再次 DGLI/login
     // 產生另一組遊戲工作階段。只有同 token 已重試多次且原授權已超過
@@ -4922,6 +5508,7 @@ export default function HomeScreen() {
       try { controller?.close(); } catch {}
     }
     vendorControllersRef.current = {};
+    vendorTablesRef.current = { AB: [], DB: [] };
     setVendorTables({ AB: [], DB: [] });
     setVendorConnected({ AB: false, DB: false });
     setVendorStatus({ AB: "未連線", DB: "未連線" });
@@ -4952,6 +5539,7 @@ export default function HomeScreen() {
     lockedMtUrlRef.current = "";
     setHasEnteredGame(false);
     setDgWasOpened(false);
+    gameViewUrlRef.current = "";
     setGameViewUrl("");
     setPlatformLaunching(false);
     setWalletTransferOpen(false);
@@ -4960,6 +5548,8 @@ export default function HomeScreen() {
     dgHasConnectedRef.current = false;
     dgForegroundRecoveryAttemptRef.current = 0;
     dgBridgeActiveRef.current = false;
+    abBridgeActiveRef.current = false;
+    dbBridgeActiveRef.current = false;
     suppressDgRecoveryRef.current = false;
     roadConnectBusyRef.current = false;
     // Revoke the server-side app session without awaiting it. The login screen is already active.
@@ -5001,7 +5591,36 @@ export default function HomeScreen() {
       return;
     }
     setPlatformLaunching(true);
+    enteringGameWalletRef.current = true;
+    mtOpenRef.current = true;
     try {
+      const started = Date.now();
+      while (
+        (!loginSweepDoneRef.current || walletTransferBusyRef.current) &&
+        Date.now() - started < 25000
+      )
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      if (!loginSweepDoneRef.current) {
+        notify("登入轉點尚未完成，請稍候再進", 5000);
+        enteringGameWalletRef.current = false;
+        mtOpenRef.current = mtOpen;
+        return;
+      }
+      walletTransferBusyRef.current = true;
+      setWalletTransferBusy(true);
+      try {
+        const pulled = await pullAllGameWalletsToMain(
+          loginPlatform,
+          platformToken,
+        );
+        if (!pulled.ok && !pulled.empty)
+          notify(pulled.message || "從遊戲錢包轉回主錢包失敗", 5000);
+      } catch (error: any) {
+        notify(error?.message || "轉回主錢包失敗，仍會進入平台", 5000);
+      } finally {
+        walletTransferBusyRef.current = false;
+        setWalletTransferBusy(false);
+      }
       if (activePlatform === "MT") {
         const url = await getMtLoginUrlFromPlatform(
           loginPlatform,
@@ -5022,57 +5641,42 @@ export default function HomeScreen() {
         setMtUrl(url);
         startConnection(undefined, url);
         setGameViewPlatform("MT");
+        gameViewUrlRef.current = url;
         setGameViewUrl(url);
       } else if (activePlatform === "DG") {
-        // DG 平台直接沿用牌路主頁已經取得、正在使用的同一組 DG 授權網址。
-        // 不再按一次 DG平台就重新呼叫 DGLI/login，避免第二組 token 讓背景
-        // Chromium / WebSocket 被 DG 判定為舊 session 而斷線。只有主頁尚未
-        // 取得 DG 授權時，才補取一次並同時交給牌路 relay 使用。
-        const needsWalletReentry = dgFreshAuthorizationRequiredRef.current;
-        let url = dgGameUrlRef.current || dgGameUrl;
-        if (needsWalletReentry) {
-          // The user explicitly transferred every game wallet back to main.
-          // Retire the old DG relay/token first, then obtain exactly one fresh
-          // DGLI launch. That login is what moves the main-wallet balance back
-          // into DG; afterwards the foreground page and floating assistant
-          // share this new single session as usual.
-          if (dgBridgeActiveRef.current) await leaveDgSameSessionProxy();
-          try {
-            dgControllerRef.current?.close();
-          } catch {}
-          dgControllerRef.current = null;
-          await stopDgRelayServer(accessSessionId);
-          setDgConnected(false);
-          setDgStatus("連線中");
-          dgGameUrlRef.current = "";
-          setDgGameUrl("");
-          url = await ensureDgAuthorization(true);
-          const start = await fetch("/api/dg/start", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionId: accessSessionId, gameUrl: url }),
-          });
-          let startData: any = null;
-          try {
-            startData = await start.json();
-          } catch {}
-          if (!start.ok || !startData?.ok)
-            throw new Error(
-              String(startData?.error || "DG 新工作階段啟動失敗"),
-            );
-        } else if (!url) url = await ensureDgAuthorization(false);
-        suppressDgRecoveryRef.current = false;
+        // TZ 進遊戲才自動轉點：一次 DGLI/login。不要再打背景 start API，
+        // 否則背景 WS 會跟 iframe 搶同一組 token，畫面會閃。
+        gameViewPlatformRef.current = "DG";
+        setGameViewPlatform("DG");
+        suppressDgRecoveryRef.current = true;
+        setDgNeedsRecovery(false);
+        dgLiveHoldRef.current = true;
+        if (dgBridgeActiveRef.current) await leaveDgSameSessionProxy();
+        await stopDgRelayServer(accessSessionId);
+        const url = await ensureDgAuthorization(true);
         dgForegroundRecoveryAttemptRef.current = 0;
         setDgWasOpened(true);
-        setDgNeedsRecovery(false);
-        // DG ONLY: switch the existing relay into foreground-proxy mode BEFORE
-        // opening the game. No second DG login/Chromium session is allowed here.
-        // The proxied DG page's one real WebSocket also feeds the floating assistant.
         const proxyUrl =
           Platform.OS === "web" ? await enterDgSameSessionProxy(url) : url;
         dgFreshAuthorizationRequiredRef.current = false;
-        setGameViewPlatform("DG");
-        setGameViewUrl(proxyUrl || url);
+        notify("已轉入DG");
+        const nextUrl = proxyUrl || url;
+        gameViewUrlRef.current = nextUrl;
+        setGameViewUrl(nextUrl);
+        dgLiveHoldRef.current = false;
+        setDgConnectEpoch((v) => v + 1);
+      } else if (activePlatform === "AB" && Platform.OS === "web") {
+        const proxyUrl = await enterAbSameSessionProxy(desktop ? "Desktop" : "Mobile");
+        notify("已轉入歐博");
+        setGameViewPlatform("AB");
+        gameViewUrlRef.current = proxyUrl;
+        setGameViewUrl(proxyUrl);
+      } else if (activePlatform === "DB" && Platform.OS === "web") {
+        const proxyUrl = await enterDbSameSessionProxy(isPhoneWebClient(width) ? "Mobile" : "Desktop");
+        notify("已轉入DB");
+        setGameViewPlatform("DB");
+        gameViewUrlRef.current = proxyUrl;
+        setGameViewUrl(proxyUrl);
       } else {
         const kind = activePlatform as VendorKind;
         // The dashboard relay owns its background authorization. Entering the
@@ -5086,36 +5690,66 @@ export default function HomeScreen() {
           desktop ? "Desktop" : "Mobile",
         );
         setGameViewPlatform(kind);
+        gameViewUrlRef.current = url;
         setGameViewUrl(url);
       }
       setHasEnteredGame(true);
       setMtOpen(true);
     } catch (error: any) {
+      dgLiveHoldRef.current = false;
+      enteringGameWalletRef.current = false;
+      mtOpenRef.current = mtOpen;
       notify(error?.message || `取得 ${activePlatform} 平台授權失敗`);
     } finally {
+      dgLiveHoldRef.current = false;
       setPlatformLaunching(false);
     }
   };
   const closeGameView = () => {
     const wasDg = gameViewPlatform === "DG";
+    const wasAb = gameViewPlatform === "AB";
+    const wasDb = gameViewPlatform === "DB";
+    enteringGameWalletRef.current = false;
+    mtOpenRef.current = false;
     setMtOpen(false);
-    if (wasDg && dgBridgeActiveRef.current) void leaveDgSameSessionProxy();
+    // 回牌路只關掉遊戲 iframe，背景 SSE／桌台不要整條拆掉重連。
+    const leaveJobs: Promise<void>[] = [];
+    if (wasDg) leaveJobs.push(leaveDgSameSessionProxy());
+    if (wasAb) leaveJobs.push(leaveAbSameSessionProxy());
+    if (wasDb) leaveJobs.push(leaveDbSameSessionProxy());
+    void Promise.all(leaveJobs);
+    if (walletTransferBusyRef.current) return;
+    const platformToken = platformTokenRef.current;
+    if (!platformToken) return;
+    walletTransferBusyRef.current = true;
+    setWalletTransferBusy(true);
+    void pullAllGameWalletsToMain(loginPlatform, platformToken)
+      .then((result) => {
+        if (result.ok) {
+          suppressDgRecoveryRef.current = true;
+          dgFreshAuthorizationRequiredRef.current = true;
+          setDgNeedsRecovery(false);
+          notify("已自動轉回主錢包");
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        walletTransferBusyRef.current = false;
+        setWalletTransferBusy(false);
+      });
   };
 
   const confirmTransferAll = () => {
-    if (!hasEnteredGame) {
-      notify("請先進入遊戲平台");
-      return;
-    }
     setWalletTransferOpen(true);
   };
   const executeTransferAll = async () => {
-    if (walletTransferBusy) return;
+    if (walletTransferBusyRef.current) return;
     const platformToken = platformTokenRef.current;
     if (!platformToken) {
       notify("登入授權已失效，請重新登入");
       return;
     }
+    walletTransferBusyRef.current = true;
     setWalletTransferBusy(true);
     try {
       const result = await transferAllToMainWallet(
@@ -5137,6 +5771,7 @@ export default function HomeScreen() {
     } catch (error: any) {
       notify(error?.message || "轉回失敗");
     } finally {
+      walletTransferBusyRef.current = false;
       setWalletTransferBusy(false);
     }
   };
@@ -5613,15 +6248,18 @@ export default function HomeScreen() {
             ? ({
                 overscrollBehavior: "contain",
                 transformOrigin: "top left",
+                pointerEvents: "auto",
+                ...(!desktop ? { zoom: panelMobileScale } : null),
               } as any)
             : null,
           {
-            transform: !desktop
-              ? [
-                  ...panelPosition.getTranslateTransform(),
-                  { scale: panelMobileScale },
-                ]
-              : panelPosition.getTranslateTransform(),
+            transform:
+              !desktop && Platform.OS !== "web"
+                ? [
+                    ...panelPosition.getTranslateTransform(),
+                    { scale: panelMobileScale },
+                  ]
+                : panelPosition.getTranslateTransform(),
           },
         ]}
       >
@@ -5693,7 +6331,7 @@ export default function HomeScreen() {
             }}
           >
             <View style={s.selectorLeft}>
-              <Text style={s.selectorValue}>{assistTableId}</Text>
+              <Text style={s.selectorValue}>{assistRoomTitle(assistTable, activePlatform) || assistTableId}</Text>
               <MaterialIcons
                 name={
                   roomDropdownOpen ? "keyboard-arrow-up" : "keyboard-arrow-down"
@@ -5703,7 +6341,7 @@ export default function HomeScreen() {
               />
             </View>
             <Text style={s.selectorMeta}>
-              {assistTable?.name || "荷官 —"} · 第 {assistTable?.round ?? 0} 局
+              荷官 {assistTable?.name || "—"} · 第 {assistTable?.round ?? 0} 局
             </Text>
           </Pressable>
           {roomDropdownOpen ? (
@@ -5762,7 +6400,7 @@ export default function HomeScreen() {
                       }}
                     >
                       <View style={s.roomDropdownLeft}>
-                        <Text style={s.roomDropdownText}>{id}{t.tableBadge && t.tableBadge !== id ? ` · ${t.tableBadge}` : ""}</Text>
+                        <Text style={s.roomDropdownText}>{assistRoomTitle(t, activePlatform) || id}</Text>
                         <Text numberOfLines={1} style={s.roomDropdownDealer}>
                           荷官 {t.name || "—"}
                         </Text>
@@ -6240,11 +6878,21 @@ export default function HomeScreen() {
           roadConnectBusyRef.current = false;
           setHasEnteredGame(false);
           setDgWasOpened(false);
+          gameViewUrlRef.current = "";
           setGameViewUrl("");
           setAccessGranted(true);
         }}
       />
     );
+
+  const enterBlocked = !loginSweepDone || walletTransferBusy || platformLaunching;
+  const enterPlatformLabel = enterBlocked && !platformLaunching
+    ? "轉點中"
+    : activePlatform === "AB"
+      ? "進入歐博平台"
+      : activePlatform === "DB"
+        ? "進入DB平台"
+        : `進入${activePlatform}平台`;
 
   return (
     <ScreenContainer
@@ -6256,6 +6904,8 @@ export default function HomeScreen() {
         style={[
           s.screen,
           activePlatform === "DG" && s.screenDg,
+          activePlatform === "AB" && s.screenAb,
+          activePlatform === "DB" && s.screenDb,
           desktop && Platform.OS === "web" ? s.screenDesktopZoom : null,
         ]}
       >
@@ -6264,83 +6914,97 @@ export default function HomeScreen() {
             s.topbar,
             !desktop ? s.topbarMobile : null,
             activePlatform === "DG" && s.topbarDg,
+            activePlatform === "AB" && s.topbarAb,
+            activePlatform === "DB" && s.topbarDb,
           ]}
         >
           <View style={s.brandRow}>
             <View
-              style={[s.brandIcon, activePlatform === "DG" && s.brandIconDg]}
+              style={[
+                s.brandIcon,
+                activePlatform === "DG" && s.brandIconDg,
+                activePlatform === "AB" && s.brandIconAb,
+                activePlatform === "DB" && s.brandIconDb,
+              ]}
             >
               <MatrixMark size={29} brand={activePlatform} />
             </View>
-            <View>
-              <Text style={[s.kicker, activePlatform === "DG" && s.kickerDg]}>
-                LIVE TABLE ANALYTICS
-              </Text>
+            <View style={{ minWidth: 0, flexShrink: 1 }}>
               {desktop ? (
-                <View style={s.brandTitleRow}>
-                  <Text style={s.title}>{activePlatform} MATRIX</Text>
-                  <ThreadsSignature />
-                </View>
-              ) : (
-                <View style={s.brandMobileStack}>
-                  <Text style={s.title}>{activePlatform} MATRIX</Text>
-                  <ThreadsSignature mobile />
-                </View>
-              )}
+                <Text style={[s.kicker, activePlatform === "DG" && s.kickerDg, activePlatform === "AB" && s.kickerAb, activePlatform === "DB" && s.kickerDb]}>
+                  LIVE TABLE ANALYTICS
+                </Text>
+              ) : null}
+              <View style={s.brandTitleRow}>
+                <Text
+                  numberOfLines={1}
+                  style={[s.title, !desktop && s.titleMobile]}
+                >
+                  {activePlatform} MATRIX
+                </Text>
+                {desktop ? <ThreadsSignature /> : null}
+              </View>
             </View>
           </View>
-          <View style={s.row}>
-            <Pressable style={s.lineBtn} onPress={openLineContact}>
-              <View style={s.lineLogo}>
+          <View style={[s.headerActions, !desktop && s.headerActionsMobile]}>
+            <Pressable
+              style={[s.lineBtn, !desktop && s.lineBtnMobile]}
+              onPress={openLineContact}
+            >
+              <View style={[s.lineLogo, !desktop && s.lineLogoMobile]}>
                 <Text style={s.lineLogoText}>LINE</Text>
               </View>
-              <Text style={s.lineText}>LINE</Text>
-            </Pressable>
-            <Pressable style={s.headerBtn} onPress={() => setHelpOpen(true)}>
-              <MaterialIcons name="help-outline" size={16} color="#fff" />
-              <Text style={s.headerBtnText}>說明</Text>
-            </Pressable>
-            <Pressable style={s.headerBtn} onPress={logoutSession}>
-              <MaterialIcons name="logout" size={16} color="#fff" />
-              <Text style={s.headerBtnText}>登出</Text>
+              {desktop ? <Text style={s.lineText}>LINE</Text> : null}
             </Pressable>
             <Pressable
-              style={s.headerBtn}
+              style={[s.headerBtn, !desktop && s.headerBtnMobile]}
+              onPress={() => setHelpOpen(true)}
+            >
+              <MaterialIcons name="help-outline" size={desktop ? 16 : 14} color="#fff" />
+              <Text style={[s.headerBtnText, !desktop && s.headerBtnTextMobile]}>說明</Text>
+            </Pressable>
+            <Pressable
+              style={[s.headerBtn, !desktop && s.headerBtnMobile]}
+              onPress={logoutSession}
+            >
+              <MaterialIcons name="logout" size={desktop ? 16 : 14} color="#fff" />
+              <Text style={[s.headerBtnText, !desktop && s.headerBtnTextMobile]}>登出</Text>
+            </Pressable>
+            <Pressable
+              style={[s.headerBtn, !desktop && s.headerBtnMobile]}
               onPress={() => setConnectionOpen(true)}
             >
-              <MaterialIcons name="settings" size={16} color="#fff" />
-              <Text style={s.headerBtnText}>連線</Text>
+              <MaterialIcons name="settings" size={desktop ? 16 : 14} color="#fff" />
+              <Text style={[s.headerBtnText, !desktop && s.headerBtnTextMobile]}>連線</Text>
             </Pressable>
             <Pressable
-              disabled={!hasEnteredGame || walletTransferBusy}
+              disabled={walletTransferBusy}
               onPress={confirmTransferAll}
               style={[
                 s.headerBtn,
-                (!hasEnteredGame || walletTransferBusy) && s.headerBtnMuted,
+                !desktop && s.headerBtnMobile,
+                walletTransferBusy && s.headerBtnMuted,
               ]}
             >
               <MaterialIcons
                 name="account-balance-wallet"
-                size={16}
-                color={hasEnteredGame ? "#FFF1C6" : "#8A9AA6"}
+                size={desktop ? 16 : 14}
+                color="#FFF1C6"
               />
-              <Text
-                style={[
-                  s.headerBtnText,
-                  !hasEnteredGame && s.headerBtnTextMuted,
-                ]}
-              >
+              <Text style={s.headerBtnText}>
                 {walletTransferBusy ? "轉回中" : "轉回"}
               </Text>
             </Pressable>
           </View>
         </View>
-        <ScrollView contentContainerStyle={s.content}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={s.content}>
           <View
             style={[
               s.overview,
               !desktop && s.overviewMobile,
               activePlatform === "DG" && s.overviewDg,
+              activePlatform === "AB" && s.overviewAb,
+              activePlatform === "DB" && s.overviewDb,
             ]}
           >
             <View style={!desktop ? s.overviewTextMobile : undefined}>
@@ -6348,6 +7012,8 @@ export default function HomeScreen() {
                 style={[
                   s.overKicker,
                   activePlatform === "DG" && s.overKickerDg,
+                  activePlatform === "AB" && s.overKickerAb,
+                  activePlatform === "DB" && s.overKickerDb,
                 ]}
               >
                 REAL-TIME MONITORING
@@ -6359,96 +7025,143 @@ export default function HomeScreen() {
                   : "即時桌況 · 牌路分析 · 荷官同步"}
               </Text>
             </View>
-            <View style={[s.overStats, !desktop && s.overStatsMobile]}>
-              <View
-                style={[
-                  s.overStat,
-                  s.overStatCompact,
-                  !desktop && s.overStatMobile,
-                  activePlatform === "DG" && s.overStatDg,
-                ]}
-              >
-                <Text style={s.smallLabel}>連線狀態</Text>
-                <Text
+            <View style={[s.overLaunchCol, !desktop && s.overLaunchColMobile]}>
+              <View style={[s.overStats, !desktop && s.overStatsMobile]}>
+                <View
                   style={[
-                    s.overValue,
-                    { color: activeConnected ? "#4BD693" : "#FFB54D" },
+                    s.overStat,
+                    s.overStatCompact,
+                    !desktop && s.overStatMobile,
+                    activePlatform === "DG" && s.overStatDg,
+                    activePlatform === "AB" && s.overStatAb,
+                    activePlatform === "DB" && s.overStatDb,
                   ]}
                 >
-                  {activePlatform === "AB" || activePlatform === "DB"
-                    ? vendorStatus[activePlatform]
-                    : activeConnected
+                  <Text style={s.smallLabel}>連線狀態</Text>
+                  <Text
+                    style={[
+                      s.overValue,
+                      { color: activeConnected ? "#4BD693" : "#FFB54D" },
+                    ]}
+                  >
+                    {activeConnected
                       ? "已連線"
-                      : "連線中"}
-                </Text>
-                <Text style={s.overStatMeta}>
-                  {activePlatform} · {availableTableCount} 桌
-                </Text>
-              </View>
-              <View style={s.platformSwitch}>
-                <View style={s.platformSwitchRow}>
-                  {(["MT", "DG"] as PlatformKey[]).map((p) => (
-                    <Pressable
-                      key={p}
-                      onPress={() => {
-                        setActivePlatform(p);
-                        setActiveCategory("一般");
-                      }}
-                      style={[
-                        s.platformTab,
-                        activePlatform === p &&
-                          (p === "DG"
-                            ? s.platformTabDgActive
-                            : s.platformTabMtActive),
-                      ]}
-                    >
-                      <Text
+                      : activePlatform === "AB" || activePlatform === "DB"
+                        ? vendorStatus[activePlatform]
+                        : "連線中"}
+                  </Text>
+                  <Text style={s.overStatMeta}>
+                    {activePlatform} · {availableTableCount} 桌
+                  </Text>
+                </View>
+                <View style={s.platformSwitch}>
+                  <View style={s.platformSwitchRow}>
+                    {(["MT", "DG"] as PlatformKey[]).map((p) => (
+                      <Pressable
+                        key={p}
+                        onPress={() => {
+                          setActivePlatform(p);
+                          setActiveCategory("一般");
+                        }}
                         style={[
-                          s.platformTabText,
+                          s.platformTab,
                           activePlatform === p &&
                             (p === "DG"
-                              ? s.platformTabTextDgActive
-                              : s.platformTabTextActive),
+                              ? s.platformTabDgActive
+                              : s.platformTabMtActive),
                         ]}
                       >
-                        {p}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </View>
-                <View style={s.platformSwitchRow}>
-                  {(["AB", "DB"] as PlatformKey[]).map((p) => (
-                    <Pressable
-                      key={p}
-                      onPress={() => {
-                        setActivePlatform(p);
-                        setActiveCategory("所有");
-                      }}
-                      style={[
-                        s.platformTab,
-                        activePlatform === p && s.platformTabMtActive,
-                      ]}
-                    >
-                      <Text
+                        <Text
+                          style={[
+                            s.platformTabText,
+                            activePlatform === p &&
+                              (p === "DG"
+                                ? s.platformTabTextDgActive
+                                : s.platformTabTextActive),
+                          ]}
+                        >
+                          {p}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                  <View style={s.platformSwitchRow}>
+                    {(["AB", "DB"] as PlatformKey[]).map((p) => (
+                      <Pressable
+                        key={p}
+                        onPress={() => {
+                          setActivePlatform(p);
+                          setActiveCategory("所有");
+                        }}
                         style={[
-                          s.platformTabText,
-                          activePlatform === p && s.platformTabTextActive,
+                          s.platformTab,
+                          activePlatform === p &&
+                            (p === "AB" ? s.platformTabAbActive : s.platformTabDbActive),
                         ]}
                       >
-                        {p === "AB" ? "歐博" : p}
-                      </Text>
-                    </Pressable>
-                  ))}
+                        <Text
+                          style={[
+                            s.platformTabText,
+                            activePlatform === p &&
+                              (p === "AB" ? s.platformTabTextAbActive : s.platformTabTextDbActive),
+                          ]}
+                        >
+                          {p === "AB" ? "歐博" : p}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
                 </View>
               </View>
+              <Pressable
+                disabled={enterBlocked}
+                onPress={() => void openCurrentPlatform()}
+                style={[
+                  s.enterPlatformBtn,
+                  activePlatform === "DG"
+                    ? s.enterPlatformBtnDg
+                    : activePlatform === "AB"
+                      ? s.enterPlatformBtnAb
+                      : activePlatform === "DB"
+                        ? s.enterPlatformBtnDb
+                        : s.enterPlatformBtnMt,
+                  !desktop && s.enterPlatformBtnMobile,
+                  enterBlocked && s.enterPlatformBtnBusy,
+                ]}
+              >
+                <MaterialIcons
+                  name="sports-esports"
+                  size={desktop ? 15 : 14}
+                  color={
+                    activePlatform === "DG"
+                      ? "#E8C778"
+                      : activePlatform === "AB"
+                        ? "#8EC4F0"
+                        : activePlatform === "DB"
+                          ? "#7EE0D2"
+                          : "#7DCEF2"
+                  }
+                />
+                <Text
+                  style={[
+                    s.enterPlatformBtnText,
+                    activePlatform === "DG"
+                      ? s.enterPlatformBtnTextDg
+                      : activePlatform === "AB"
+                        ? s.enterPlatformBtnTextAb
+                        : activePlatform === "DB"
+                          ? s.enterPlatformBtnTextDb
+                          : s.enterPlatformBtnTextMt,
+                    !desktop && s.enterPlatformBtnTextMobile,
+                  ]}
+                >
+                  {enterPlatformLabel}
+                </Text>
+              </Pressable>
             </View>
           </View>
           {activePlatform === "AB" || activePlatform === "DB" ? (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={s.categorySwitch}
-            >
+            <View style={s.categorySwitch}>
               {(activePlatform === "AB"
                 ? ["一般", "快速", "免佣", "保險", "VIP", "所有"]
                 : ["極速", "經典", "完美", "共享", "包桌", "電投", "所有"]
@@ -6458,10 +7171,14 @@ export default function HomeScreen() {
                   onPress={() => setActiveCategory(category)}
                   style={[
                     s.categoryTab,
-                    activeCategory === category && s.categoryTabActive,
+                    activeCategory === category &&
+                      (activePlatform === "DB"
+                        ? s.categoryTabDbActive
+                        : s.categoryTabAbActive),
                   ]}
                 >
                   <Text
+                    numberOfLines={1}
                     style={[
                       s.categoryTabText,
                       activeCategory === category && s.categoryTabTextActive,
@@ -6471,7 +7188,7 @@ export default function HomeScreen() {
                   </Text>
                 </Pressable>
               ))}
-            </ScrollView>
+            </View>
           ) : null}
           <View style={s.listHead}>
             <Text style={s.listTitle}>所有房型</Text>
@@ -6740,7 +7457,7 @@ export default function HomeScreen() {
                 </Pressable>
               </View>
               <Text style={s.modalNote}>
-                MT、DG、歐博、DB 進入牌路主頁後會自動連線。下列網址只供顯示，使用者無法修改。
+                MT、DG、歐博、DB 進入牌路主頁後會自動連線。歐博與 DB 互不影響，一邊斷線或重連不會關掉另一邊。
               </Text>
               <View style={s.connectionStatusRow}>
                 <View style={s.connectionStatusCard}>
@@ -6762,22 +7479,28 @@ export default function HomeScreen() {
                       { color: dgConnected ? "#4BD693" : "#FFB54D" },
                     ]}
                   >
-                    {dgConnected ? "已連線" : "連線中"}
+                    {dgConnected || dgTables.length > 0 ? "已連線" : "連線中"}
                   </Text>
                 </View>
                 <View style={s.connectionStatusCard}>
                   <Text style={s.fieldLabel}>歐博</Text>
-                  <Text style={[s.connectionStatusText, { color: vendorConnected.AB ? "#4BD693" : vendorStatus.AB === "連線失敗" ? "#EF626A" : "#FFB54D" }]}>
-                    {vendorStatus.AB}
+                  <Text style={[s.connectionStatusText, { color: vendorConnected.AB || vendorTables.AB.length > 0 ? "#4BD693" : vendorStatus.AB === "連線失敗" ? "#EF626A" : "#FFB54D" }]}>
+                    {vendorConnected.AB || vendorTables.AB.length > 0 ? "已連線" : vendorStatus.AB}
                   </Text>
                   <Text style={s.vendorDiagnosticText}>{vendorMessage.AB}</Text>
+                  <Pressable style={s.vendorReconnectBtn} onPress={() => reconnectVendor("AB", true)}>
+                    <Text style={s.vendorReconnectBtnText}>只重連歐博</Text>
+                  </Pressable>
                 </View>
                 <View style={s.connectionStatusCard}>
                   <Text style={s.fieldLabel}>DB</Text>
-                  <Text style={[s.connectionStatusText, { color: vendorConnected.DB ? "#4BD693" : vendorStatus.DB === "連線失敗" ? "#EF626A" : "#FFB54D" }]}>
-                    {vendorStatus.DB}
+                  <Text style={[s.connectionStatusText, { color: vendorConnected.DB || vendorTables.DB.length > 0 ? "#4BD693" : vendorStatus.DB === "連線失敗" ? "#EF626A" : "#FFB54D" }]}>
+                    {vendorConnected.DB || vendorTables.DB.length > 0 ? "已連線" : vendorStatus.DB}
                   </Text>
                   <Text style={s.vendorDiagnosticText}>{vendorMessage.DB}</Text>
+                  <Pressable style={s.vendorReconnectBtn} onPress={() => reconnectVendor("DB", true)}>
+                    <Text style={s.vendorReconnectBtnText}>只重連 DB</Text>
+                  </Pressable>
                 </View>
               </View>
               <Text style={s.fieldLabel}>MT 即時牌路 WebSocket（固定）</Text>
@@ -6973,8 +7696,8 @@ export default function HomeScreen() {
           </View>
         </Modal>
         {mtOpen ? (
-          <View style={s.mtOverlay}>
-            <View style={s.mtScreen}>
+          <View style={[s.mtOverlay, { pointerEvents: "box-none" } as any]}>
+            <View style={[s.mtScreen, { pointerEvents: "box-none" } as any]}>
               <View style={[s.mtTop, gameViewPlatform === "DG" && s.topbarDg]}>
                 <View style={s.brandRow}>
                   <View
@@ -6985,60 +7708,70 @@ export default function HomeScreen() {
                   >
                     <MatrixMark size={29} brand={gameViewPlatform} />
                   </View>
-                  <View>
-                    <Text
-                      style={[
-                        s.kicker,
-                        gameViewPlatform === "DG" && s.kickerDg,
-                      ]}
-                    >
-                      LIVE TABLE ANALYTICS
-                    </Text>
+                  <View style={{ minWidth: 0, flexShrink: 1 }}>
                     {desktop ? (
-                      <View style={s.brandTitleRow}>
-                        <Text style={s.title}>{gameViewPlatform} MATRIX</Text>
-                        <ThreadsSignature />
-                      </View>
-                    ) : (
-                      <View style={s.brandMobileStack}>
-                        <Text style={s.title}>{gameViewPlatform} MATRIX</Text>
-                        <ThreadsSignature mobile />
-                      </View>
-                    )}
+                      <Text
+                        style={[
+                          s.kicker,
+                          gameViewPlatform === "DG" && s.kickerDg,
+                        ]}
+                      >
+                        LIVE TABLE ANALYTICS
+                      </Text>
+                    ) : null}
+                    <View style={s.brandTitleRow}>
+                      <Text
+                        numberOfLines={1}
+                        style={[s.title, !desktop && s.titleMobile]}
+                      >
+                        {gameViewPlatform} MATRIX
+                      </Text>
+                      {desktop ? <ThreadsSignature /> : null}
+                    </View>
                   </View>
                 </View>
-                <View style={s.row}>
-                  <Pressable style={s.lineBtn} onPress={openLineContact}>
-                    <View style={s.lineLogo}>
+                <View style={[s.headerActions, !desktop && s.headerActionsMobile]}>
+                  <Pressable
+                    style={[s.lineBtn, !desktop && s.lineBtnMobile]}
+                    onPress={openLineContact}
+                  >
+                    <View style={[s.lineLogo, !desktop && s.lineLogoMobile]}>
                       <Text style={s.lineLogoText}>LINE</Text>
                     </View>
-                    <Text style={s.lineText}>LINE</Text>
+                    {desktop ? <Text style={s.lineText}>LINE</Text> : null}
                   </Pressable>
                   <Pressable
-                    style={s.headerBtn}
+                    style={[s.headerBtn, !desktop && s.headerBtnMobile]}
                     onPress={() => setHelpOpen(true)}
                   >
-                    <MaterialIcons name="help-outline" size={16} color="#fff" />
-                    <Text style={s.headerBtnText}>說明</Text>
+                    <MaterialIcons name="help-outline" size={desktop ? 16 : 14} color="#fff" />
+                    <Text style={[s.headerBtnText, !desktop && s.headerBtnTextMobile]}>說明</Text>
                   </Pressable>
-                  <Pressable style={s.headerBtn} onPress={closeGameView}>
-                    <MaterialIcons name="arrow-back" size={16} color="#fff" />
-                    <Text style={s.headerBtnText}>回牌路</Text>
+                  <Pressable
+                    style={[s.headerBtn, !desktop && s.headerBtnMobile]}
+                    onPress={closeGameView}
+                  >
+                    <MaterialIcons name="arrow-back" size={desktop ? 16 : 14} color="#fff" />
+                    <Text style={[s.headerBtnText, !desktop && s.headerBtnTextMobile]}>回牌路</Text>
                   </Pressable>
                 </View>
               </View>
-              <View style={s.iframeWrap}>
+              <View style={[s.iframeWrap, { pointerEvents: "auto" } as any]}>
                 {Platform.OS === "web" ? (
-                  createElement("iframe" as any, {
-                    src: gameViewUrl,
-                    style: {
+                  <StableGameIframe
+                    src={gameViewUrl}
+                    style={{
+                      position: "absolute",
+                      inset: 0,
                       width: "100%",
                       height: "100%",
                       border: "0",
                       background: "#000",
-                    },
-                    allow: "clipboard-read; clipboard-write; fullscreen",
-                  })
+                      pointerEvents: "auto",
+                      zIndex: 1,
+                    }}
+                    allow="clipboard-read; clipboard-write; fullscreen"
+                  />
                 ) : (
                   <View style={s.nativeMtFallback}>
                     <Text style={s.helpText}>
@@ -7050,6 +7783,10 @@ export default function HomeScreen() {
             </View>
           </View>
         ) : null}
+        <View
+          pointerEvents="box-none"
+          style={[StyleSheet.absoluteFillObject, { zIndex: 10000 }]}
+        >
         {MultiTableRadar({ insideMt: mtOpen })}
         {FloatingAssistant({ insideMt: mtOpen })}
         {V38Calculator({ insideMt: mtOpen })}
@@ -7063,6 +7800,7 @@ export default function HomeScreen() {
           insideMt={mtOpen}
           platform={activePlatform}
         />
+        </View>
       </View>
     </ScreenContainer>
   );
@@ -7071,6 +7809,8 @@ export default function HomeScreen() {
 const s = StyleSheet.create({
   screen: { flex: 1, backgroundColor: "#060D15" },
   screenDg: { backgroundColor: "#090806" },
+  screenAb: { backgroundColor: "#080B16" },
+  screenDb: { backgroundColor: "#071210" },
   screenDesktopZoom: {
     zoom: 1.18,
     width: "84.7458%",
@@ -7079,19 +7819,39 @@ const s = StyleSheet.create({
     marginRight: "auto",
   },
   row: { flexDirection: "row", alignItems: "center", gap: 6 },
-  brandRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  headerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: 6,
+    flexShrink: 1,
+    flexWrap: "nowrap",
+  },
+  headerActionsMobile: {
+    flex: 1,
+    minWidth: 0,
+    gap: 4,
+    justifyContent: "flex-end",
+    flexWrap: "wrap",
+  },
+  brandRow: { flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 1, minWidth: 0 },
   topbar: {
     minHeight: 58,
     paddingHorizontal: 14,
+    paddingVertical: 8,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    flexWrap: "nowrap",
+    gap: 8,
     borderBottomWidth: 1,
     borderBottomColor: "#31536B",
     backgroundColor: "#07111C",
   },
   topbarDg: { backgroundColor: "#110E08", borderBottomColor: "#8B6B2E" },
-  topbarMobile: { minHeight: 64, paddingHorizontal: 10 },
+  topbarAb: { backgroundColor: "#0B1224", borderBottomColor: "#4A5BA8" },
+  topbarDb: { backgroundColor: "#0A1816", borderBottomColor: "#2F8A72" },
+  topbarMobile: { minHeight: 52, paddingHorizontal: 8, gap: 6, flexWrap: "wrap" },
   brandMobileStack: { alignItems: "flex-start" },
   brandIcon: {
     width: 34,
@@ -7104,10 +7864,15 @@ const s = StyleSheet.create({
     backgroundColor: "#071521",
   },
   brandIconDg: { backgroundColor: "#171208", borderColor: "#9B7833" },
+  brandIconAb: { backgroundColor: "#12182C", borderColor: "#6B7BE8" },
+  brandIconDb: { backgroundColor: "#0E1C18", borderColor: "#C9A24A" },
   brandTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   kicker: { color: "#7890A3", fontSize: 8, letterSpacing: 1.1 },
   kickerDg: { color: "#C6A35A" },
+  kickerAb: { color: "#9BB0FF" },
+  kickerDb: { color: "#7EE0D2" },
   title: { color: "#F2F6F9", fontSize: 16, fontWeight: "800" },
+  titleMobile: { fontSize: 13 },
   lineBtn: {
     height: 34,
     paddingHorizontal: 9,
@@ -7116,7 +7881,9 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 5,
+    flexShrink: 0,
   },
+  lineBtnMobile: { height: 30, paddingHorizontal: 6 },
   lineLogo: {
     width: 23,
     height: 23,
@@ -7125,6 +7892,7 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  lineLogoMobile: { width: 20, height: 20, borderRadius: 10 },
   lineLogoText: { fontSize: 5.5, fontWeight: "900", color: "#0C9B43" },
   lineText: { color: "#fff", fontSize: 10, fontWeight: "900" },
   headerBtn: {
@@ -7137,9 +7905,12 @@ const s = StyleSheet.create({
     gap: 5,
     borderWidth: 1,
     borderColor: "#3D6682",
+    flexShrink: 0,
   },
+  headerBtnMobile: { height: 30, paddingHorizontal: 6, gap: 3 },
   headerBtnMuted: { opacity: 0.55 },
   headerBtnText: { color: "#fff", fontSize: 10, fontWeight: "800" },
+  headerBtnTextMobile: { fontSize: 9 },
   headerBtnTextMuted: { color: "#8A9AA6" },
   content: { padding: 10, paddingBottom: 90 },
   overview: {
@@ -7155,10 +7926,14 @@ const s = StyleSheet.create({
     overflow: "hidden",
   },
   overviewDg: { backgroundColor: "#151109", borderColor: "#8B6B2E" },
+  overviewAb: { backgroundColor: "#10182C", borderColor: "#4A5BA8" },
+  overviewDb: { backgroundColor: "#0C1C1A", borderColor: "#2F8A72" },
   overviewMobile: { flexDirection: "column", alignItems: "stretch", gap: 10 },
   overviewTextMobile: { width: "100%" },
   overKicker: { color: "#62B6E8", fontSize: 7, letterSpacing: 1.4 },
   overKickerDg: { color: "#D1AE61" },
+  overKickerAb: { color: "#8BA4FF" },
+  overKickerDb: { color: "#7EE0D2" },
   overTitle: {
     color: "#F4FAFF",
     fontSize: 18,
@@ -7166,6 +7941,42 @@ const s = StyleSheet.create({
     marginTop: 2,
   },
   overSub: { color: "#7894A8", fontSize: 9, marginTop: 3 },
+  overLaunchCol: { alignItems: "stretch", gap: 8 },
+  overLaunchColMobile: { width: "100%" },
+  enterPlatformBtn: {
+    height: 32,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+  },
+  enterPlatformBtnMt: {
+    backgroundColor: "#0C2436",
+    borderColor: "#55B4E9",
+  },
+  enterPlatformBtnDg: {
+    backgroundColor: "#171208",
+    borderColor: "#D3AD5C",
+  },
+  enterPlatformBtnAb: {
+    backgroundColor: "#0A1A30",
+    borderColor: "#4A8FD4",
+  },
+  enterPlatformBtnDb: {
+    backgroundColor: "#0A1F22",
+    borderColor: "#3CB8A8",
+  },
+  enterPlatformBtnMobile: { height: 36 },
+  enterPlatformBtnBusy: { opacity: 0.65 },
+  enterPlatformBtnText: { fontSize: 11, fontWeight: "900", letterSpacing: 0.4 },
+  enterPlatformBtnTextMt: { color: "#D7F2FF" },
+  enterPlatformBtnTextDg: { color: "#FFF2C9" },
+  enterPlatformBtnTextAb: { color: "#D7EBFF" },
+  enterPlatformBtnTextDb: { color: "#D4F6F0" },
+  enterPlatformBtnTextMobile: { fontSize: 12 },
   overStats: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
   overStatsMobile: { width: "100%", gap: 6 },
   overStat: {
@@ -7179,6 +7990,8 @@ const s = StyleSheet.create({
   overStatCompact: { minWidth: 96, paddingVertical: 8, paddingHorizontal: 9 },
   overStatMeta: { color: "#7F96A8", fontSize: 8, fontWeight: "700", marginTop: 3 },
   overStatDg: { borderColor: "#745925", backgroundColor: "#100D08" },
+  overStatAb: { borderColor: "#3D4A7A", backgroundColor: "#0C1222" },
+  overStatDb: { borderColor: "#2A6B58", backgroundColor: "#0A1614" },
   overStatMobile: { flex: 1, minWidth: 0, padding: 8 },
   overValue: { color: "#fff", fontSize: 13, fontWeight: "900", marginTop: 4 },
   platformSwitch: {
@@ -7211,6 +8024,16 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#D3AD5C",
   },
+  platformTabAbActive: {
+    backgroundColor: "#3D4F9A",
+    borderWidth: 1,
+    borderColor: "#8B9CFF",
+  },
+  platformTabDbActive: {
+    backgroundColor: "#1A6B5C",
+    borderWidth: 1,
+    borderColor: "#3CB8A8",
+  },
   platformTabText: {
     color: "#7F909C",
     fontSize: 9,
@@ -7219,6 +8042,8 @@ const s = StyleSheet.create({
   },
   platformTabTextActive: { color: "#EAF8FF" },
   platformTabTextDgActive: { color: "#FFF2C9" },
+  platformTabTextAbActive: { color: "#E8ECFF" },
+  platformTabTextDbActive: { color: "#D4F6F0" },
   walletReturnBtn: {
     height: 31,
     marginTop: 7,
@@ -7239,9 +8064,28 @@ const s = StyleSheet.create({
   },
   walletReturnText: { color: "#FFF1C6", fontSize: 10, fontWeight: "900" },
   walletReturnTextDisabled: { color: "#71808B" },
-  categorySwitch: { gap: 6, paddingBottom: 9 },
-  categoryTab: { height: 28, minWidth: 58, paddingHorizontal: 12, borderRadius: 6, borderWidth: 1, borderColor: "#304F65", backgroundColor: "#0B1925", alignItems: "center", justifyContent: "center" },
+  categorySwitch: {
+    flexDirection: "row",
+    alignItems: "center",
+    width: "100%",
+    gap: 4,
+    paddingBottom: 9,
+  },
+  categoryTab: {
+    height: 28,
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "#304F65",
+    backgroundColor: "#0B1925",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   categoryTabActive: { backgroundColor: "#176FA7", borderColor: "#58B8ED" },
+  categoryTabAbActive: { backgroundColor: "#3D4F9A", borderColor: "#8B9CFF" },
+  categoryTabDbActive: { backgroundColor: "#1A6B5C", borderColor: "#3CB8A8" },
   categoryTabText: { color: "#93A8B7", fontSize: 10, fontWeight: "900" },
   categoryTabTextActive: { color: "#FFFFFF" },
   listHead: {
@@ -7302,6 +8146,18 @@ const s = StyleSheet.create({
     shadowColor: "#C49B48",
     shadowOpacity: 0.16,
   },
+  tableCardAb: {
+    backgroundColor: "#0C1224",
+    borderColor: "#5A6BC4",
+    shadowColor: "#7B8CFF",
+    shadowOpacity: 0.16,
+  },
+  tableCardDb: {
+    backgroundColor: "#0A1614",
+    borderColor: "#2E8A7A",
+    shadowColor: "#C9A24A",
+    shadowOpacity: 0.16,
+  },
   tableHead: {
     height: 28,
     paddingHorizontal: 5,
@@ -7313,6 +8169,8 @@ const s = StyleSheet.create({
     borderBottomColor: "#27485E",
   },
   tableHeadDg: { backgroundColor: "#171208", borderBottomColor: "#785B27" },
+  tableHeadAb: { backgroundColor: "#121A30", borderBottomColor: "#3D4A7A" },
+  tableHeadDb: { backgroundColor: "#0E1C1A", borderBottomColor: "#2A6B58" },
   game: { color: "#EAF6FF", fontSize: 9, fontWeight: "700" },
   tableId: {
     color: "#F8FCFF",
@@ -7328,6 +8186,16 @@ const s = StyleSheet.create({
     backgroundColor: "#241B0C",
     borderColor: "#C29A4D",
     color: "#FFF1C5",
+  },
+  tableIdAb: {
+    backgroundColor: "#1A2040",
+    borderColor: "#8B9CFF",
+    color: "#E8ECFF",
+  },
+  tableIdDb: {
+    backgroundColor: "#142420",
+    borderColor: "#C9A24A",
+    color: "#F5E6B8",
   },
   headText: { color: "#B9CEDC", fontSize: 8, fontWeight: "800" },
   statText: { fontSize: 8, fontWeight: "900" },
@@ -7365,6 +8233,8 @@ const s = StyleSheet.create({
   tableBodyDesktop: { height: 190 },
   tableBodyMobile: { height: 164 },
   tableBodyDg: { backgroundColor: "#F7F1E4" },
+  tableBodyAb: { backgroundColor: "#EEF2FA" },
+  tableBodyDb: { backgroundColor: "#E8F4F0" },
   dealer: {
     width: 112,
     backgroundColor: "#F2F0EC",
@@ -7374,6 +8244,8 @@ const s = StyleSheet.create({
   dealerDesktop: { width: "21.88%" },
   dealerMobile: { width: "21.88%", minWidth: 76 },
   dealerDg: { backgroundColor: "#EDE3CE" },
+  dealerAb: { backgroundColor: "#E4E8F4" },
+  dealerDb: { backgroundColor: "#D8EBE4" },
   photo: {
     position: "absolute",
     top: 3,
@@ -7407,6 +8279,8 @@ const s = StyleSheet.create({
     lineHeight: 14,
   },
   dealerNameDg: { backgroundColor: "#6F5420", color: "#FFF4D2" },
+  dealerNameAb: { backgroundColor: "#4A3488", color: "#F0E8FF" },
+  dealerNameDb: { backgroundColor: "#1A6B5C", color: "#D4F6F0" },
   meta: {
     color: "#617889",
     fontSize: 8.5,
@@ -7456,6 +8330,8 @@ const s = StyleSheet.create({
   },
   roadAreaDesktop: {},
   roadAreaDg: { backgroundColor: "#FFF9ED" },
+  roadAreaAb: { backgroundColor: "#F4F6FC" },
+  roadAreaDb: { backgroundColor: "#F0F8F5" },
   beadPane: {
     width: "32%",
     height: "100%",
@@ -7467,6 +8343,8 @@ const s = StyleSheet.create({
   },
   beadPaneDesktop: { width: "32%" },
   beadPaneDg: { backgroundColor: "#FFF9ED", borderColor: "#CDBF9F" },
+  beadPaneAb: { backgroundColor: "#F4F6FC", borderColor: "#C5CDE4" },
+  beadPaneDb: { backgroundColor: "#F0F8F5", borderColor: "#B8D4CC" },
   beadGrid: {
     width: "100%",
     height: "100%",
@@ -7476,6 +8354,8 @@ const s = StyleSheet.create({
     backgroundColor: "#FFFFFF",
   },
   beadGridDg: { backgroundColor: "#FFF9ED" },
+  beadGridAb: { backgroundColor: "#F4F6FC" },
+  beadGridDb: { backgroundColor: "#F0F8F5" },
   beadCell: {
     width: "16.6666667%",
     height: "16.6666667%",
@@ -7490,6 +8370,8 @@ const s = StyleSheet.create({
   },
   beadCellDesktop: {},
   roadCellDg: { backgroundColor: "#FFF9ED", borderColor: "#DDD0B3" },
+  roadCellAb: { backgroundColor: "#F4F6FC", borderColor: "#C8D0E4" },
+  roadCellDb: { backgroundColor: "#F0F8F5", borderColor: "#B8D4CC" },
   beadDot: {
     width: "72%",
     aspectRatio: 1,
@@ -7558,6 +8440,8 @@ const s = StyleSheet.create({
   },
   lowerAreaDesktop: {},
   lowerAreaDg: { borderTopColor: "#CDBF9F", backgroundColor: "#FFF9ED" },
+  lowerAreaAb: { borderTopColor: "#C5CDE4", backgroundColor: "#F4F6FC" },
+  lowerAreaDb: { borderTopColor: "#B8D4CC", backgroundColor: "#F0F8F5" },
   lowerPane: {
     width: "33.333333%",
     height: "100%",
@@ -7568,6 +8452,8 @@ const s = StyleSheet.create({
     borderRightColor: "#DDE4E9",
   },
   lowerPaneDg: { borderRightColor: "#DDD0B3", backgroundColor: "#FFF9ED" },
+  lowerPaneAb: { borderRightColor: "#C8D0E4", backgroundColor: "#F4F6FC" },
+  lowerPaneDb: { borderRightColor: "#B8D4CC", backgroundColor: "#F0F8F5" },
   lowerCell: {
     width: "10%",
     height: "16.6666667%",
@@ -8492,6 +9378,8 @@ const s = StyleSheet.create({
     shadowRadius: 4,
   },
   matrixMarkAccentDg: { backgroundColor: "#D3A64D", shadowColor: "#D3A64D" },
+  matrixMarkAccentAb: { backgroundColor: "#8B9CFF", shadowColor: "#8B9CFF" },
+  matrixMarkAccentDb: { backgroundColor: "#C9A24A", shadowColor: "#C9A24A" },
   matrixMarkText: {
     color: "#EAF9FF",
     fontWeight: "900",
@@ -8500,6 +9388,8 @@ const s = StyleSheet.create({
     textShadowRadius: 5,
   },
   matrixMarkTextDg: { color: "#FFE7A5", textShadowColor: "#C99C42" },
+  matrixMarkTextAb: { color: "#C8D4FF", textShadowColor: "#6B7BE8" },
+  matrixMarkTextDb: { color: "#C9EDE4", textShadowColor: "#2E8A7A" },
   threadsSignature: { flexDirection: "row", alignItems: "center", gap: 4 },
   threadsGlyph: {
     color: "#F2F8FC",
@@ -8598,14 +9488,15 @@ const s = StyleSheet.create({
     marginBottom: 16,
     minHeight: 112,
   },
-  loginHeroMobile: { minHeight: 108 },
-  loginBrandMobile: { flex: 1.9, gap: 8, paddingRight: 7 },
-  loginTitleMobile: { fontSize: 23, letterSpacing: -0.45 },
+  loginHeroMobile: { minHeight: 88 },
+  loginBrandMobile: { flex: 1.35, gap: 8, paddingRight: 6, paddingLeft: 0 },
+  loginTitleMobile: { fontSize: 18, letterSpacing: -0.4, marginTop: 2 },
   threadsCardMobile: {
-    flex: 0.82,
-    minWidth: 166,
-    marginLeft: 7,
-    paddingHorizontal: 10,
+    flex: 0.72,
+    minWidth: 118,
+    marginLeft: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
   },
   loginBrand: {
     flex: 1.9,
@@ -8616,7 +9507,7 @@ const s = StyleSheet.create({
     paddingLeft: 2,
     paddingRight: 12,
   },
-  loginBrandCopy: { flexShrink: 1 },
+  loginBrandCopy: { flexShrink: 1, minWidth: 0 },
   loginIcon: {
     width: 56,
     height: 56,
@@ -8626,7 +9517,9 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(5,20,31,.34)",
+    flexShrink: 0,
   },
+  loginIconMobile: { width: 40, height: 40, borderRadius: 10 },
   loginKicker: {
     color: "#8DB4CE",
     fontSize: 10,
@@ -8723,8 +9616,9 @@ const s = StyleSheet.create({
     justifyContent: "space-between",
     gap: 8,
     marginBottom: 11,
+    flexWrap: "nowrap",
   },
-  loginHint: { color: "#A7B8C5", fontSize: 11, flexShrink: 1 },
+  loginHint: { color: "#A7B8C5", fontSize: 11, flexShrink: 1, minWidth: 0 },
   registerBtn: {
     height: 28,
     paddingHorizontal: 11,
@@ -9047,7 +9941,7 @@ const s = StyleSheet.create({
     color: "#fff",
     paddingHorizontal: 10,
   },
-  connectionStatusRow: { flexDirection: "row", gap: 8, marginBottom: 4 },
+  connectionStatusRow: { flexDirection: "row", gap: 8, marginBottom: 4, flexWrap: "wrap" },
   connectionStatusCard: {
     flex: 1,
     borderWidth: 1,
@@ -9077,7 +9971,10 @@ const s = StyleSheet.create({
     height: 38,
     paddingHorizontal: 12,
     borderRadius: 5,
+    flexDirection: "row",
+    alignItems: "center",
     justifyContent: "center",
+    gap: 5,
   },
   btnText: { color: "#fff", fontWeight: "900", fontSize: 10 },
   syncText: { color: "#AFC0CB", fontSize: 9, marginTop: 11 },
@@ -9090,6 +9987,15 @@ const s = StyleSheet.create({
   },
   logText: { color: "#B8C8D2", fontSize: 8, lineHeight: 13 },
   vendorDiagnosticText: { color: "#91A7B8", fontSize: 8, lineHeight: 12, marginTop: 4 },
+  vendorReconnectBtn: {
+    marginTop: 8,
+    alignSelf: "flex-start",
+    backgroundColor: "#1F5F8A",
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  vendorReconnectBtnText: { color: "#F3FAFF", fontSize: 9, fontWeight: "900" },
   helpText: { color: "#D2DDE4", fontSize: 11, lineHeight: 18 },
   mtOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -9099,16 +10005,19 @@ const s = StyleSheet.create({
   mtScreen: { flex: 1, backgroundColor: "#05090E" },
   mtTop: {
     minHeight: 58,
-    paddingHorizontal: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: 8,
     backgroundColor: "#10202D",
     borderBottomWidth: 1,
     borderBottomColor: "#28465A",
   },
   mtTitle: { color: "#fff", fontSize: 15, fontWeight: "900" },
-  iframeWrap: { flex: 1 },
+  iframeWrap: { flex: 1, minHeight: 0, position: "relative", backgroundColor: "#000" },
   nativeMtFallback: { flex: 1, alignItems: "center", justifyContent: "center" },
   toast: {
     position: "absolute",
@@ -9120,5 +10029,5 @@ const s = StyleSheet.create({
     padding: 9,
     zIndex: 200,
   },
-  toastText: { color: "#fff", textAlign: "center", fontSize: 10 },
+  toastText: { color: "#fff", textAlign: "center", fontSize: 13, fontWeight: "700" },
 });

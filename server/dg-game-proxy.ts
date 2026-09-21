@@ -3,7 +3,7 @@ import type { Server as HttpServer, IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
-import type { DgRelay } from "./dg-relay";
+import { ensureDgRelayShell, type DgRelay } from "./dg-relay";
 import { DG_REPORT_BRIDGE_SCRIPT } from "./dg-report-bridge";
 
 type ProxySession = {
@@ -66,13 +66,23 @@ DG_REPORT_BRIDGE_SCRIPT +
 `const __mirrorFrame=async value=>{try{let buf;if(value instanceof ArrayBuffer)buf=value;else if(ArrayBuffer.isView(value))buf=value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength);else if(typeof Blob!==\"undefined\"&&value instanceof Blob)buf=await value.arrayBuffer();else return;const bytes=new Uint8Array(buf);let binary=\"\";for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode.apply(null,bytes.subarray(i,i+32768));__frames.push(btoa(binary));if(__frames.length>=32)void __flushFrames();else if(!__frameTimer)__frameTimer=setTimeout(__flushFrames,30);}catch{}};\n` +
 `class MTDGWebSocket extends NativeWS{constructor(url,protocols){const raw=String(url||\"\");if(arguments.length>1)super(raw,protocols);else super(raw);this.addEventListener(\"message\",event=>{void __mirrorFrame(event.data);__pnlReceive(this,event);});}}\n` +
 `window.WebSocket=MTDGWebSocket;\n` +
-`const mapHttp=(value)=>{try{const raw=String(value||"");if(!(raw.startsWith("http://")||raw.startsWith("https://")))return value;const u=new URL(raw);return u.origin===__origin?(u.pathname+u.search+u.hash):value;}catch{return value;}};\n` +
+`const mapHttp=(value)=>{try{const raw=String(value||"");if(!raw)return value;const abs=raw.startsWith("//")?location.protocol+raw:raw;if(!(raw.startsWith("http://")||raw.startsWith("https://")||raw.startsWith("//")))return value;const u=new URL(abs,location.href);if(u.origin===__origin)return u.pathname+u.search+u.hash;if(u.hostname===location.hostname&&String(u.port||"")!==String(location.port||""))return u.pathname+u.search+u.hash;return value;}catch{return value;}};\n` +
 `const nativeFetch=window.fetch;if(nativeFetch){window.fetch=function(input,init){if(typeof input==="string"||input instanceof URL)return nativeFetch.call(this,mapHttp(String(input)),init);return nativeFetch.call(this,input,init);};}\n` +
 `const xhrOpen=window.XMLHttpRequest&&XMLHttpRequest.prototype.open;if(xhrOpen){XMLHttpRequest.prototype.open=function(method,url){const args=Array.from(arguments);args[1]=mapHttp(url);return xhrOpen.apply(this,args);};}\n` +
+`const patchUrlProp=(proto,prop)=>{try{const d=Object.getOwnPropertyDescriptor(proto,prop);if(!d||!d.set)return;Object.defineProperty(proto,prop,{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){d.set.call(this,mapHttp(v));}});}catch{}};\n` +
+`if(window.HTMLScriptElement)patchUrlProp(HTMLScriptElement.prototype,"src");\n` +
+`if(window.HTMLLinkElement)patchUrlProp(HTMLLinkElement.prototype,"href");\n` +
+`const setAttr=Element.prototype.setAttribute;Element.prototype.setAttribute=function(name,value){if(name==="src"||name==="href")value=mapHttp(value);return setAttr.call(this,name,value);};\n` +
 `window.__MT_DG_UPSTREAM_ORIGIN__=__origin;\n` +
 `})();</script>`;
-  if (/<head(?:\s[^>]*)?>/i.test(html)) return html.replace(/<head(?:\s[^>]*)?>/i, m => m + hook);
-  return hook + html;
+  let page = html;
+  try {
+    const host = new URL(upstreamOrigin).host;
+    page = page.split(upstreamOrigin).join("");
+    page = page.split(`//${host}`).join("");
+  } catch {}
+  if (/<head(?:\s[^>]*)?>/i.test(page)) return page.replace(/<head(?:\s[^>]*)?>/i, m => m + hook);
+  return hook + page;
 }
 
 function copyUpstreamHeaders(req: Request, origin: string) {
@@ -352,14 +362,12 @@ export function registerDgGameProxy(options: RegisterOptions) {
     const sessionId = String(req.body?.sessionId || "");
     const gameUrl = String(req.body?.gameUrl || "");
     if (!sessionId || !hasActiveSession(sessionId)) return res.status(401).json({ ok: false, error: "session_invalid" });
-    const relay = getRelay(sessionId);
-    if (!relay) return res.status(404).json({ ok: false, error: "relay_not_found" });
     let url: URL;
     try { url = new URL(gameUrl); } catch { return res.status(400).json({ ok: false, error: "invalid_game_url" }); }
     let origin = "";
     try { origin = safePublicHttpsOrigin(gameUrl); } catch { return res.status(400).json({ ok: false, error: "invalid_game_url" }); }
     if (!url.searchParams.get("token")) return res.status(400).json({ ok: false, error: "missing_token" });
-    relay.enterBridgeMode();
+    ensureDgRelayShell(sessionId, gameUrl).enterBridgeMode();
     // Give the just-stopped headless Chromium socket a brief moment to fully close
     // before the foreground browser establishes the one replacement DG session.
     await new Promise(resolve => setTimeout(resolve, 250));

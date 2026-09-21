@@ -599,8 +599,16 @@ export class DgRelay {
     if (!this.token) throw new Error("DG 授權網址缺少 token");
   }
   getStatus(): RelayStatus { return this.status; }
+  isForegroundBridgeActive(): boolean {
+    return this.foregroundBridgeActive && !this.stopped;
+  }
   isReusable(): boolean {
-    return !this.stopped && (this.status === "idle" || this.status === "connecting" || this.status === "connected");
+    if (this.stopped) return false;
+    // Foreground DG iframe owns the only vendor session. Never treat that
+    // relay as dead just because bridge status is connecting/error — a new
+    // start() would open a second WebSocket and kick the live page.
+    if (this.foregroundBridgeActive) return true;
+    return this.status === "idle" || this.status === "connecting" || this.status === "connected";
   }
   private touch() { this.lastActivityAt = Date.now(); }
   canCollect(now = Date.now(), maxIdleMs = 180000): boolean {
@@ -608,6 +616,7 @@ export class DgRelay {
   }
   subscriberCount(): number { return this.clients.size; }
   async start() {
+    if (this.stopped || this.foregroundBridgeActive) return;
     // Chromium is intentionally NOT used. A lightweight Node TLS/WebSocket
     // transport keeps the DG road feed real-time without spawning a browser
     // process per user/session. This materially reduces Render RAM/CPU pressure
@@ -701,6 +710,12 @@ export class DgRelay {
         }
       }
     }, () => {
+      if (this.stopped || this.transportMode !== "raw" || this.foregroundBridgeActive) {
+        this.log(`前景 DG 已接管，放棄背景 101 驗證｜${endpointName}`);
+        try { this.ws?.abort("DG 前景已接管"); } catch {}
+        this.ws = null;
+        return;
+      }
       this.wsLastError = "";
       this.setStatus("connecting", `已連上 ${endpointName}，正在驗證...`);
       this.log(`WebSocket 101：${endpointName}｜Origin=${activeOrigin}`);
@@ -841,6 +856,12 @@ export class DgRelay {
       this.wsFailuresThisCycle = 0;
       this.wsLastError = "";
       this.setStatus("connected", "已連線"); this.log(`驗證完成｜WSS=${(()=>{try{return new URL(this.wsUrl).hostname}catch{return this.wsUrl}})()}｜Origin=${this.origin}｜mode=${this.transportMode}`);
+      if (this.transportMode !== "raw" || this.foregroundBridgeActive) {
+        this.log("前景 DG 已接管，丟棄背景驗證連線");
+        try { this.ws?.abort("DG 前景已接管"); } catch {}
+        this.ws = null;
+        return;
+      }
       if (this.transportMode === "raw") {
         this.requestDailyPnl();
         this.send(45, { type: 1 }); this.send(2, { lobbyId: 5, type: 0 }); this.send(5011, { type: 0 });
@@ -959,7 +980,7 @@ export class DgRelay {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = null;
     if (this.authTimer) clearTimeout(this.authTimer); this.authTimer = null;
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer); this.keepaliveTimer = null;
-    try { this.ws?.close(); } catch {}
+    try { this.ws?.abort("DG 前景接管"); } catch {}
     this.ws = null;
     this.setStatus("connecting", "等待 DG 網頁即時封包...");
     this.log("Bridge｜背景 WebSocket 已停止，前景 DG 網頁接管唯一即時連線");
@@ -1017,7 +1038,7 @@ export class DgRelay {
     this.foregroundBridgeActive = false;
     this.foregroundBridgeSinks.clear();
     this.transportMode = "raw";
-    this.setStatus("connecting", "正在恢復 DG 背景牌路...");
+    if (!this.map.size) this.setStatus("connecting", "正在恢復 DG 背景牌路...");
     this.log("Bridge｜已離開前景 DG，恢復背景 WebSocket");
     this.open();
   }
@@ -1048,9 +1069,26 @@ const relayStarts = new Map<string, Promise<DgRelay>>();
  * a second start must NEVER stop a relay that is already connecting/connected.
  * Manual reconnect first calls /api/dg/stop, which clears this slot explicitly.
  */
+/** Create a relay object for foreground enter without opening a background WS.
+ *  Opening WS here would share the new DGLI token with the iframe and kick DG. */
+export function ensureDgRelayShell(sessionId: string, gameUrl: string): DgRelay {
+  const existing = relays.get(sessionId);
+  if (existing && !existing.stopped && existing.matchesToken(new URL(gameUrl).searchParams.get("token") || ""))
+    return existing;
+  if (existing) {
+    try { existing.stop(); } catch {}
+    relays.delete(sessionId);
+  }
+  relayStarts.delete(sessionId);
+  const relay = new DgRelay(sessionId, gameUrl);
+  relays.set(sessionId, relay);
+  return relay;
+}
+
 export async function startDgRelay(sessionId: string, gameUrl: string): Promise<{relay:DgRelay;reused:boolean}> {
   const existing = relays.get(sessionId);
-  if (existing?.isReusable()) return { relay: existing, reused: true };
+  if (existing?.isForegroundBridgeActive() || existing?.isReusable())
+    return { relay: existing, reused: true };
 
   const inFlight = relayStarts.get(sessionId);
   if (inFlight) return { relay: await inFlight, reused: true };

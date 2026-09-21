@@ -11,21 +11,44 @@ import { adminPage } from "../admin-page";
 import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
 import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken, sweepIdleDgRelays } from "../dg-relay";
 import { registerDgGameProxy } from "../dg-game-proxy";
-import { getVendorRelay, startVendorRelay, stopVendorRelay, sweepVendorRelays, type VendorKind } from "../vendor-relay";
-import { fetchVendorLaunchUrl } from "../vendor-launch";
+import { registerAbGameProxy, hasAbForegroundCookie, restoreAbProxySession, endAbProxyForeground } from "../vendor-ab-proxy";
+import { registerDbGameProxy, hasDbForegroundCookie, restoreDbProxySession, endDbProxyForeground } from "../vendor-db-proxy";
+import { getVendorRelay, startVendorRelay, adoptPausedVendorRelay, stopVendorRelay, sweepVendorRelays, shouldIgnorePausedVendorStart, setAbGameForeground, type VendorKind } from "../vendor-relay";
+import { fetchVendorLaunchUrl, vendorLaunchIsReady } from "../vendor-launch";
+import { killLeftoverVendorChrome } from "../vendor-chromium";
+import { loadPersistedVendors } from "../vendor-persist";
+import { restoreTrackerSessions } from "../sessions";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 async function startServer() {
+  await restoreTrackerSessions();
+  killLeftoverVendorChrome();
   const app = express();
   const server = createServer(app);
   app.use(express.json({ limit: "5mb" }));
   app.use(express.urlencoded({ limit: "5mb", extended: true }));
 
-  // DG-only foreground same-session proxy. This is intentionally registered
+  // Foreground same-session proxies. These are intentionally registered
   // before the app's static catch-all. MT routes / sockets are untouched.
   registerDgGameProxy({ app, server, hasActiveSession: hasActiveTrackerSession, getRelay: getDgRelay });
+  registerAbGameProxy({ app, server, hasActiveSession: hasActiveTrackerSession });
+  registerDbGameProxy({ app, server, hasActiveSession: hasActiveTrackerSession });
+  for (const row of loadPersistedVendors()) {
+    if (!row.paused || !row.gameUrl) continue;
+    try {
+      await adoptPausedVendorRelay(row.sessionId, row.kind, row.gameUrl);
+      if (row.kind === "AB") {
+        setAbGameForeground(row.sessionId, true);
+        restoreAbProxySession(row.sessionId, row.gameUrl);
+      }
+      if (row.kind === "DB") restoreDbProxySession(row.sessionId, row.gameUrl);
+      console.log(`[Vendor API] restored paused｜kind=${row.kind}｜session=${row.sessionId.slice(0,8)}`);
+    } catch (error: any) {
+      console.warn(`[Vendor API] restore paused failed｜kind=${row.kind}｜${error?.message || error}`);
+    }
+  }
 
   app.get("/api/health", (_req, res) => {
     const mem=process.memoryUsage();
@@ -37,7 +60,7 @@ async function startServer() {
     if(result.stopped)console.log(`[DG cleanup] stopped=${result.stopped} active=${result.active}`);
   },60000);
   dgSweepTimer.unref?.();
-  const vendorSweepTimer=setInterval(()=>sweepVendorRelays(180000),60000);vendorSweepTimer.unref?.();
+  const vendorSweepTimer=setInterval(()=>sweepVendorRelays(900000),60000);vendorSweepTimer.unref?.();
 
   const vendorKind=(raw:any):VendorKind|null=>raw==="AB"||raw==="DB"?raw:null;
   app.post("/api/vendor/start",async(req,res)=>{
@@ -48,16 +71,61 @@ async function startServer() {
     if(!(await requireTrackerSession(sessionId)))return res.status(401).json({ok:false,error:"session_invalid"});
     if(!kind)return res.status(400).json({ok:false,error:"invalid_vendor"});
     try{
-      // Issue the launch URL from this same Render host. AB/DB bind the one-time
-      // session to the IP that called TZ/OFA game login; using the browser's URL
-      // here left Chromium stuck on a geo/IP page with ws=0.
+      const existing=getVendorRelay(sessionId,kind);
+      const resumeHall=req.body?.resumeHall===true||req.body?.resume===true;
+      const inGameCookie=kind==="AB"?hasAbForegroundCookie(req.headers.cookie, sessionId):hasDbForegroundCookie(req.headers.cookie, sessionId);
+      if(resumeHall){
+        if(kind==="AB")setAbGameForeground(sessionId,false);
+        res.setHeader("Set-Cookie", kind==="AB"?endAbProxyForeground(sessionId):endDbProxyForeground(sessionId));
+      }
+      if(shouldIgnorePausedVendorStart(resumeHall, !!existing?.isPausedForGame(), inGameCookie)){
+        const url=existing?.gameUrl||gameUrl||(kind==="AB"?"https://www.ab8888.games:8888/":"");
+        if(!url && kind==="DB")return res.status(400).json({ok:false,error:"invalid_game_url"});
+        const launchAuth=existing?.launchAuth||(platform&&platformToken?{platform:platform as "TZ"|"OFA",platformToken}:undefined);
+        const relay=existing?.isPausedForGame()?existing:await adoptPausedVendorRelay(sessionId,kind,url,launchAuth);
+        if(kind==="AB"){
+          setAbGameForeground(sessionId,true);
+          restoreAbProxySession(sessionId, relay.gameUrl);
+        }
+        if(kind==="DB")restoreDbProxySession(sessionId, relay.gameUrl);
+        console.log(`[Vendor API] start ignored｜kind=${kind}｜${existing?.isPausedForGame()?"paused":"foreground-cookie"}｜session=${sessionId.slice(0,8)}`);
+        return res.json({ok:true,paused:true,host:(()=>{try{return new URL(relay.gameUrl).hostname}catch{return kind==="AB"?"www.ab8888.games":""}})()});
+      }
+      if(resumeHall && existing?.isPausedForGame()){
+        if(platform&&platformToken){
+          existing.launchAuth={platform:platform as "TZ"|"OFA",platformToken};
+          if(kind==="DB"){
+            // 回牌路沿用現有 params，不再打 TZ 登入，避免「重複登入」把大廳踢掉。
+          }else if(!vendorLaunchIsReady(kind, existing.gameUrl)){
+            gameUrl=await fetchVendorLaunchUrl({platform,platformToken,kind});
+            existing.gameUrl=gameUrl;
+          }
+        }
+        console.log(`[Vendor API] resume hall｜kind=${kind}｜session=${sessionId.slice(0,8)}`);
+        void existing.resumeTransport();
+        return res.json({ok:true,resumed:true,host:(()=>{try{return new URL(existing.gameUrl).hostname}catch{return ""}})()});
+      }
+      if(existing && !req.body?.restart){
+        if(platform&&platformToken)existing.launchAuth={platform:platform as "TZ"|"OFA",platformToken};
+        if(kind==="DB" && existing.needsHallRecover()){
+          console.log(`[Vendor API] recover hall｜kind=DB｜session=${sessionId.slice(0,8)}`);
+          void existing.recoverDbHall("reuse");
+          return res.json({ok:true,recovered:true,host:(()=>{try{return new URL(existing.gameUrl).hostname}catch{return ""}})()});
+        }
+        void existing.ensureRunning();
+        console.log(`[Vendor API] reuse｜kind=${kind}｜session=${sessionId.slice(0,8)}`);
+        return res.json({ok:true,reused:true,host:(()=>{try{return new URL(existing.gameUrl).hostname}catch{return ""}})()});
+      }
       if(platform&&platformToken){
-        gameUrl=await fetchVendorLaunchUrl({platform,platformToken,kind});
+        const saved=loadPersistedVendors().find((row)=>row.sessionId===sessionId&&row.kind===kind);
+        const candidate=String(existing?.gameUrl||saved?.gameUrl||gameUrl||"");
+        if(vendorLaunchIsReady(kind, candidate)) gameUrl=candidate;
+        else gameUrl=await fetchVendorLaunchUrl({platform,platformToken,kind});
       }
       let u:URL;try{u=new URL(gameUrl)}catch{return res.status(400).json({ok:false,error:"invalid_game_url"})}
       if(u.protocol!=="https:")return res.status(400).json({ok:false,error:"invalid_game_url"});
       console.log(`[Vendor API] start｜kind=${kind}｜host=${u.hostname}｜auth=${platform&&platformToken?"server":"client-url"}｜session=${sessionId.slice(0,8)}`);
-      await startVendorRelay(sessionId,kind,u.toString());
+      await startVendorRelay(sessionId,kind,u.toString(),!!req.body?.restart,platform&&platformToken?{platform,platformToken}:undefined);
       return res.json({ok:true,host:u.hostname});
     }catch(e:any){
       console.error(`[Vendor API] start failed｜kind=${kind}｜${e?.message||e}`);
