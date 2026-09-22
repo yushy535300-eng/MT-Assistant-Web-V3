@@ -14,7 +14,11 @@ export type MvLiveRoom = {
   avatar: string;
   /** Absolute or path-only room URL when live and enterable. */
   roomUrl?: string;
+  /** Empty lobby slot — 「老爺人家還沒好，請期待呦」 */
+  comingSoon?: boolean;
 };
+
+export const MV_COMING_SOON_MESSAGE = "老爺人家還沒好，請敬請期待";
 
 const AVATAR_LOCAL: Record<string, string> = {
   "69fe0d3d9793a.jpg": "/mv-hosts/69fe0d3d9793a.jpg",
@@ -43,18 +47,11 @@ function guessHostName(title: string) {
   return t.slice(0, 8);
 }
 
-/** Fallback catalog from a live score777 lobby capture. */
+/**
+ * Fallback catalog from tz02.score777.net HAR (2026-09-22).
+ * Offline hosts still appear on the homepage; empty slot = 老爺敬請期待.
+ */
 export const MV_LIVE_ROOM_CATALOG: MvLiveRoom[] = [
-  {
-    id: "MV-1161",
-    uid: "1161",
-    name: "雙雙",
-    title: "雙雙 GAME TIME 跟著雙雙一起贏大錢~",
-    live: true,
-    avatar: localAvatar("69fe0d3d9793a.jpg"),
-    roomUrl:
-      "https://tz02.score777.net/live/home/indexView?uid=1161&userid=42c9e6fa101c601fad97e56a91a39463",
-  },
   {
     id: "MV-YUNXI",
     name: "沄曦",
@@ -63,9 +60,25 @@ export const MV_LIVE_ROOM_CATALOG: MvLiveRoom[] = [
     avatar: localAvatar("6a1d3ce1e6aa9.jpg"),
   },
   {
+    id: "MV-LAOYE",
+    name: "老爺",
+    title: MV_COMING_SOON_MESSAGE,
+    live: false,
+    avatar: "",
+    comingSoon: true,
+  },
+  {
+    id: "MV-1161",
+    uid: "1161",
+    name: "雙雙",
+    title: "雙雙 GAME TIME 跟著雙雙一起贏大錢~",
+    live: false,
+    avatar: localAvatar("69fe0d3d9793a.jpg"),
+  },
+  {
     id: "MV-QIANQIAN",
     name: "淺淺",
-    title: "淺淺 9/20 GAME TIME",
+    title: "淺淺 9/21 GAME TIME",
     live: false,
     avatar: localAvatar("69fe0d210ae8a.jpg"),
   },
@@ -78,19 +91,41 @@ export const MV_LIVE_ROOM_CATALOG: MvLiveRoom[] = [
   },
 ];
 
-/** Parse score777 lobby HTML into room cards. */
+/** Parse score777 lobby HTML into room cards (includes offline + 老爺 slot). */
 export function parseMvLobbyHtml(html: string): MvLiveRoom[] {
   const rooms: MvLiveRoom[] = [];
   const liRe = /<li>\s*<a[\s\S]*?<\/li>/gi;
   let m: RegExpExecArray | null;
   let idx = 0;
+  let comingSoonAdded = false;
   while ((m = liRe.exec(html))) {
     const block = m[0];
     const title = (block.match(/logo-txt">([^<]*)<\/span>/i)?.[1] || "").trim();
     const img = (block.match(/h-anchor-cover-img"\s+src="([^"]*)"/i)?.[1] || "").trim();
     const hrefRaw = (block.match(/href="([^"]+)"/i)?.[1] || "").replace(/&amp;/g, "&");
-    const isLive = /livegif\.gif/i.test(block) && !/offline\s*\(/i.test(block);
-    if (!title && !img) continue;
+    const isOfflineClick = /onclick\s*=\s*["']offline\s*\(/i.test(block);
+    const isLive =
+      /livegif\.gif/i.test(block) &&
+      !isOfflineClick &&
+      !/offline\s*\(/i.test(block);
+
+    // Empty cover + empty title + offline() → 老爺敬請期待 slot (HAR).
+    if (!title && !img) {
+      if (isOfflineClick && !comingSoonAdded) {
+        rooms.push({
+          id: "MV-LAOYE",
+          name: "老爺",
+          title: MV_COMING_SOON_MESSAGE,
+          live: false,
+          avatar: "",
+          comingSoon: true,
+        });
+        comingSoonAdded = true;
+        idx += 1;
+      }
+      continue;
+    }
+
     const uid = hrefRaw.match(/[?&]uid=([^&]+)/i)?.[1];
     const name = guessHostName(title);
     rooms.push({
@@ -100,7 +135,10 @@ export function parseMvLobbyHtml(html: string): MvLiveRoom[] {
       title: title || name,
       live: isLive,
       avatar: localAvatar(img),
-      roomUrl: hrefRaw && !/offline/i.test(hrefRaw) ? hrefRaw : undefined,
+      roomUrl:
+        hrefRaw && !isOfflineClick && !/offline/i.test(hrefRaw)
+          ? hrefRaw
+          : undefined,
     });
     idx += 1;
   }

@@ -42,4 +42,44 @@ describe("SA bridge mode (ERR26 guard)", () => {
     stopSaRelay(SID);
     await leavePromise.catch(() => {});
   });
+
+  it("enterBridgeMode before start prevents competing PS_LOGIN (direct iframe path)", async () => {
+    stopSaRelay(SID);
+    // Simulate homepage background shell, then direct-iframe enter (proxy failed).
+    const background = ensureSaRelayShell(SID, URL_A);
+    assert.equal(background.isForegroundBridgeActive(), false);
+    ensureSaRelayShell(SID, URL_B).enterBridgeMode();
+    const { relay, reused } = await startSaRelay(SID, URL_B);
+    assert.equal(reused, true);
+    assert.equal(relay.isForegroundBridgeActive(), true);
+    assert.equal(relay.matchesToken("tokB"), true);
+    stopSaRelay(SID);
+  });
+
+  it("retargetBackground exists for recovery but enter must use a DIFFERENT token", async () => {
+    stopSaRelay(SID);
+    const shell = ensureSaRelayShell(SID, URL_A);
+    shell.enterBridgeMode();
+    assert.equal(shell.isForegroundBridgeActive(), true);
+    // Dual-SALI while the game holds token A still ERR26s this platform —
+    // enter UI must NOT call this. Kept only as an explicit recovery API.
+    const retargetPromise = shell.retargetBackground(URL_B);
+    assert.equal(shell.isForegroundBridgeActive(), false);
+    assert.equal(shell.matchesToken("tokB"), true);
+    stopSaRelay(SID);
+    await retargetPromise.catch(() => {});
+  });
+
+  it("retargetBackground rejects the same SALI token (ERR26 guard)", async () => {
+    stopSaRelay(SID);
+    const shell = ensureSaRelayShell(SID, URL_A);
+    shell.enterBridgeMode();
+    await assert.rejects(
+      () => shell.retargetBackground(URL_A),
+      /不同 SALI token|ERR26/,
+    );
+    assert.equal(shell.isForegroundBridgeActive(), true);
+    assert.equal(shell.matchesToken("tokA"), true);
+    stopSaRelay(SID);
+  });
 });

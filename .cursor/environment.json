@@ -1,0 +1,14 @@
+{
+  "name": "mt-assistant",
+  "install": "pnpm install --frozen-lockfile",
+  "terminals": [
+    {
+      "name": "web",
+      "command": "pnpm build && PORT=39217 NODE_ENV=production node dist/server/index.js",
+      "description": "MT Assistant production web server on port 39217"
+    }
+  ],
+  "ports": [
+    { "name": "web", "port": 39217 }
+  ]
+}

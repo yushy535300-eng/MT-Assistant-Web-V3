@@ -1,0 +1,57 @@
+{
+  "action": "/api/v1/gametype/*/game/*/bet/history",
+  "err": 0,
+  "msg": {
+    "orders": [
+      {
+        "betSn": "5lbuGLXF4p5yc03",
+        "bet_total": "2500.00",
+        "created_at": 1790067123,
+        "gameName": "20260922_261_58",
+        "gameSn": "PGY098YD6PSJ6Q4TR1AS",
+        "gameType": "BAC",
+        "no": "2026092226158",
+        "prepayment_total": "0.00",
+        "refund_total": "0.00",
+        "result": "11,11,4,40,10,24,-1,-1,4,1",
+        "round": "58",
+        "rv_url": "https://puv.mtx99.net/videos/BAV01/20260922/261_58.mp4",
+        "shoue": "261",
+        "slips": [
+          {
+            "bet": "2500.00",
+            "content_name": "幸運6",
+            "play_code": "1171",
+            "prepaymentet": "0.00",
+            "refund": "0.00",
+            "win": "0.00"
+          }
+        ],
+        "status": 3,
+        "table_id": "48",
+        "table_name": "B01",
+        "total_valid_bet": "2500.00",
+        "win_total": "0.00",
+        "winner": 1
+      }
+    ],
+    "pg": {
+      "cur": "1",
+      "ps": 2,
+      "s": 8,
+      "tot": "15"
+    },
+    "total": {
+      "all": {
+        "o": "190500.00",
+        "v": "150500.00",
+        "w": "-70500.00"
+      },
+      "sub": {
+        "o": "54500.00",
+        "v": "54500.00",
+        "w": "-54500.00"
+      }
+    }
+  }
+}

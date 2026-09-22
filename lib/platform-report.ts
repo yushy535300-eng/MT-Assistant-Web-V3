@@ -155,7 +155,11 @@ export function selectPlatformTodayPnl(
     return buckets.dg?.day === day ? buckets.dg.value : null;
   }
   if (platform === "SA") {
-    return buckets.sa?.day === day ? buckets.sa.value : null;
+    // SA float always shows a number once the SA bucket is active for today.
+    // null only before first load; empty day → 0 (not MT/DG bleed-through).
+    if (buckets.sa?.day === day && Number.isFinite(buckets.sa.value))
+      return buckets.sa.value;
+    return 0;
   }
   if (platform === "MT") return buckets.mt;
   return null;
@@ -172,20 +176,26 @@ export function saResultMatchesPending(
   },
   pendingTableId: string,
 ) {
-  const want = String(pendingTableId || "");
+  const want = String(pendingTableId || "").trim();
   if (!want) return false;
   const host = result.hostId != null ? String(result.hostId) : "";
-  const candidates = [
-    result.tableId,
-    result.apiId,
-    result.tableBadge,
-    result.roomId,
-    host,
-    host ? `SA${host}` : "",
-  ]
-    .map((x) => String(x || "").trim())
-    .filter(Boolean);
-  return candidates.includes(want);
+  const room = String(result.roomId || "").trim();
+  const badge = String(result.tableBadge || "").trim();
+  const api = String(result.apiId || "").trim();
+  const id = String(result.tableId || "").trim();
+  const candidates = new Set(
+    [id, api, badge, room, host, host ? `SA${host}` : "", room ? `SA${room}` : ""]
+      .map((x) => String(x || "").trim())
+      .filter(Boolean),
+  );
+  if (candidates.has(want)) return true;
+  // Normalize SA901 ↔ 901 ↔ D01 style aliases.
+  const strip = (s: string) => s.replace(/^SA/i, "").trim();
+  const wantStrip = strip(want);
+  for (const c of candidates) {
+    if (strip(c) === wantStrip) return true;
+  }
+  return false;
 }
 
 /** Compute baccarat PnL for a settled float bet (shared formula, platform-agnostic). */

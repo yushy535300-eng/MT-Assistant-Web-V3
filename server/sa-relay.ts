@@ -282,39 +282,30 @@ class SaRelay {
 
   private async connectWs() {
     if (this.stopped || this.bridge) return;
+    // Sequential candidates only — racing multiple WSS endpoints used to send
+    // several PS_LOGIN at once → 重複登入 / ERR26 against the game session.
     const candidates = DEFAULT_WS_CANDIDATES;
-    // Race the first successful endpoint — sequential 12s timeouts felt "too slow".
     const errors: string[] = [];
-    try {
-      await new Promise<void>((resolve, reject) => {
-        let pending = candidates.length;
-        let won = false;
-        const failOne = (url: string, err: any) => {
-          errors.push(`${url}: ${err?.message || err}`);
-          pending -= 1;
-          if (!won && pending <= 0)
-            reject(new Error(errors[0] || "SA WebSocket 連線失敗"));
-        };
-        for (const url of candidates) {
-          void this.openOne(url, 4500)
-            .then(() => {
-              if (won || this.stopped || this.bridge) return;
-              won = true;
-              resolve();
-            })
-            .catch((err) => failOne(url, err));
-        }
-      });
-    } catch (err: any) {
-      this.setStatus("error", String(err?.message || "SA WebSocket 連線失敗"));
-      this.scheduleReconnect();
+    for (const url of candidates) {
+      if (this.stopped || this.bridge) return;
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+      try {
+        await this.openOne(url, 4500);
+        return;
+      } catch (err: any) {
+        errors.push(`${url}: ${err?.message || err}`);
+      }
     }
+    this.setStatus(
+      "error",
+      String(errors[0] || "SA WebSocket 連線失敗"),
+    );
+    this.scheduleReconnect();
   }
 
   private openOne(url: string, timeoutMs = 4500) {
     return new Promise<void>((resolve, reject) => {
       if (this.stopped || this.bridge) return reject(new Error("stopped"));
-      // Another candidate already connected.
       if (this.ws && this.ws.readyState === WebSocket.OPEN)
         return reject(new Error("already_connected"));
       let settled = false;
@@ -348,8 +339,8 @@ class SaRelay {
             reject(new Error("stopped"));
             return;
           }
-          // If another race winner already took the slot, drop this socket.
-          if (this.ws && this.ws !== ws && this.ws.readyState === WebSocket.OPEN) {
+          // Never PS_LOGIN on a second socket — claim slot atomically.
+          if (this.ws && this.ws !== ws) {
             settled = true;
             try {
               ws.close();
@@ -389,7 +380,7 @@ class SaRelay {
             this.clearAck();
             this.ws = null;
             if (!settled) fail(new Error("SA WS closed before open"));
-            else if (!this.stopped && !this.bridge) {
+            else if (!this.stopped && !this.bridge && !this.authFailed) {
               this.setStatus("connecting", "SA 連線中斷，重連中...");
               this.scheduleReconnect();
             }
@@ -430,11 +421,17 @@ class SaRelay {
     }, delay);
   }
 
+  private mirrorIngestLogged = false;
+
   /** Feed a raw SA application packet (already de-framed from WS). */
   ingestApplicationPacket(raw: Buffer) {
     this.touch();
     if (this.bridge && this.status !== "connected") {
       this.setStatus("connected", "SA 遊戲內即時封包已接通");
+    }
+    if (this.bridge && !this.mirrorIngestLogged) {
+      this.mirrorIngestLogged = true;
+      this.log(`Mirror｜收到遊戲內封包 ${raw.length}b，懸浮開始即時更新`);
     }
     // Upstream may coalesce several 0xaa commands in one WS binary frame.
     const frames = parseAllFrames(raw);
@@ -451,6 +448,8 @@ class SaRelay {
     if (this.stopped) throw new Error("SA relay 已停止");
     // In-game iframe becomes the only SA WS owner; proxy mirrors frames here.
     this.bridge = true;
+    this.authFailed = false;
+    this.mirrorIngestLogged = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.clearAck();
@@ -465,8 +464,38 @@ class SaRelay {
   async leaveBridgeMode() {
     if (this.stopped || !this.bridge) return;
     this.bridge = false;
+    this.authFailed = false;
     this.setStatus("connecting", "SA 背景牌路恢復中...");
     this.log("Bridge｜已離開前景 SA，恢復背景 WebSocket");
+    await this.connectWs();
+  }
+
+  /**
+   * Switch the road relay to a DIFFERENT SALI token (B) while the game iframe
+   * keeps token A. Same-token retarget opens a second PS_LOGIN → ERR26.
+   */
+  async retargetBackground(gameUrl: string) {
+    if (this.stopped) throw new Error("SA relay 已停止");
+    const next = extractSaAuth(gameUrl);
+    if (!next.token) throw new Error("SA 授權網址缺少 token");
+    if (next.token === this.token) {
+      throw new Error(
+        "SA retarget 必須使用不同 SALI token（同 token 再登入會 ERR26）",
+      );
+    }
+    this.adoptLaunchUrl(gameUrl);
+    this.bridge = false;
+    this.authFailed = false;
+    this.reconnectAttempt = 0;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.clearAck();
+    try {
+      this.ws?.close();
+    } catch {}
+    this.ws = null;
+    this.setStatus("connecting", "SA 懸浮改走新授權背景連線...");
+    this.log("Bridge｜背景改用新 SALI（token B），遊戲保留 token A");
     await this.connectWs();
   }
 
@@ -486,6 +515,27 @@ class SaRelay {
 
     if (cmdId === SA_CMD.SP_LOGIN) {
       const login = parseSpLogin(payload);
+      // DuplicateLogin ≠ 0：帳號已有另一組連線（遊戲／他處）。背景必須讓出，
+      // 不可重連搶登；進房後改吃遊戲鏡像。
+      if (login && login.duplicateLogin) {
+        this.authFailed = true;
+        this.clearAck();
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+        try {
+          this.ws?.close();
+        } catch {}
+        this.ws = null;
+        this.setStatus(
+          "connecting",
+          "重複登入：背景已讓出，進入 SA 後懸浮改吃遊戲資料",
+        );
+        this.event("重複登入");
+        this.log(
+          `DuplicateLogin=${login.duplicateLogin}｜背景讓出，等待進房鏡像`,
+        );
+        return;
+      }
       this.authFailed = false;
       this.reconnectAttempt = 0;
       this.setStatus("connected", "SA 已連線");

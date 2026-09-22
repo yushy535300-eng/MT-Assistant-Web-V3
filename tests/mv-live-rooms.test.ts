@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MV_LIVE_ROOM_CATALOG,
+  MV_COMING_SOON_MESSAGE,
   parseMvLobbyHtml,
   mvRoomsOrFallback,
 } from "../server/mv-live-rooms";
@@ -36,15 +37,18 @@ const SAMPLE = `
 `;
 
 describe("mv-live-rooms", () => {
-  it("ships a non-empty catalog with avatars", () => {
-    expect(MV_LIVE_ROOM_CATALOG.length).toBeGreaterThanOrEqual(3);
-    expect(MV_LIVE_ROOM_CATALOG[0].name).toBeTruthy();
-    expect(MV_LIVE_ROOM_CATALOG[0].avatar).toMatch(/^\/mv-hosts\//);
+  it("ships catalog with offline hosts + 老爺 coming soon", () => {
+    expect(MV_LIVE_ROOM_CATALOG.length).toBeGreaterThanOrEqual(4);
+    const laoye = MV_LIVE_ROOM_CATALOG.find((r) => r.comingSoon);
+    expect(laoye?.name).toBe("老爺");
+    expect(laoye?.live).toBe(false);
+    expect(laoye?.title).toContain("還沒好");
+    expect(MV_COMING_SOON_MESSAGE).toMatch(/期待/);
   });
 
-  it("parses lobby HTML into streamer cards", () => {
+  it("parses lobby HTML including offline and 老爺 slot", () => {
     const rooms = parseMvLobbyHtml(SAMPLE);
-    expect(rooms).toHaveLength(2);
+    expect(rooms.length).toBeGreaterThanOrEqual(3);
     expect(rooms[0]).toMatchObject({
       name: "雙雙",
       live: true,
@@ -53,6 +57,8 @@ describe("mv-live-rooms", () => {
     expect(rooms[0].avatar).toBe("/mv-hosts/69fe0d3d9793a.jpg");
     expect(rooms[0].roomUrl).toContain("uid=1161");
     expect(rooms[1]).toMatchObject({ name: "沄曦", live: false });
+    const laoye = rooms.find((r) => r.comingSoon);
+    expect(laoye).toMatchObject({ name: "老爺", live: false });
   });
 
   it("falls back to catalog when parse is empty", () => {

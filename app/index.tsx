@@ -1291,7 +1291,20 @@ function LiveStreamCard({
   busy?: boolean;
 }) {
   const isLive = !!table.live;
+  const comingSoon =
+    table.category === "comingSoon" ||
+    table.name === "老爺" ||
+    /敬請期待|人家還沒好/.test(String(table.trend || table.players || ""));
   const title = String(table.trend || table.roomId || "").trim();
+  const badge = isLive ? "LIVE" : comingSoon ? "敬請期待" : "休息中";
+  const cta = isLive ? "進入直播" : comingSoon ? "敬請期待" : "尚未開播";
+  const meta =
+    title ||
+    (isLive
+      ? "直播中 · 點擊進入觀看"
+      : comingSoon
+        ? "老爺人家還沒好，請敬請期待"
+        : "目前未開播 · 主頁仍會顯示");
   return (
     <Pressable
       disabled={busy || !isLive}
@@ -1299,7 +1312,7 @@ function LiveStreamCard({
       style={[
         s.liveCard,
         desktop && s.liveCardDesktop,
-        (busy || !isLive) && { opacity: isLive ? 0.55 : 0.78 },
+        (busy || !isLive) && { opacity: isLive ? 0.55 : 0.88 },
       ]}
     >
       <View style={s.liveCardMedia}>
@@ -1332,15 +1345,18 @@ function LiveStreamCard({
           <>
             <View style={s.liveCardGlow} />
             <MaterialIcons
-              name="videocam"
+              name={comingSoon ? "favorite-border" : "videocam"}
               size={desktop ? 34 : 28}
               color="#7EE0D2"
             />
+            {comingSoon ? (
+              <Text style={s.liveCardSoonText}>敬請期待</Text>
+            ) : null}
           </>
         )}
         <View style={[s.liveBadge, !isLive && s.liveBadgeOff]}>
           {isLive ? <View style={s.liveBadgeDot} /> : null}
-          <Text style={s.liveBadgeText}>{isLive ? "LIVE" : "休息中"}</Text>
+          <Text style={s.liveBadgeText}>{badge}</Text>
         </View>
       </View>
       <View style={s.liveCardBody}>
@@ -1348,7 +1364,7 @@ function LiveStreamCard({
           {table.name}
         </Text>
         <Text numberOfLines={2} style={s.liveCardMeta}>
-          {title || (isLive ? "直播中 · 點擊進入觀看" : "目前未開播")}
+          {meta}
         </Text>
         <View style={[s.liveCardCta, !isLive && s.liveCardCtaOff]}>
           <MaterialIcons
@@ -1357,7 +1373,7 @@ function LiveStreamCard({
             color={isLive ? "#E8FFF9" : "#9BB8B0"}
           />
           <Text style={[s.liveCardCtaText, !isLive && s.liveCardCtaTextOff]}>
-            {isLive ? "進入直播" : "尚未開播"}
+            {cta}
           </Text>
         </View>
       </View>
@@ -1856,19 +1872,10 @@ type MvRoomDto = {
   live: boolean;
   avatar: string;
   roomUrl?: string;
+  comingSoon?: boolean;
 };
 
 const MV_LIVE_ROOM_FALLBACK: MvRoomDto[] = [
-  {
-    id: "MV-1161",
-    uid: "1161",
-    name: "雙雙",
-    title: "雙雙 GAME TIME 跟著雙雙一起贏大錢~",
-    live: true,
-    avatar: "/mv-hosts/69fe0d3d9793a.jpg",
-    roomUrl:
-      "https://tz02.score777.net/live/home/indexView?uid=1161&userid=42c9e6fa101c601fad97e56a91a39463",
-  },
   {
     id: "MV-YUNXI",
     name: "沄曦",
@@ -1877,9 +1884,25 @@ const MV_LIVE_ROOM_FALLBACK: MvRoomDto[] = [
     avatar: "/mv-hosts/6a1d3ce1e6aa9.jpg",
   },
   {
+    id: "MV-LAOYE",
+    name: "老爺",
+    title: "老爺人家還沒好，請敬請期待",
+    live: false,
+    avatar: "",
+    comingSoon: true,
+  },
+  {
+    id: "MV-1161",
+    uid: "1161",
+    name: "雙雙",
+    title: "雙雙 GAME TIME 跟著雙雙一起贏大錢~",
+    live: false,
+    avatar: "/mv-hosts/69fe0d3d9793a.jpg",
+  },
+  {
     id: "MV-QIANQIAN",
     name: "淺淺",
-    title: "淺淺 9/20 GAME TIME",
+    title: "淺淺 9/21 GAME TIME",
     live: false,
     avatar: "/mv-hosts/69fe0d210ae8a.jpg",
   },
@@ -1898,7 +1921,11 @@ function mvRoomToTable(room: MvRoomDto): TableData {
     apiId: room.id,
     game: "直播",
     name: room.name,
-    players: room.live ? "直播中" : "休息中",
+    players: room.comingSoon
+      ? "敬請期待"
+      : room.live
+        ? "直播中"
+        : "休息中",
     shoe: "—",
     round: 0,
     banker: 0,
@@ -1908,9 +1935,9 @@ function mvRoomToTable(room: MvRoomDto): TableData {
     trend: room.title,
     live: room.live,
     roomId: room.uid || room.name,
-    category: "直播",
-    dealerPhoto: room.avatar,
-    streamUrl: room.roomUrl,
+    category: room.comingSoon ? "comingSoon" : "直播",
+    dealerPhoto: room.avatar || undefined,
+    streamUrl: room.live ? room.roomUrl : undefined,
   };
 }
 
@@ -2591,6 +2618,33 @@ async function stopSaRelayServer(sessionId: string) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId }),
       keepalive: true,
+    });
+  } catch {}
+}
+/** Stop background SA WS before iframe login (ERR26). Works for proxy + direct. */
+async function enterSaBridgeServer(sessionId: string, gameUrl: string) {
+  if (!sessionId) return;
+  try {
+    await fetch("/api/sa/bridge/enter", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, gameUrl }),
+    });
+  } catch {}
+}
+async function leaveSaBridgeServer(
+  sessionId: string,
+  opts?: { restoreRelay?: boolean },
+) {
+  if (!sessionId) return;
+  try {
+    await fetch("/api/sa/bridge/leave", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        restoreRelay: opts?.restoreRelay !== false,
+      }),
     });
   } catch {}
 }
@@ -3518,12 +3572,17 @@ export default function HomeScreen() {
   const [todayPnl, setTodayPnl] = useState<number | null>(null);
   const [dgTodayPnl, setDgTodayPnl] = useState<DgDailyPnl | null>(null);
   // SA 今日輸贏 / 輸贏報表 — isolated bucket (report.pnl.SA / report.history.SA).
-  const [saReport, setSaReport] = useState<PlatformReportBucket>(() =>
-    loadPlatformReport("SA"),
-  );
+  const [saReport, setSaReport] = useState<PlatformReportBucket>(() => {
+    const loaded = loadPlatformReport("SA");
+    // Ensure SA 今日輸贏 starts at 0 for today (isolated; never MT/DG).
+    if (!loaded.pnl) return resetPlatformReport("SA");
+    return loaded;
+  });
   const saReportRef = useRef(saReport);
   saReportRef.current = saReport;
-  const activeTodayPnl = selectPlatformTodayPnl(activePlatform, {
+  const pnlPlatform =
+    mtOpen && gameViewPlatform ? gameViewPlatform : activePlatform;
+  const activeTodayPnl = selectPlatformTodayPnl(pnlPlatform, {
     mt: todayPnl,
     dg: dgTodayPnl,
     sa: saReport.pnl,
@@ -4150,11 +4209,17 @@ export default function HomeScreen() {
     panelMobileScale,
   ]);
 
+  // 圖2 電腦／圖3 手機：首頁嵌 overview；進桌浮層用較保守右上
+  const radarLauncherWidth = desktop ? 210 : 188;
+  const radarRightGap = desktop ? 14 : 8;
+  const radarBaseTop = desktop ? 100 : 100;
   const clampRadarPosition = () => {
-    const launcherWidth = desktop ? 210 : 188;
+    const launcherWidth = radarLauncherWidth;
     const launcherHeight = 32;
-    const baseLeft = Math.max(8, width - launcherWidth - (desktop ? 14 : 8));
-    const baseTop = desktop ? 66 : 61;
+    // Anchor from the right edge (same as radarLauncher style) so a wide
+    // useWindowDimensions width cannot shove the chip past the viewport.
+    const baseLeft = Math.max(8, width - launcherWidth - radarRightGap);
+    const baseTop = radarBaseTop;
     const minX = 8 - baseLeft;
     const maxX = Math.max(minX, width - 8 - launcherWidth - baseLeft);
     const minY = 8 - baseTop;
@@ -4166,6 +4231,13 @@ export default function HomeScreen() {
       }),
     );
   };
+  const radarLayoutKeyRef = useRef(desktop ? "d" : "m");
+  useEffect(() => {
+    const key = desktop ? "d" : "m";
+    if (radarLayoutKeyRef.current === key) return;
+    radarLayoutKeyRef.current = key;
+    radarPosition.setValue({ x: 0, y: 0 });
+  }, [desktop, radarPosition]);
   const radarResponder = useMemo(
     () =>
       PanResponder.create({
@@ -4198,7 +4270,7 @@ export default function HomeScreen() {
         onPanResponderTerminationRequest: () => false,
         onShouldBlockNativeResponder: () => true,
       }),
-    [radarPosition, width, height, desktop],
+    [radarPosition, width, height, desktop, radarBaseTop, radarRightGap, radarLauncherWidth],
   );
 
   const pageSwipe = useMemo(
@@ -4460,10 +4532,30 @@ export default function HomeScreen() {
   };
   const readTodayPnl = (payload: any) => {
     const toNumber = (raw: any) => {
-      const n = Number(String(raw ?? "").replace(/,/g, ""));
+      if (raw == null || raw === "") return null;
+      const n = Number(String(raw).replace(/,/g, "").trim());
       return Number.isFinite(n) ? n : null;
     };
-    // Fast paths for the normal /bet/history response.
+    const fromTotalNode = (node: any) => {
+      if (!node || typeof node !== "object") return null;
+      // 只要官方「今日／總計」total.all.w，絕不用 page 小計。
+      return toNumber(node?.total?.all?.w ?? node?.total?.all?.win);
+    };
+    const unwrap = (node: any) => {
+      if (node == null) return null;
+      if (typeof node === "string") {
+        const t = node.trim();
+        if (!(t.startsWith("{") || t.startsWith("[")) || t.length > 200000)
+          return null;
+        try {
+          return JSON.parse(t);
+        } catch {
+          return null;
+        }
+      }
+      return typeof node === "object" ? node : null;
+    };
+    // 今日輸贏 = 官方投注報表「今日／總計」→ total.all.w（不是小計 page.w）。
     const candidates = [
       payload?.msg?.total?.all?.w,
       payload?.data?.total?.all?.w,
@@ -4471,43 +4563,38 @@ export default function HomeScreen() {
       payload?.msg?.data?.total?.all?.w,
       payload?.data?.msg?.total?.all?.w,
       payload?.body?.msg?.total?.all?.w,
+      payload?.msg?.total?.all?.win,
+      payload?.data?.total?.all?.win,
+      payload?.body?.total?.all?.win,
     ];
     for (const raw of candidates) {
       const n = toNumber(raw);
       if (n !== null) return n;
     }
-    // Some MT packets wrap msg/data/body one extra level. Find total.all.w
-    // without depending on that wrapper shape, but keep traversal shallow.
-    const seen = new Set<any>();
-    const walk = (node: any, depth: number): number | null => {
-      if (node == null || depth > 5) return null;
-      if (typeof node === "string") {
-        const t = node.trim();
-        if ((t.startsWith("{") || t.startsWith("[")) && t.length < 200000) {
-          try {
-            return walk(JSON.parse(t), depth + 1);
-          } catch {}
-        }
-        return null;
-      }
-      if (typeof node !== "object" || seen.has(node)) return null;
-      seen.add(node);
-      const direct = toNumber(node?.total?.all?.w);
+    // Shallow unwrap only — never walk into orders[]（單筆 total 會蓋掉總計）.
+    const roots = [
+      payload?.msg,
+      payload?.data,
+      payload?.body,
+      payload?.msg?.data,
+      payload?.data?.msg,
+      payload?.body?.msg,
+      payload?.result,
+      payload?.response,
+      payload,
+    ];
+    for (const root of roots) {
+      const node = unwrap(root);
+      if (!node) continue;
+      const direct = fromTotalNode(node);
       if (direct !== null) return direct;
-      for (const key of [
-        "msg",
-        "data",
-        "body",
-        "result",
-        "response",
-        "payload",
-      ]) {
-        const found = walk(node?.[key], depth + 1);
-        if (found !== null) return found;
+      for (const key of ["msg", "data", "body", "result", "response"]) {
+        const child = unwrap(node?.[key]);
+        const n = fromTotalNode(child);
+        if (n !== null) return n;
       }
-      return null;
-    };
-    return walk(payload, 0);
+    }
+    return null;
   };
   const gameSnOf = (o: any) => String(o?.gameSn ?? o?.game_sn ?? "").trim();
   const applyBetReport = (payload: any) => {
@@ -5160,14 +5247,11 @@ export default function HomeScreen() {
             rememberSettlementGameSn(p);
             if (Number.isFinite(points) && !memberWinSeen.has(key)) {
               memberWinSeen.add(key);
-              // points is whole-round account P/L: use ONLY for immediate total display, never Martingale.
-              if (todayPnlRef.current !== null) {
-                const optimistic = Number(todayPnlRef.current) + points;
-                todayPnlRef.current = optimistic;
-                setTodayPnl(optimistic);
-              }
+              // Never optimistically mutate 今日輸贏 — it must equal official
+              // bet/history total.all.w（投注報表今日總計）, not a running sum of
+              // member/win points which drifts from 總計.
               appendEvent(
-                `MT 即時結算 ${tableId || "—"} 第${round || "—"}局｜補抓官方報表`,
+                `MT 即時結算 ${tableId || "—"} 第${round || "—"}局｜補抓官方總計`,
               );
             }
             setTimeout(() => {
@@ -5370,6 +5454,24 @@ export default function HomeScreen() {
     return promise;
   };
 
+  const refreshMvLiveRooms = async () => {
+    try {
+      const r = await fetch("/api/mv/rooms");
+      const data = await r.json();
+      if (!data?.ok || !Array.isArray(data.rooms)) return;
+      const next = (data.rooms as MvRoomDto[])
+        .filter((room) => room?.name || room?.avatar)
+        .map(mvRoomToTable);
+      if (next.length) setMvLiveRooms(next);
+      appendEvent(
+        next.length
+          ? `美女直播目錄已更新（${next.length} 間）`
+          : "美女直播目錄更新失敗，沿用既有列表",
+      );
+    } catch {
+      appendEvent("美女直播目錄更新失敗，沿用既有列表");
+    }
+  };
 
   const connectRoadDashboard = async (force = false) => {
     if (!accessGranted || !accessSessionId || roadConnectBusyRef.current)
@@ -5379,6 +5481,9 @@ export default function HomeScreen() {
     const dgForeground =
       dgBridgeActiveRef.current ||
       (mtOpenRef.current && gameViewPlatformRef.current === "DG");
+    const saForeground =
+      saBridgeActiveRef.current ||
+      (mtOpenRef.current && gameViewPlatformRef.current === "SA");
     roadConnectBusyRef.current = true;
     if (!dgForeground) suppressDgRecoveryRef.current = false;
     if (force) {
@@ -5403,15 +5508,28 @@ export default function HomeScreen() {
         setDgConnected(false);
         setDgStatus("連線中");
       }
+      if (!saForeground) {
+        try {
+          saControllerRef.current?.close();
+        } catch {}
+        saControllerRef.current = null;
+        await stopSaRelayServer(accessSessionId);
+        setSaConnected(false);
+        setSaStatus("連線中");
+        saGameUrlRef.current = "";
+        saAuthPromiseRef.current = null;
+        saHasConnectedRef.current = false;
+        setSaGameUrl("");
+      }
+      // 美女直播：重新拉取主播目錄（無 WS，目錄即連線狀態）
+      void refreshMvLiveRooms();
     } else {
       if (!connected) setConnected(false);
       if (!dgForeground && !dgConnected) setDgStatus("連線中");
+      if (!saForeground && !saConnected) setSaStatus("連線中");
     }
     const needMt = force || !lockedMtUrlRef.current || !connected;
     const needDg = !dgForeground && (force || !dgGameUrl || !dgConnected);
-    const saForeground =
-      saBridgeActiveRef.current ||
-      (mtOpenRef.current && gameViewPlatformRef.current === "SA");
     const needSa = !saForeground && (force || !saGameUrl || !saConnected);
     const [mtResult, dgResult, saResult] = await Promise.allSettled([
       needMt
@@ -5454,6 +5572,7 @@ export default function HomeScreen() {
       saGameUrlRef.current = saResult.value;
       setSaGameUrl(saResult.value);
       setSaStatus("連線中");
+      if (force && !saForeground) setSaConnectEpoch((v) => v + 1);
     } else if (saResult.status === "rejected") {
       setSaConnected(false);
       setSaStatus("連線中");
@@ -5532,6 +5651,8 @@ export default function HomeScreen() {
       if (!r.ok || !data?.ok || !data?.url)
         throw new Error(String(data?.error || "同源代理啟動失敗"));
       extProxyActiveRef.current = true;
+      // Like enterDgSameSessionProxy: do not force the floating assistant offline.
+      // SA bridge status stays driven by relay connected/error/closed events.
       return String(data.url);
     } catch (error: any) {
       extProxyActiveRef.current = false;
@@ -5543,8 +5664,9 @@ export default function HomeScreen() {
     restoreRelay?: boolean;
   }) => {
     if (!extProxyActiveRef.current || !accessSessionId) return;
+    const leavingSaBridge = saBridgeActiveRef.current;
     extProxyActiveRef.current = false;
-    saBridgeActiveRef.current = false;
+    if (leavingSaBridge) saBridgeActiveRef.current = false;
     try {
       await fetch("/api/ext/proxy/leave", {
         method: "POST",
@@ -5555,6 +5677,23 @@ export default function HomeScreen() {
         }),
       });
     } catch {}
+  };
+
+  const enterSaForegroundBridge = async (gameUrl: string) => {
+    if (!accessSessionId || !gameUrl) return;
+    saBridgeActiveRef.current = true;
+    await enterSaBridgeServer(accessSessionId, gameUrl);
+  };
+
+  const leaveSaForegroundBridge = async (opts?: { restoreRelay?: boolean }) => {
+    if (!saBridgeActiveRef.current || !accessSessionId) return;
+    saBridgeActiveRef.current = false;
+    // Prefer proxy leave when an SA proxy session is active (it also leaves bridge).
+    if (extProxyActiveRef.current) {
+      await leaveExternalSameOriginProxy(opts);
+      return;
+    }
+    await leaveSaBridgeServer(accessSessionId, opts);
   };
 
   const runAutoSweepToMain = async (opts?: {
@@ -5785,7 +5924,10 @@ export default function HomeScreen() {
         }
       },
       onEvent: (message) => {
-        if (!cancelled) appendEvent(message);
+        if (cancelled) return;
+        appendEvent(message);
+        if (message === "重複登入" || /重複登入/.test(String(message || "")))
+          notify("重複登入：背景已讓出，請進入 SA，懸浮改吃遊戲資料", 4000);
       },
       onResult: (ev: SaWinReportResult) => {
         if (cancelled || !ev?.road) return;
@@ -6174,6 +6316,20 @@ export default function HomeScreen() {
         setDgConnectEpoch((v) => v + 1);
       } else if (activePlatform === "MV") {
         // Always open inside the app iframe — never window.open / 新分頁.
+        // Only LIVE rooms enter; offline / 老爺 stay on homepage with 敬請期待.
+        if (table && !table.live) {
+          const comingSoon =
+            table.category === "comingSoon" ||
+            table.name === "老爺" ||
+            /敬請期待|人家還沒好/.test(String(table.trend || ""));
+          notify(
+            comingSoon
+              ? "老爺人家還沒好，請敬請期待"
+              : "主播尚未開播，敬請期待",
+            3500,
+          );
+          return;
+        }
         // TZ LIVE77 registerAndLogin is one-time: proxy must NOT prefetch it
         // (see resolveLaunchUrl). Prefer proxy so cookies stick; else direct.
         if (isDemoPlatformToken(platformToken)) {
@@ -6237,11 +6393,11 @@ export default function HomeScreen() {
         );
         return;
       } else if (activePlatform === "SA") {
-        // TZ 授權後走同源代理，剝掉 X-Frame，讓 SA 能嵌在站內 iframe。
-        // Mirror DG: mark bridge + stop background WS BEFORE setSaGameUrl /
-        // iframe load, otherwise /api/sa/start races the game and SA kicks
-        // the session with ERR26 (登錄時效已逾時).
-        // Demo has no SALI token — do not embed bare /rm/featured (Login Failed).
+        // Perfect match with DG enter (do not change DG):
+        // 1) stop competing background relay
+        // 2) one TZ/SALI launch for the game iframe
+        // 3) same-origin proxy enterBridge — float does NOT login, only mirrors
+        // 4) do NOT close SSE / force float offline — status stays relay-driven
         if (isDemoPlatformToken(platformToken)) {
           notify(
             "演示模式無法進入 SA 遊戲畫面：請用真實 TZ 帳號登入後取得 SALI 授權",
@@ -6256,10 +6412,12 @@ export default function HomeScreen() {
         }
         gameViewPlatformRef.current = "SA";
         setGameViewPlatform("SA");
-        saBridgeActiveRef.current = true;
         if (extProxyActiveRef.current)
           await leaveExternalSameOriginProxy({ restoreRelay: false });
-        saBridgeActiveRef.current = true;
+        // Do NOT stopSaRelayServer here. Homepage float already has live tables;
+        // proxy enter → enterBridgeMode closes background PS_LOGIN (ERR26-safe)
+        // but keeps the table cache so the float stays live until game mirrors.
+        // (Stopping wiped the cache and left the float frozen on the last snapshot.)
         const url = await getExternalLoginUrlFromPlatform(
           loginPlatform,
           platformToken,
@@ -6267,29 +6425,48 @@ export default function HomeScreen() {
         );
         saGameUrlRef.current = url;
         let nextUrl = url;
+        let usedProxy = false;
         if (Platform.OS === "web") {
           try {
+            // /api/ext/proxy/enter → ensureSaRelayShell + enterBridgeMode (DG-equivalent).
             const proxyUrl = await enterExternalSameOriginProxy(url, "SA");
-            if (proxyUrl) nextUrl = proxyUrl;
-            // Only after bridge is active on the server — reconnect SSE without
-            // opening a competing background PS_LOGIN.
-            setSaGameUrl(url);
-            setSaConnectEpoch((v) => v + 1);
-          } catch {
-            // Proxy failed (e.g. Cloudflare). Still stay in-app with direct iframe.
-            saBridgeActiveRef.current = true;
-            setSaGameUrl(url);
-            setSaConnectEpoch((v) => v + 1);
-            nextUrl = url;
-            notify(
-              `已在程式內開啟${platformDisplayName("SA")}（直連授權網址）`,
+            if (proxyUrl) {
+              nextUrl = proxyUrl;
+              usedProxy = true;
+              saBridgeActiveRef.current = true;
+              appendEvent(
+                "SA 單工作階段（同 DG）：遊戲登入，懸浮只鏡像遊戲封包",
+              );
+            }
+          } catch (proxyErr: any) {
+            usedProxy = false;
+            saBridgeActiveRef.current = false;
+            appendEvent(
+              `SA 同源代理失敗：${proxyErr?.message || "unknown"}`,
             );
           }
-        } else {
+        }
+        if (!usedProxy) {
+          // Without proxy there is no mirror path — play only (no second login).
+          saBridgeActiveRef.current = true;
+          await enterSaBridgeServer(accessSessionId, url);
+          notify(
+            "SA 未進入同源代理：可遊玩，但懸浮無法即時（與 DG 單工作階段相同限制）",
+            7000,
+          );
+          gameViewUrlRef.current = nextUrl;
+          setGameViewUrl(nextUrl);
           setSaGameUrl(url);
+          setSaConnectEpoch((v) => v + 1);
+          setHasEnteredGame(true);
+          setMtOpen(true);
+          return;
         }
         gameViewUrlRef.current = nextUrl;
         setGameViewUrl(nextUrl);
+        setSaGameUrl(url);
+        // Reconnect SSE to the bridged relay (tables already cached).
+        setSaConnectEpoch((v) => v + 1);
         notify(`已轉入${platformDisplayName("SA")}`);
       } else {
         throw new Error(`不支援的平台：${activePlatform}`);
@@ -6309,15 +6486,16 @@ export default function HomeScreen() {
   const closeGameView = () => {
     const wasDg = gameViewPlatform === "DG";
     const wasMv = gameViewPlatform === "MV";
-    const wasExt =
-      gameViewPlatform === "SA" || gameViewPlatform === "MV";
+    const wasSa = gameViewPlatform === "SA";
     enteringGameWalletRef.current = false;
     mtOpenRef.current = false;
     setMtOpen(false);
     // 回牌路只關掉遊戲 iframe，背景 SSE／桌台不要整條拆掉重連。
     const leaveJobs: Promise<void>[] = [];
     if (wasDg) leaveJobs.push(leaveDgSameSessionProxy());
-    if (wasExt) leaveJobs.push(leaveExternalSameOriginProxy());
+    if (wasSa) leaveJobs.push(leaveSaForegroundBridge());
+    else if (wasMv && extProxyActiveRef.current)
+      leaveJobs.push(leaveExternalSameOriginProxy());
     void Promise.all(leaveJobs);
     // 美女直播不轉點。
     if (wasMv) return;
@@ -6518,7 +6696,9 @@ export default function HomeScreen() {
         </Pressable>
       );
     };
+    // 首頁：launcher 嵌在 overview（圖2/圖3）；進桌後才用絕對定位浮層。
     if (!radarOpen) {
+      if (!insideMt) return null;
       const bestState = bestRadar
         ? confidenceState(bestRadar.confidence)
         : null;
@@ -6527,9 +6707,15 @@ export default function HomeScreen() {
           {...radarResponder.panHandlers}
           style={[
             s.radarLauncher,
-            insideMt && s.radarLauncherMt,
+            s.radarLauncherMt,
             !desktop && s.radarLauncherMobile,
-            { transform: radarPosition.getTranslateTransform() },
+            {
+              top: radarBaseTop,
+              right: radarRightGap,
+              left: "auto" as any,
+              width: radarLauncherWidth,
+              transform: radarPosition.getTranslateTransform(),
+            },
           ]}
         >
           <MaterialIcons name="radar" size={15} color="#63C7FF" />
@@ -6594,6 +6780,46 @@ export default function HomeScreen() {
               ))}
         </ScrollView>
       </View>
+    );
+  };
+
+  const OverviewRadarLauncher = () => {
+    if (radarOpen || mtOpen) return null;
+    const bestState = bestRadar
+      ? confidenceState(bestRadar.confidence)
+      : null;
+    return (
+      <Pressable
+        onPress={() => setRadarOpen(true)}
+        style={[
+          s.radarLauncherDocked,
+          !desktop && s.radarLauncherDockedMobile,
+        ]}
+      >
+        <MaterialIcons name="radar" size={15} color="#63C7FF" />
+        <Text style={s.radarLauncherText}>多桌雷達</Text>
+        {bestRadar && bestState ? (
+          <View style={s.radarLauncherBestWrap}>
+            <View
+              style={[
+                s.signalDotSmall,
+                {
+                  backgroundColor: bestState.color,
+                  shadowColor: bestState.color,
+                },
+              ]}
+            />
+            <Text
+              style={[
+                s.radarLauncherBest,
+                { color: resultColor(bestRadar.decision.side) },
+              ]}
+            >
+              {bestRadar.id} · {bestRadar.decision.side}
+            </Text>
+          </View>
+        ) : null}
+      </Pressable>
     );
   };
 
@@ -7657,13 +7883,24 @@ export default function HomeScreen() {
               >
                 REAL-TIME MONITORING
               </Text>
-              <Text style={s.overTitle}>LIVE TABLE MATRIX</Text>
+              <View style={!desktop ? s.overTitleRowMobile : undefined}>
+                <Text style={s.overTitle}>LIVE TABLE MATRIX</Text>
+                {!desktop ? <OverviewRadarLauncher /> : null}
+              </View>
               <Text style={s.overSub}>
                 {activePlatform === "DG"
                   ? "DG 真人桌況 · 黑金牌路 · 荷官同步"
                   : "即時桌況 · 牌路分析 · 荷官同步"}
               </Text>
             </View>
+            <View
+              style={
+                desktop
+                  ? { flexDirection: "row", alignItems: "center", gap: 8 }
+                  : undefined
+              }
+            >
+            {desktop ? <OverviewRadarLauncher /> : null}
             <View style={[s.overLaunchCol, !desktop && s.overLaunchColMobile]}>
               <View style={[s.overStats, !desktop && s.overStatsMobile]}>
                 <View
@@ -7807,6 +8044,7 @@ export default function HomeScreen() {
                   {enterPlatformLabel}
                 </Text>
               </Pressable>
+            </View>
             </View>
           </View>
           <View style={s.listHead}>
@@ -8092,7 +8330,7 @@ export default function HomeScreen() {
                 </Pressable>
               </View>
               <Text style={s.modalNote}>
-                MT、DG、SA 進入牌路主頁後會自動連線並顯示即時牌路與懸浮輔助。SA／DG／美女直播進入時皆在站內 iframe 遊玩（代理失敗則直連授權網址，仍不開新分頁）。美女直播不轉點、無懸浮輔助。
+                MT、DG、SA 進入牌路主頁後會自動連線並顯示即時牌路與懸浮輔助。SA／DG／美女直播進入時皆在站內 iframe 遊玩（代理失敗則直連授權網址，仍不開新分頁）。美女直播不轉點、無懸浮輔助。重新連線會同時重連 MT／DG／SA，並刷新美女直播主播目錄。
               </Text>
               <View style={s.connectionStatusRow}>
                 <View style={s.connectionStatusCard}>
@@ -8111,10 +8349,49 @@ export default function HomeScreen() {
                   <Text
                     style={[
                       s.connectionStatusText,
-                      { color: dgConnected ? "#4BD693" : "#FFB54D" },
+                      {
+                        color:
+                          dgConnected || dgTables.length > 0
+                            ? "#4BD693"
+                            : "#FFB54D",
+                      },
                     ]}
                   >
                     {dgConnected || dgTables.length > 0 ? "已連線" : "連線中"}
+                  </Text>
+                </View>
+                <View style={s.connectionStatusCard}>
+                  <Text style={s.fieldLabel}>SA</Text>
+                  <Text
+                    style={[
+                      s.connectionStatusText,
+                      {
+                        color:
+                          saConnected || saTables.length > 0
+                            ? "#4BD693"
+                            : "#FFB54D",
+                      },
+                    ]}
+                  >
+                    {saConnected || saTables.length > 0
+                      ? "已連線"
+                      : saStatus || "連線中"}
+                  </Text>
+                </View>
+                <View style={s.connectionStatusCard}>
+                  <Text style={s.fieldLabel}>美女直播</Text>
+                  <Text
+                    style={[
+                      s.connectionStatusText,
+                      {
+                        color:
+                          mvLiveRooms.length > 0 ? "#4BD693" : "#FFB54D",
+                      },
+                    ]}
+                  >
+                    {mvLiveRooms.length > 0
+                      ? `目錄 ${mvLiveRooms.length}`
+                      : "載入中"}
                   </Text>
                 </View>
               </View>
@@ -8135,6 +8412,13 @@ export default function HomeScreen() {
               <Text style={s.fieldLabel}>DG 牌路授權網址（唯讀）</Text>
               <TextInput
                 value={readonlyConnectionUrl(dgGameUrl)}
+                editable={false}
+                selectTextOnFocus
+                style={s.modalInput}
+              />
+              <Text style={s.fieldLabel}>SA 牌路授權網址（唯讀）</Text>
+              <TextInput
+                value={readonlyConnectionUrl(saGameUrl)}
                 editable={false}
                 selectTextOnFocus
                 style={s.modalInput}
@@ -8557,6 +8841,13 @@ const s = StyleSheet.create({
     fontWeight: "900",
     marginTop: 2,
   },
+  overTitleRowMobile: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    marginTop: 2,
+  },
   overSub: { color: "#7894A8", fontSize: 9, marginTop: 3 },
   overLaunchCol: { alignItems: "stretch", gap: 8 },
   overLaunchColMobile: { width: "100%" },
@@ -8839,6 +9130,13 @@ const s = StyleSheet.create({
   },
   liveCardCtaText: { color: "#E8FFF9", fontSize: 11, fontWeight: "800" },
   liveCardCtaTextOff: { color: "#9BB8B0" },
+  liveCardSoonText: {
+    marginTop: 8,
+    color: "#9FE8D8",
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 0.4,
+  },
   tableCard: {
     backgroundColor: "#08111A",
     borderWidth: 1,
@@ -9845,9 +10143,9 @@ const s = StyleSheet.create({
   },
   confidenceText: { fontSize: 8, fontWeight: "900", textShadowRadius: 7 },
   radarLauncher: {
-    // Right side below overview (not covering MT/DG tabs). Draggable via panHandlers.
+    // 進桌後浮層初始（首頁改嵌 overview，見 radarLauncherDocked）
     position: "absolute",
-    top: 175,
+    top: 100,
     right: 14,
     left: "auto" as any,
     zIndex: 40,
@@ -9870,7 +10168,37 @@ const s = StyleSheet.create({
     cursor: "grab" as any,
   },
   radarLauncherMt: { zIndex: 9998 },
-  radarLauncherMobile: { top: 155, right: 8, left: "auto" as any, width: 188 },
+  radarLauncherMobile: { top: 100, right: 8, left: "auto" as any, width: 188 },
+  // 圖2 電腦：緊貼連線狀態左側（與 overLaunchCol 同列）
+  radarLauncherDocked: {
+    height: 32,
+    minWidth: 168,
+    maxWidth: 260,
+    paddingHorizontal: 9,
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: "#315D79",
+    backgroundColor: "rgba(7,21,33,.97)",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    shadowColor: "#63C7FF",
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 8,
+    flexShrink: 0,
+    alignSelf: "flex-start",
+    marginTop: 0,
+  },
+  // 圖3 手機：LIVE TABLE MATRIX 標題列右側
+  radarLauncherDockedMobile: {
+    minWidth: 0,
+    maxWidth: 200,
+    width: undefined as any,
+    flexShrink: 1,
+    marginLeft: 8,
+    alignSelf: "center",
+  },
   radarLauncherText: { color: "#EAF6FF", fontSize: 9, fontWeight: "900" },
   radarLauncherBestWrap: {
     marginLeft: "auto",
@@ -10656,7 +10984,9 @@ const s = StyleSheet.create({
   },
   connectionStatusRow: { flexDirection: "row", gap: 8, marginBottom: 4, flexWrap: "wrap" },
   connectionStatusCard: {
-    flex: 1,
+    flexGrow: 1,
+    flexBasis: "22%",
+    minWidth: 140,
     borderWidth: 1,
     borderColor: "#36536A",
     borderRadius: 6,

@@ -54,6 +54,14 @@ describe("platform-keyed 今日輸贏 isolation", () => {
     expect(selectPlatformTodayPnl("DG", buckets, now)).toBe(-50);
     expect(selectPlatformTodayPnl("SA", buckets, now)).toBe(25);
     expect(selectPlatformTodayPnl("MV", buckets, now)).toBeNull();
+    // SA empty day shows 0 (never bleed MT)
+    expect(
+      selectPlatformTodayPnl(
+        "SA",
+        { mt: 100, dg: null, sa: null },
+        now,
+      ),
+    ).toBe(0);
   });
 
   it("SA GameResult settlements write only the SA storage keys", () => {

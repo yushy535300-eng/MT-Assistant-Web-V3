@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
+import fs from "node:fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
@@ -415,6 +416,80 @@ async function startServer() {
     return res.json({ ok: true });
   });
 
+  // SA single-session bridge (ERR26). Stop background PS_LOGIN before the
+  // game iframe loads — including the direct-iframe path when /api/ext/proxy
+  // fails (Cloudflare). Mirror DG's /api/dg/bridge/enter contract.
+  app.post("/api/sa/bridge/enter", async (req, res) => {
+    const sessionId = String(req.body?.sessionId || "");
+    const gameUrl = String(req.body?.gameUrl || "");
+    if (!hasActiveTrackerSession(sessionId))
+      return res.status(401).json({ ok: false, error: "session_invalid" });
+    try {
+      if (gameUrl) {
+        ensureSaRelayShell(sessionId, gameUrl).enterBridgeMode();
+      } else {
+        const relay = getSaRelay(sessionId);
+        if (!relay)
+          return res.status(404).json({ ok: false, error: "relay_not_found" });
+        relay.enterBridgeMode();
+      }
+      // Let upstream WS close settle before the iframe opens PS_LOGIN.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return res.json({ ok: true });
+    } catch (e: any) {
+      return res
+        .status(500)
+        .json({ ok: false, error: e?.message || "bridge_enter_failed" });
+    }
+  });
+
+  app.post("/api/sa/bridge/leave", async (req, res) => {
+    const sessionId = String(req.body?.sessionId || "");
+    if (!hasActiveTrackerSession(sessionId))
+      return res.status(401).json({ ok: false, error: "session_invalid" });
+    const relay = getSaRelay(sessionId);
+    if (!relay) return res.status(404).json({ ok: false, error: "relay_not_found" });
+    try {
+      if (req.body?.restoreRelay === false) {
+        // Keep background WS stopped (e.g. mid-enter); do not reopen PS_LOGIN.
+        return res.json({ ok: true, restored: false });
+      }
+      await relay.leaveBridgeMode();
+      return res.json({ ok: true, restored: true });
+    } catch (e: any) {
+      return res
+        .status(500)
+        .json({ ok: false, error: e?.message || "bridge_leave_failed" });
+    }
+  });
+
+  // Game iframe keeps token A; float background switches to a DIFFERENT SALI (token B).
+  // Same-token retarget is rejected (would ERR26 the game).
+  app.post("/api/sa/bridge/retarget", async (req, res) => {
+    const sessionId = String(req.body?.sessionId || "");
+    const gameUrl = String(req.body?.gameUrl || "");
+    if (!hasActiveTrackerSession(sessionId))
+      return res.status(401).json({ ok: false, error: "session_invalid" });
+    if (!gameUrl)
+      return res.status(400).json({ ok: false, error: "game_url_required" });
+    try {
+      const existing = getSaRelay(sessionId);
+      if (!existing) {
+        // No shell yet — start float directly on token B.
+        const { relay } = await startSaRelay(sessionId, gameUrl);
+        return res.json({ ok: true, status: relay.getStatus(), mode: "start" });
+      }
+      await existing.retargetBackground(gameUrl);
+      return res.json({ ok: true, status: existing.getStatus(), mode: "retarget" });
+    } catch (e: any) {
+      const msg = e?.message || "bridge_retarget_failed";
+      const sameToken = /不同 SALI token|ERR26/i.test(msg);
+      return res
+        .status(sameToken ? 409 : 500)
+        .json({ ok: false, error: msg });
+    }
+  });
+
   // DG single-session browser bridge. When the user opens the real DG iframe,
   // stop the competing Render Chromium transport but keep the SAME relay object,
   // SSE subscribers and table cache alive. The companion extension mirrors the
@@ -477,6 +552,26 @@ async function startServer() {
   });
 
   app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
+
+  // Source zip for GitHub upload (refreshed on each ship).
+  app.get("/download/mt-assistant-github.zip", (_req, res) => {
+    const candidates = [
+      path.resolve("/opt/cursor/artifacts/mt-assistant-github.zip"),
+      path.resolve(__dirname, "../../mt_assistant_for_github.zip"),
+      path.resolve(__dirname, "../../web-dist/mt-assistant-github.zip"),
+    ];
+    for (const file of candidates) {
+      if (fs.existsSync(file)) {
+        res.setHeader("Content-Type", "application/zip");
+        res.setHeader(
+          "Content-Disposition",
+          'attachment; filename="mt-assistant-github.zip"',
+        );
+        return res.sendFile(file);
+      }
+    }
+    return res.status(404).json({ ok: false, error: "zip_not_found" });
+  });
 
   const staticDir = path.resolve(__dirname, "../../web-dist");
   const publicDir = path.resolve(__dirname, "../../public");

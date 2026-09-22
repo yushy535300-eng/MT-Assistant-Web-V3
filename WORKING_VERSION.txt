@@ -1,0 +1,4 @@
+commit=76c60e5be424dc4d5366b808016082c8024e7883
+short=76c60e5
+locked=SA float WORKING — user confirmed 2026-09-22
+message=Fix SA float freeze after enter: hop empty app.aspx to lobby

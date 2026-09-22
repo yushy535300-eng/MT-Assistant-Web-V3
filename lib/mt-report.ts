@@ -1,4 +1,11 @@
-/** MT「今日」跟官方投注報表一樣走台北曆日 00:00–24:00，不是把本地日期硬接 Z。 */
+/**
+ * MT「今日」跟官方投注報表同一套日期字串。
+ * 官方 HAR（ofalive99 bet/history）送的是台北曆日 + 字面 `.000Z`：
+ *   begin_at: "2026-09-22T00:00:00.000Z"
+ *   end_at:   "2026-09-22T23:59:59.000Z"
+ *   cur: 1
+ * 不是把 +08:00 轉成真實 UTC（那會變成 21T16:00Z → 22T15:59Z，對不到官方總計）。
+ */
 export function mtTodayReportRange(now = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Taipei",
@@ -10,7 +17,7 @@ export function mtTodayReportRange(now = new Date()) {
     parts.find((p) => p.type === type)?.value || "";
   const day = `${pick("year")}-${pick("month")}-${pick("day")}`;
   return {
-    begin_at: new Date(`${day}T00:00:00+08:00`).toISOString(),
-    end_at: new Date(`${day}T23:59:59.000+08:00`).toISOString(),
+    begin_at: `${day}T00:00:00.000Z`,
+    end_at: `${day}T23:59:59.000Z`,
   };
 }

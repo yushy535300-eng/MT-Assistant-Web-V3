@@ -184,8 +184,34 @@ export function looksLikeCloudflareBlock(
   );
 }
 
+/**
+ * TZ SALI often returns `web.sa-globalxns.com/app.aspx?...` — an API-gateway
+ * stub that answers HTTP 200 with an empty body from datacenter IPs. The real
+ * lobby SPA (where WebSocket + our inject must run) is on labplatformplus.
+ * Preserve username/token query so login still works.
+ */
+export function normalizeSaLaunchUrl(gameUrl: string | URL): URL {
+  const u = typeof gameUrl === "string" ? safePublicHttpsUrl(gameUrl) : gameUrl;
+  const host = u.hostname.toLowerCase();
+  const path = u.pathname.toLowerCase();
+  if (
+    (host === "sa-globalxns.com" || host.endsWith(".sa-globalxns.com")) &&
+    (path === "/app.aspx" || path.endsWith("/app.aspx"))
+  ) {
+    const next = new URL("https://ws2.labplatformplus.com/rm/featured");
+    u.searchParams.forEach((value, key) => {
+      if (key === "__mt_ext_sid") return;
+      next.searchParams.set(key, value);
+    });
+    return next;
+  }
+  return u;
+}
+
 async function resolveLaunchUrl(gameUrl: string, platform: ExtPlatform) {
-  const start = safePublicHttpsUrl(gameUrl);
+  const start0 = safePublicHttpsUrl(gameUrl);
+  const start =
+    platform === "SA" ? normalizeSaLaunchUrl(start0) : start0;
   if (!hostAllowed(start.hostname, PLATFORM_HOST_ALLOW[platform])) {
     // Allow TZ-issued hosts that still redirect into allowlisted domains.
     // Final host is re-checked after redirects.
@@ -193,11 +219,22 @@ async function resolveLaunchUrl(gameUrl: string, platform: ExtPlatform) {
   // LIVE77 registerAndLogin is a one-time token. Prefetching it here consumes
   // the login on the server fetch, then the iframe lands logged-out (訪客登入).
   // Hand the original URL to the browser/proxy so the first real navigation auths.
+  //
+  // SA SALI URLs with token: same rule — datacenter prefetch often hits Cloudflare
+  // and falsely fails proxy enter, forcing direct iframe (no inject → float freezes).
   if (
     platform === "MV" ||
+    platform === "SA" ||
     /registerAndLogin/i.test(start.pathname) ||
-    /[?&](?:userid|sign|time)=/i.test(start.search)
+    /[?&](?:userid|sign|time|token)=/i.test(start.search)
   ) {
+    if (
+      platform === "SA" &&
+      !hostAllowed(start.hostname, PLATFORM_HOST_ALLOW[platform])
+    ) {
+      // Still accept TZ hosts; iframe navigation will land on allowlisted origin.
+      return start;
+    }
     if (!hostAllowed(start.hostname, PLATFORM_HOST_ALLOW[platform]))
       throw new Error("host_not_allowed");
     return start;
@@ -243,13 +280,34 @@ async function resolveLaunchUrl(gameUrl: string, platform: ExtPlatform) {
   return finalUrl;
 }
 
+function sessionIdFromRequest(req: Request) {
+  const fromCookie = parseCookie(req.headers.cookie, COOKIE_NAME);
+  if (fromCookie) return fromCookie;
+  // Iframe cookie can miss on some tunnels / SameSite edges — DG stays on
+  // first-party /ddnewpc mounts; SA falls back to query sid on host-prefix URLs.
+  try {
+    const u = new URL(req.originalUrl || req.url || "", "http://localhost");
+    const q = String(u.searchParams.get("__mt_ext_sid") || "").trim();
+    if (q) return q;
+  } catch {}
+  return "";
+}
+
 function sessionFromRequest(req: Request) {
-  const sid = parseCookie(req.headers.cookie, COOKIE_NAME);
+  const sid = sessionIdFromRequest(req);
   if (!sid) return null;
   const session = proxySessions.get(sid);
   if (!session) return null;
   session.lastUsed = Date.now();
   return session;
+}
+
+/** Strip our sid helper before forwarding to the vendor. */
+function stripProxySid(target: URL) {
+  if (target.searchParams.has("__mt_ext_sid")) {
+    target.searchParams.delete("__mt_ext_sid");
+  }
+  return target;
 }
 
 function copyUpstreamHeaders(req: Request, origin: string) {
@@ -348,23 +406,50 @@ function injectProxyHook(html: string, session: ProxySession) {
   const allow = JSON.stringify(session.hostAllow);
   const hostPrefix = JSON.stringify(HOST_PREFIX);
   const wsPath = JSON.stringify(WS_PATH);
+  const mirrorSa = session.platform === "SA";
+  // SA mirrors DG's inject: wrap WebSocket, POST decoded frames to
+  // /api/sa/proxy/frames — does NOT open a second PS_LOGIN.
+  // Also mapWs through /api/ext/ws so the server can sniff frames with the
+  // correct vendor Origin (DG-equivalent dual feed: client mirror + proxy tap).
+  const saMirrorHook = mirrorSa
+    ? `const __frames=[];let __frameTimer=0,__flushing=false;\n` +
+      `const __flushFrames=async()=>{if(__flushing||!__frames.length)return;__flushing=true;clearTimeout(__frameTimer);__frameTimer=0;const frames=__frames.splice(0,64);try{await fetch(\"/api/sa/proxy/frames\",{method:\"POST\",credentials:\"include\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({frames,sessionId:__sid}),keepalive:true});}catch{}finally{__flushing=false;if(__frames.length)__frameTimer=setTimeout(__flushFrames,30);}};\n` +
+      `const __mirrorFrame=async value=>{try{let buf;if(value instanceof ArrayBuffer)buf=value;else if(ArrayBuffer.isView(value))buf=value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength);else if(typeof Blob!==\"undefined\"&&value instanceof Blob)buf=await value.arrayBuffer();else return;const bytes=new Uint8Array(buf);let binary=\"\";for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode.apply(null,bytes.subarray(i,i+32768));__frames.push(btoa(binary));if(__frames.length>=32)void __flushFrames();else if(!__frameTimer)__frameTimer=setTimeout(__flushFrames,30);}catch{}};\n`
+    : "";
+  const wsHook = mirrorSa
+    ? `const NativeWS=window.WebSocket;if(NativeWS&&!window.__MT_SA_PROXY_WS__){window.__MT_SA_PROXY_WS__=true;class MTSAWebSocket extends NativeWS{constructor(url,protocols){const raw=String(url||\"\");const mapped=mapWs(raw);if(arguments.length>1)super(mapped,protocols);else super(mapped);this.addEventListener(\"message\",event=>{void __mirrorFrame(event.data);});}}window.WebSocket=MTSAWebSocket;}\n`
+    : `const NativeWS=window.WebSocket;if(NativeWS){class MTExtWS extends NativeWS{constructor(url,protocols){const mapped=mapWs(String(url||\"\"));if(arguments.length>1)super(mapped,protocols);else super(mapped);}}window.WebSocket=MTExtWS;}\n`;
+  // Keep the iframe on /api/ext/host/... — SA often escapes via location.href /
+  // assign / replace to the vendor origin (which drops our mirror hook).
+  const stayHook = mirrorSa
+    ? `const __withSid=u=>{try{const s=String(u||\"\");if(!s||s.indexOf(__hostPrefix)!==0||s.indexOf(\"__mt_ext_sid=\")>=0)return s;return s+(s.indexOf(\"?\")>=0?\"&\":\"?\")+\"__mt_ext_sid=\"+encodeURIComponent(__sid);}catch{return u;}};\n` +
+      `const __stay=u=>{try{return __withSid(mapHttp(String(u||\"\")));}catch{return u;}};\n` +
+      `try{const _assign=location.assign.bind(location);location.assign=function(u){return _assign(__stay(u));};}catch{}\n` +
+      `try{const _replace=location.replace.bind(location);location.replace=function(u){return _replace(__stay(u));};}catch{}\n` +
+      `try{const desc=Object.getOwnPropertyDescriptor(Location.prototype,\"href\");if(desc&&desc.set){Object.defineProperty(Location.prototype,\"href\",{configurable:true,enumerable:desc.enumerable,get:desc.get,set:function(v){return desc.set.call(this,__stay(v));}});}}catch{}\n` +
+      `try{const _push=history.pushState.bind(history);history.pushState=function(s,t,u){return _push(s,t,u==null?u:__stay(u));};}catch{}\n` +
+      `try{const _rep=history.replaceState.bind(history);history.replaceState=function(s,t,u){return _rep(s,t,u==null?u:__stay(u));};}catch{}\n` +
+      `document.addEventListener(\"click\",function(ev){try{const a=ev.target&&ev.target.closest?ev.target.closest(\"a[href]\"):null;if(!a)return;const href=a.getAttribute(\"href\");if(!href||href.startsWith(\"#\")||href.startsWith(\"javascript:\"))return;const next=__stay(href);if(next&&next!==href){ev.preventDefault();location.assign(next);}}catch{}},true);\n`
+    : "";
   const hook =
     `<script>(function(){\n` +
     `const __sid=${sid},__origin=${origin},__allow=${allow},__hostPrefix=${hostPrefix},__wsPath=${wsPath};\n` +
     `if(window.__MT_EXT_PROXY__)return;window.__MT_EXT_PROXY__=true;\n` +
-    `const allowHost=(h)=>{try{const host=String(h||"").toLowerCase();return __allow.some(s=>host===s||host.endsWith("."+s));}catch{return false;}};\n` +
-    `const mapHttp=(value)=>{try{const raw=String(value||"");if(!raw)return value;const abs=raw.startsWith("//")?location.protocol+raw:raw;if(!(raw.startsWith("http://")||raw.startsWith("https://")||raw.startsWith("//")))return value;const u=new URL(abs,location.href);if(u.origin===__origin)return u.pathname+u.search+u.hash;if(allowHost(u.hostname))return __hostPrefix+"/"+u.hostname+(u.pathname||"/")+u.search+u.hash;return value;}catch{return value;}};\n` +
-    `const mapWs=(value)=>{try{const raw=String(value||"");const u=new URL(raw,location.href);if(u.protocol!=="ws:"&&u.protocol!=="wss:")return value;if(u.origin.replace(/^http/,"ws")===__origin.replace(/^http/,"ws")||allowHost(u.hostname))return __wsPath+"?target="+encodeURIComponent(u.toString());return value;}catch{return value;}};\n` +
-    `const NativeWS=window.WebSocket;if(NativeWS){class MTExtWS extends NativeWS{constructor(url,protocols){const mapped=mapWs(String(url||""));if(arguments.length>1)super(mapped,protocols);else super(mapped);}}window.WebSocket=MTExtWS;}\n` +
-    `const nativeFetch=window.fetch;if(nativeFetch){window.fetch=function(input,init){if(typeof input==="string"||input instanceof URL)return nativeFetch.call(this,mapHttp(String(input)),init);return nativeFetch.call(this,input,init);};}\n` +
+    `const allowHost=(h)=>{try{const host=String(h||\"\").toLowerCase();return __allow.some(s=>host===s||host.endsWith(\".\"+s));}catch{return false;}};\n` +
+    `const mapHttp=(value)=>{try{const raw=String(value||\"\");if(!raw)return value;const abs=raw.startsWith(\"//\")?location.protocol+raw:raw;if(!(raw.startsWith(\"http://\")||raw.startsWith(\"https://\")||raw.startsWith(\"//\")))return value;const u=new URL(abs,location.href);if(u.origin===__origin||allowHost(u.hostname)){const host=u.origin===__origin?(function(){try{return new URL(__origin).hostname;}catch{return u.hostname;}})():u.hostname;return __hostPrefix+\"/\"+host+(u.pathname||\"/\")+u.search+u.hash;}return value;}catch{return value;}};\n` +
+    `const mapWs=(value)=>{try{const raw=String(value||\"\");const u=new URL(raw,location.href);if(u.protocol!==\"ws:\"&&u.protocol!==\"wss:\")return value;if(u.origin.replace(/^http/,\"ws\")===__origin.replace(/^http/,\"ws\")||allowHost(u.hostname))return __wsPath+\"?target=\"+encodeURIComponent(u.toString())+\"&__mt_ext_sid=\"+encodeURIComponent(__sid);return value;}catch{return value;}};\n` +
+    saMirrorHook +
+    stayHook +
+    wsHook +
+    `const nativeFetch=window.fetch;if(nativeFetch){window.fetch=function(input,init){if(typeof input===\"string\"||input instanceof URL)return nativeFetch.call(this,mapHttp(String(input)),init);return nativeFetch.call(this,input,init);};}\n` +
     `const xhrOpen=window.XMLHttpRequest&&XMLHttpRequest.prototype.open;if(xhrOpen){XMLHttpRequest.prototype.open=function(method,url){const args=Array.from(arguments);args[1]=mapHttp(url);return xhrOpen.apply(this,args);};}\n` +
     `const patchUrlProp=(proto,prop)=>{try{const d=Object.getOwnPropertyDescriptor(proto,prop);if(!d||!d.set)return;Object.defineProperty(proto,prop,{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){d.set.call(this,mapHttp(v));}});}catch{}};\n` +
-    `if(window.HTMLScriptElement)patchUrlProp(HTMLScriptElement.prototype,"src");\n` +
-    `if(window.HTMLLinkElement)patchUrlProp(HTMLLinkElement.prototype,"href");\n` +
-    `if(window.HTMLImageElement)patchUrlProp(HTMLImageElement.prototype,"src");\n` +
-    `if(window.HTMLSourceElement)patchUrlProp(HTMLSourceElement.prototype,"src");\n` +
-    `if(window.HTMLVideoElement)patchUrlProp(HTMLVideoElement.prototype,"src");\n` +
-    `const setAttr=Element.prototype.setAttribute;Element.prototype.setAttribute=function(name,value){if(name==="src"||name==="href")value=mapHttp(value);return setAttr.call(this,name,value);};\n` +
+    `if(window.HTMLScriptElement)patchUrlProp(HTMLScriptElement.prototype,\"src\");\n` +
+    `if(window.HTMLLinkElement)patchUrlProp(HTMLLinkElement.prototype,\"href\");\n` +
+    `if(window.HTMLImageElement)patchUrlProp(HTMLImageElement.prototype,\"src\");\n` +
+    `if(window.HTMLSourceElement)patchUrlProp(HTMLSourceElement.prototype,\"src\");\n` +
+    `if(window.HTMLVideoElement)patchUrlProp(HTMLVideoElement.prototype,\"src\");\n` +
+    `const setAttr=Element.prototype.setAttribute;Element.prototype.setAttribute=function(name,value){if(name===\"src\"||name===\"href\")value=mapHttp(value);return setAttr.call(this,name,value);};\n` +
     `window.__MT_EXT_UPSTREAM_ORIGIN__=__origin;\n` +
     `})();</script>`;
   let page = html;
@@ -375,6 +460,8 @@ function injectProxyHook(html: string, session: ProxySession) {
   } catch {}
   if (/<head(?:\s[^>]*)?>/i.test(page))
     return page.replace(/<head(?:\s[^>]*)?>/i, (m) => m + hook);
+  if (/<html(?:\s[^>]*)?>/i.test(page))
+    return page.replace(/<html(?:\s[^>]*)?>/i, (m) => m + hook);
   return hook + page;
 }
 
@@ -384,14 +471,20 @@ function wsAccept(key: string) {
     .digest("base64");
 }
 
-/** Assemble WebSocket data frames and yield application payloads (opcode 2). */
+/**
+ * Assemble WebSocket data frames and yield application payloads (opcode 2).
+ * Handles fragmented messages (FIN=0 + continuation opcode 0) like DG ServerFrameTap.
+ */
 function createWsFrameSniffer(onBinary: (payload: Buffer) => void) {
   let buf = Buffer.alloc(0);
+  let fragments: Buffer[] = [];
+  let fragmentOpcode = 0;
   return (chunk: Buffer) => {
-    buf = Buffer.concat([buf, chunk]);
+    buf = buf.length ? Buffer.concat([buf, chunk]) : Buffer.from(chunk);
     while (buf.length >= 2) {
-      const b0 = buf[0];
-      const b1 = buf[1];
+      const b0 = buf[0]!;
+      const b1 = buf[1]!;
+      const fin = (b0 & 0x80) !== 0;
       const opcode = b0 & 0x0f;
       const masked = (b1 & 0x80) !== 0;
       let len = b1 & 0x7f;
@@ -403,27 +496,83 @@ function createWsFrameSniffer(onBinary: (payload: Buffer) => void) {
       } else if (len === 127) {
         if (buf.length < 10) return;
         const big = buf.readBigUInt64BE(2);
-        if (big > BigInt(2_000_000)) {
+        if (big > BigInt(16 * 1024 * 1024)) {
           buf = Buffer.alloc(0);
+          fragments = [];
+          fragmentOpcode = 0;
           return;
         }
         len = Number(big);
         offset = 10;
       }
+      if (len > 16 * 1024 * 1024) {
+        buf = Buffer.alloc(0);
+        fragments = [];
+        fragmentOpcode = 0;
+        return;
+      }
       const maskLen = masked ? 4 : 0;
       if (buf.length < offset + maskLen + len) return;
-      let payload = buf.subarray(offset + maskLen, offset + maskLen + len);
+      let payload = Buffer.from(
+        buf.subarray(offset + maskLen, offset + maskLen + len),
+      );
       if (masked) {
         const mask = buf.subarray(offset, offset + 4);
-        const out = Buffer.alloc(payload.length);
-        for (let i = 0; i < payload.length; i++) out[i] = payload[i] ^ mask[i % 4];
-        payload = out;
+        for (let i = 0; i < payload.length; i++)
+          payload[i]! ^= mask[i % 4]!;
       }
       buf = buf.subarray(offset + maskLen + len);
-      if (opcode === 2 && payload.length) onBinary(payload);
-      // opcode 0 continuation / 1 text / 8 close / 9 ping — ignore for roads
+      if (opcode === 0) {
+        fragments.push(payload);
+        if (fin) {
+          const full = Buffer.concat(fragments);
+          const op = fragmentOpcode;
+          fragments = [];
+          fragmentOpcode = 0;
+          if (op === 2 && full.length) onBinary(full);
+        }
+        continue;
+      }
+      if (!fin && (opcode === 1 || opcode === 2)) {
+        fragmentOpcode = opcode;
+        fragments = [payload];
+        continue;
+      }
+      if (fin && opcode === 2 && payload.length) onBinary(payload);
+      // opcode 1 text / 8 close / 9 ping / 10 pong — ignore for roads
     }
   };
+}
+
+/** When sa-globalxns app.aspx returns empty, hop the iframe to the real SPA. */
+function saEmptyDocumentBootstrap(session: ProxySession, from: URL) {
+  let lobby: URL;
+  try {
+    lobby = normalizeSaLaunchUrl(session.launchUrl || from.toString());
+  } catch {
+    lobby = new URL("https://ws2.labplatformplus.com/rm/featured");
+    from.searchParams.forEach((v, k) => {
+      if (k !== "__mt_ext_sid") lobby.searchParams.set(k, v);
+    });
+  }
+  if (/sa-globalxns\.com$/i.test(lobby.hostname)) {
+    const next = new URL("https://ws2.labplatformplus.com/rm/featured");
+    lobby.searchParams.forEach((v, k) => next.searchParams.set(k, v));
+    lobby = next;
+  }
+  const dest = `${HOST_PREFIX}/${lobby.hostname}${lobby.pathname}${lobby.search}${
+    lobby.search ? "&" : "?"
+  }__mt_ext_sid=${encodeURIComponent(session.sessionId)}`;
+  const html =
+    `<!DOCTYPE html><html><head><meta charset="utf-8"/>` +
+    `<meta http-equiv="refresh" content="0;url=${dest}"/>` +
+    `<script>try{location.replace(${JSON.stringify(dest)});}catch(e){}</script>` +
+    `</head><body></body></html>`;
+  return injectProxyHook(html, {
+    ...session,
+    origin: lobby.origin,
+    launchUrl: lobby.toString(),
+  });
 }
 
 async function proxyHttp(
@@ -432,6 +581,21 @@ async function proxyHttp(
   session: ProxySession,
   target: URL,
 ) {
+  stripProxySid(target);
+  // Even if the iframe still requests empty app.aspx, hop to the real SPA.
+  if (
+    session.platform === "SA" &&
+    /sa-globalxns\.com$/i.test(target.hostname) &&
+    /app\.aspx$/i.test(target.pathname)
+  ) {
+    console.log(
+      `[ext proxy] SA empty-gateway hop｜${target.pathname}→/rm/featured｜session=${session.sessionId.slice(0, 8)}`,
+    );
+    return res
+      .status(200)
+      .type("html")
+      .send(saEmptyDocumentBootstrap(session, target));
+  }
   if (
     target.protocol !== "https:" ||
     isPrivateHost(target.hostname) ||
@@ -465,18 +629,28 @@ async function proxyHttp(
     const location = upstream.headers.get("location");
     if (location && upstream.status >= 300 && upstream.status < 400) {
       const next = new URL(location, target);
+      // SA must stay under /api/ext/host/... so inject/mirror keeps working
+      // (bare /rm paths can miss mounts; bare / hits our SPA).
+      const saMapped = (u: URL) => {
+        const q = u.search || "";
+        const sidQ = q
+          ? `${q}&__mt_ext_sid=${encodeURIComponent(session.sessionId)}`
+          : `?__mt_ext_sid=${encodeURIComponent(session.sessionId)}`;
+        return `${HOST_PREFIX}/${u.hostname}${u.pathname}${sidQ}`;
+      };
       if (next.origin === session.origin) {
-        res
-          .status(upstream.status)
-          .setHeader("Location", next.pathname + next.search)
-          .end();
+        const loc =
+          session.platform === "SA"
+            ? saMapped(next)
+            : next.pathname + next.search;
+        res.status(upstream.status).setHeader("Location", loc).end();
         return;
       }
       if (hostAllowed(next.hostname, session.hostAllow)) {
         const mapped =
-          next.origin === session.origin
-            ? next.pathname + next.search
-            : `${HOST_PREFIX}/${next.hostname}${next.pathname}${next.search}`;
+          session.platform === "SA" || next.origin !== session.origin
+            ? saMapped(next)
+            : next.pathname + next.search;
         res.status(upstream.status).setHeader("Location", mapped).end();
         return;
       }
@@ -484,38 +658,86 @@ async function proxyHttp(
       return;
     }
     const contentType = upstream.headers.get("content-type") || "";
-    const isHtml =
+    const fetchDest = String(req.headers["sec-fetch-dest"] || "").toLowerCase();
+    const isNavigate =
+      fetchDest === "document" ||
+      fetchDest === "iframe" ||
+      String(req.headers["sec-fetch-mode"] || "").toLowerCase() === "navigate";
+    let isHtml =
       /text\/html|application\/xhtml\+xml/i.test(contentType) ||
       /(?:^|\/)index\.html$/i.test(target.pathname) ||
-      /\.aspx$/i.test(target.pathname);
+      /\.aspx$/i.test(target.pathname) ||
+      (session.platform === "SA" && isNavigate && !/\.(js|css|json|png|jpe?g|gif|webp|svg|woff2?|ttf|ico|map)(\?|$)/i.test(target.pathname));
+    // SA gateways often serve the lobby shell with a non-HTML Content-Type
+    // (same class of bug DG fixed for index.html). Peek the body when unsure.
     res.status(upstream.status);
     forwardResponseHeaders(upstream, res, isHtml);
-    if (
-      req.method === "HEAD" ||
-      upstream.status === 204 ||
-      upstream.status === 304 ||
-      !upstream.body
-    )
+    if (req.method === "HEAD" || upstream.status === 204 || upstream.status === 304) {
       return res.end();
-    if (isHtml) {
-      const html = await upstream.text();
-      if (looksLikeCloudflareBlock(html, upstream.status, upstream.headers)) {
-        console.error(
-          `[EXT proxy] Cloudflare blocked upstream｜${session.platform} ${target}`,
+    }
+    if (!upstream.body) {
+      if (session.platform === "SA" && isNavigate) {
+        console.log(
+          `[ext proxy] SA empty body hop｜${target.pathname}｜session=${session.sessionId.slice(0, 8)}`,
         );
         return res
-          .status(502)
-          .type("json")
-          .send(
-            JSON.stringify({
-              ok: false,
-              error: "cloudflare_blocked",
-              message:
-                "Upstream blocked by Cloudflare from this server IP. Open the game URL in a browser tab instead.",
-            }),
-          );
+          .status(200)
+          .type("html")
+          .send(saEmptyDocumentBootstrap(session, target));
       }
-      res.type("html").send(injectProxyHook(html, session));
+      return res.end();
+    }
+    if (isHtml || session.platform === "SA") {
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      if (!buf.length && session.platform === "SA") {
+        console.log(
+          `[ext proxy] SA zero-byte hop｜${target.pathname}｜session=${session.sessionId.slice(0, 8)}`,
+        );
+        return res
+          .status(200)
+          .type("html")
+          .send(saEmptyDocumentBootstrap(session, target));
+      }
+      const head = buf.subarray(0, 2048).toString("utf8").trimStart();
+      const looksHtml =
+        isHtml ||
+        /^<!DOCTYPE/i.test(head) ||
+        /^<html/i.test(head) ||
+        /^<\?xml/i.test(head) ||
+        /^<!--/i.test(head) ||
+        /<(?:html|head|body|script|meta|title|link|div|app)\b/i.test(head);
+      if (looksHtml) {
+        const html = buf.toString("utf8");
+        if (looksLikeCloudflareBlock(html, upstream.status, upstream.headers)) {
+          console.error(
+            `[EXT proxy] Cloudflare blocked upstream｜${session.platform} ${target}`,
+          );
+          return res
+            .status(502)
+            .type("json")
+            .send(
+              JSON.stringify({
+                ok: false,
+                error: "cloudflare_blocked",
+                message:
+                  "Upstream blocked by Cloudflare from this server IP. Open the game URL in a browser tab instead.",
+              }),
+            );
+        }
+        if (session.platform === "SA") {
+          console.log(
+            `[ext proxy] SA inject HTML｜${target.pathname}｜session=${session.sessionId.slice(0, 8)}`,
+          );
+        }
+        res.type("html").send(injectProxyHook(html, session));
+        return;
+      }
+      if (session.platform === "SA") {
+        console.log(
+          `[ext proxy] SA skip inject｜ct=${contentType.slice(0, 40)}｜path=${target.pathname}｜head=${JSON.stringify(head.slice(0, 60))}｜session=${session.sessionId.slice(0, 8)}`,
+        );
+      }
+      res.send(buf);
       return;
     }
     Readable.fromWeb(upstream.body as any).pipe(res);
@@ -542,7 +764,8 @@ function handleWsUpgrade(
     return;
   }
   if (parsed.pathname !== WS_PATH) return;
-  const sid = parseCookie(req.headers.cookie, COOKIE_NAME);
+  const sid = parseCookie(req.headers.cookie, COOKIE_NAME)
+    || String(parsed.searchParams.get("__mt_ext_sid") || "").trim();
   const session = sid ? proxySessions.get(sid) : null;
   if (!session || !options.hasActiveSession(session.sessionId)) {
     client.end("HTTP/1.1 401 Unauthorized\r\n\r\n");
@@ -602,10 +825,23 @@ function handleWsUpgrade(
         if (head?.length) upSocket.write(head);
         if (upHead?.length) client.write(upHead);
 
+        if (session.platform === "SA") {
+          console.log(
+            `[ext proxy] SA WS 101｜host=${target.hostname}｜session=${session.sessionId.slice(0, 8)}｜sniff=${!!options.onSaUpstreamPacket}`,
+          );
+        }
+
+        let sniffLogged = false;
         const sniffSa =
           session.platform === "SA" && !!options.onSaUpstreamPacket
             ? createWsFrameSniffer((packet) => {
                 try {
+                  if (!sniffLogged) {
+                    sniffLogged = true;
+                    console.log(
+                      `[ext proxy] SA sniff first frame ${packet.length}b｜session=${session.sessionId.slice(0, 8)}`,
+                    );
+                  }
                   options.onSaUpstreamPacket?.(session.sessionId, packet);
                 } catch {}
               })
@@ -657,6 +893,51 @@ function handleWsUpgrade(
 export function registerExternalGameProxy(options: RegisterOptions) {
   const { app, server, hasActiveSession } = options;
 
+  // Mirror binary frames the SA page already received (browser-decoded) into the
+  // road relay. Does not open a second PS_LOGIN — same single-session as DG.
+  // Auth: proxy cookie OR body.sessionId (iframe cookie misses on some tunnels).
+  app.post("/api/sa/proxy/frames", (req: Request, res: Response) => {
+    let session = sessionFromRequest(req);
+    if (!session) {
+      const sid = String(req.body?.sessionId || "").trim();
+      if (sid) {
+        const byBody = proxySessions.get(sid);
+        if (byBody) {
+          byBody.lastUsed = Date.now();
+          session = byBody;
+        }
+      }
+    }
+    if (!session || session.platform !== "SA" || !hasActiveSession(session.sessionId))
+      return res.status(401).json({ ok: false, error: "session_invalid" });
+    if (!options.onSaUpstreamPacket)
+      return res.status(503).json({ ok: false, error: "mirror_unavailable" });
+    const frames = Array.isArray(req.body?.frames) ? req.body.frames : [];
+    if (!frames.length || frames.length > 64)
+      return res.status(400).json({ ok: false, error: "invalid_frames" });
+    let accepted = 0;
+    for (const raw of frames) {
+      if (typeof raw !== "string" || raw.length > 2_000_000) continue;
+      try {
+        const data = Buffer.from(raw, "base64");
+        if (!data.length || data.length > 1_500_000) continue;
+        options.onSaUpstreamPacket(session.sessionId, data);
+        accepted++;
+      } catch {}
+    }
+    if (accepted > 0) {
+      const key = `_mirrorLog_${session.sessionId}`;
+      const g = globalThis as any;
+      if (!g[key]) {
+        g[key] = true;
+        console.log(
+          `[ext proxy] SA mirror frames ok｜accepted=${accepted}｜session=${session.sessionId.slice(0, 8)}`,
+        );
+      }
+    }
+    return res.json({ ok: true, accepted });
+  });
+
   const sameOriginHandler = async (req: Request, res: Response) => {
     const session = sessionFromRequest(req);
     if (!session || !hasActiveSession(session.sessionId))
@@ -668,8 +949,14 @@ export function registerExternalGameProxy(options: RegisterOptions) {
 
   app.use(HOST_PREFIX + "/:host", async (req: Request, res: Response) => {
     const session = sessionFromRequest(req);
-    if (!session || !hasActiveSession(session.sessionId))
+    if (!session || !hasActiveSession(session.sessionId)) {
+      if (String(req.params.host || "")) {
+        console.warn(
+          `[ext proxy] SA/MV host 401｜host=${req.params.host}｜hasCookie=${!!parseCookie(req.headers.cookie, COOKIE_NAME)}｜path=${String(req.url || "").slice(0, 80)}`,
+        );
+      }
       return res.status(401).send("ext proxy session expired");
+    }
     const host = String(req.params.host || "").toLowerCase();
     if (!hostAllowed(host, session.hostAllow))
       return res.status(400).send("host not allowed");
@@ -682,6 +969,16 @@ export function registerExternalGameProxy(options: RegisterOptions) {
       target = new URL(`https://${host}${pathAndQuery}`);
     } catch {
       return res.status(400).send("bad host path");
+    }
+    if (session.platform === "SA") {
+      const key = `_hostHit_${session.sessionId}`;
+      const g = globalThis as any;
+      if (!g[key]) {
+        g[key] = true;
+        console.log(
+          `[ext proxy] SA host first hit｜${host}${target.pathname}｜session=${session.sessionId.slice(0, 8)}`,
+        );
+      }
     }
     return proxyHttp(req, res, session, target);
   });
@@ -745,9 +1042,20 @@ export function registerExternalGameProxy(options: RegisterOptions) {
       "Set-Cookie",
       `${COOKIE_NAME}=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=14400${proxyCookieSecureAttr(req)}`,
     );
+    // SA: always load via /api/ext/host/<hostname>/... so EVERY HTML response
+    // hits proxyHttp + inject (DG mounts /ddnewpc; SA hosts vary and bare
+    // pathname can fall through to our SPA without the mirror hook).
+    // Embed __mt_ext_sid so iframe auth works even when the proxy cookie misses.
+    const iframeUrl =
+      platform === "SA"
+        ? (() => {
+            const path = `${HOST_PREFIX}/${finalUrl.hostname}${finalUrl.pathname || "/"}${finalUrl.search}`;
+            return `${path}${finalUrl.search ? "&" : "?"}__mt_ext_sid=${encodeURIComponent(sessionId)}`;
+          })()
+        : finalUrl.pathname + finalUrl.search;
     return res.json({
       ok: true,
-      url: finalUrl.pathname + finalUrl.search,
+      url: iframeUrl,
       origin: finalUrl.origin,
       platform,
     });

@@ -713,6 +713,8 @@ export type SaSpLogin = {
   lobbyCode: string;
   reconnectKey: string;
   username: string;
+  /** Non-zero = another session holds / contested this account (重複登入). */
+  duplicateLogin: number;
 };
 
 export function parseSpLogin(payload: Buffer): SaSpLogin | null {
@@ -721,7 +723,7 @@ export function parseSpLogin(payload: Buffer): SaSpLogin | null {
     const playerId = r.i64();
     const lobbyCode = r.str();
     r.str(); // CurrencyDisplayName
-    r.u8(); // DuplicateLogin
+    const duplicateLogin = r.u8(); // DuplicateLogin
     r.u64(); // PlayerPrefs
     r.u64(); // CurrencyType
     const curN = r.u8();
@@ -730,7 +732,7 @@ export function parseSpLogin(payload: Buffer): SaSpLogin | null {
     const reconnectKey = r.str();
     r.i64(); // MinimumToken
     const username = r.str();
-    return { playerId, lobbyCode, reconnectKey, username };
+    return { playerId, lobbyCode, reconnectKey, username, duplicateLogin };
   } catch {
     return null;
   }
