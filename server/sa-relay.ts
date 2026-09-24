@@ -9,6 +9,7 @@ import {
   SA_GAME_TYPE_BACCARAT,
   buildCsAck,
   buildPsLogin,
+  buildPsBetRecordSummaryQueryUtc,
   buildRequestInitClient,
   countResults,
   extractSaAuth,
@@ -22,19 +23,24 @@ import {
   parseScGameState,
   parseScInitBaccarat,
   parseScInitNewBaccarat,
+  parseSpBetRecordSummaryQuery,
   parseSpHostList,
   parseSpLogin,
+  sumSaBetRecordTodayPnl,
+  saBetLogTodayRange,
   mergeSaInitRound,
   nextSaRoundAfterHand,
   shoeRoundFromGameCount,
   type SaRoadResult,
 } from "./sa-protocol";
+import { type PlatformDailyPnl } from "../lib/platform-report";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SA_TABLE_LABELS: Record<string, string> = (() => {
   const candidates = [
+    join(process.cwd(), "sa-table-labels.json"),
     join(process.cwd(), "server/sa-table-labels.json"),
     join(dirname(fileURLToPath(import.meta.url)), "sa-table-labels.json"),
   ];
@@ -160,6 +166,11 @@ class SaRelay {
   /** gameId → GameStart gameCount (shoe*10000+round) for float round sync. */
   private gameToCount = new Map<number, number>();
   private initRetryTimer: ReturnType<typeof setInterval> | null = null;
+  /** Official BetRecord day total (sum ResultAmount/100) — same as 投注記錄. */
+  private dailyPnl: PlatformDailyPnl | null = null;
+  private betRecordTimer: ReturnType<typeof setInterval> | null = null;
+  private betRecordInFlight = false;
+  private betRecordRequestAt = 0;
 
   constructor(
     readonly sessionId: string,
@@ -175,6 +186,75 @@ class SaRelay {
 
   getStatus() {
     return this.status;
+  }
+
+  getDailyPnl() {
+    return this.dailyPnl;
+  }
+
+  /** Frame for iframe inject / background WS — official today BetRecord (UTC). */
+  buildBetLogSummaryRequestFrame() {
+    // Method name kept for proxy inject compatibility.
+    const { fromMs, toMs } = saBetLogTodayRange();
+    return buildPsBetRecordSummaryQueryUtc(fromMs, toMs);
+  }
+
+  /** Pull official 今日輸贏 from 投注記錄 BetRecord summary. */
+  requestBetLogSummary(force = false) {
+    if (this.stopped) return false;
+    if (this.bridge) return false; // foreground inject owns the send
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    const age = Date.now() - this.betRecordRequestAt;
+    if (!force && this.betRecordInFlight && age < 800) return false;
+    this.betRecordInFlight = true;
+    this.betRecordRequestAt = Date.now();
+    try {
+      this.ws.send(this.buildBetLogSummaryRequestFrame());
+      return true;
+    } catch {
+      this.betRecordInFlight = false;
+      return false;
+    }
+  }
+
+  private startBetLogRefresh() {
+    if (this.betRecordTimer) clearInterval(this.betRecordTimer);
+    this.requestBetLogSummary(true);
+    // Heartbeat: keep float = 投注記錄 date-row 贏/輸 (incl. midnight → 0).
+    this.betRecordTimer = setInterval(() => {
+      if (this.stopped || this.bridge) return;
+      this.requestBetLogSummary();
+    }, 2000);
+  }
+
+  private clearBetLogRefresh() {
+    if (this.betRecordTimer) clearInterval(this.betRecordTimer);
+    this.betRecordTimer = null;
+    this.betRecordInFlight = false;
+  }
+
+  private applyBetRecordSummary(payload: Buffer) {
+    this.betRecordInFlight = false;
+    const { day } = saBetLogTodayRange();
+    const rows = parseSpBetRecordSummaryQuery(payload);
+    const value = Math.round(sumSaBetRecordTodayPnl(rows, day));
+    const next: PlatformDailyPnl = {
+      value,
+      day,
+      updatedAt: Date.now(),
+    };
+    const changed =
+      !this.dailyPnl ||
+      this.dailyPnl.day !== next.day ||
+      this.dailyPnl.value !== next.value;
+    this.dailyPnl = next;
+    // Always broadcast so the float refreshes even when value is unchanged after settle race.
+    this.broadcast("pnl", next);
+    if (changed) {
+      this.event(
+        `SA 今日輸贏同步｜投注記錄 ${value > 0 ? "+" : ""}${value.toLocaleString()}`,
+      );
+    }
   }
 
   matchesToken(token: string) {
@@ -215,6 +295,14 @@ class SaRelay {
     this.clients.add(client);
     this.sendTo(client, "status", { status: this.status, message: this.statusMessage });
     if (this.map.size) this.sendTo(client, "tables", this.tables());
+    // Same as DG: push current official 今日輸贏 on subscribe so the float
+    // never waits for the next heartbeat after SSE reconnect.
+    const { day } = saBetLogTodayRange();
+    this.sendTo(
+      client,
+      "pnl",
+      this.dailyPnl?.day === day ? this.dailyPnl : null,
+    );
     return () => {
       this.clients.delete(client);
     };
@@ -453,6 +541,7 @@ class SaRelay {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.clearAck();
+    this.clearBetLogRefresh();
     try {
       this.ws?.close();
     } catch {}
@@ -545,12 +634,14 @@ class SaRelay {
           : "SA 登入成功，正在同步桌台",
       );
       this.log(`Login ok｜user=${login?.username || this.username || "?"}`);
+      this.startBetLogRefresh();
       return;
     }
 
     if (cmdId === SA_CMD.SP_LOGIN_FAIL) {
       this.authFailed = true;
       this.clearAck();
+      this.clearBetLogRefresh();
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
       try {
@@ -560,6 +651,15 @@ class SaRelay {
       this.setStatus("error", "SA 授權失效，請重新進入平台取得新 token");
       this.event("SA 登入被拒（token 無效或過期）");
       this.log("Login fail｜停止重連，等待新授權");
+      return;
+    }
+
+    if (cmdId === SA_CMD.SP_BET_RECORD_SUMMARY_QUERY) {
+      this.applyBetRecordSummary(payload);
+      return;
+    }
+    if (cmdId === SA_CMD.SP_BET_LOG_SUMMARY_QUERY) {
+      // Ignore legacy BetLog — display source is BetRecord only.
       return;
     }
 
@@ -762,6 +862,11 @@ class SaRelay {
       if (!this.map.has(hostId)) this.ensureTable(hostId);
       if (gr.road) this.applyRoadResult(hostId, gr.road, key, gr.poker, gr.gameId);
       else if (gr.poker) this.applyPokerOnly(hostId, gr.poker);
+      // After a settled hand, re-pull official BetRecord so 今日輸贏 matches 投注記錄.
+      // Background WS path; bridge mode relies on iframe inject (see proxy hook).
+      setTimeout(() => this.requestBetLogSummary(true), 300);
+      setTimeout(() => this.requestBetLogSummary(true), 900);
+      setTimeout(() => this.requestBetLogSummary(true), 2000);
       return;
     }
 
@@ -1056,6 +1161,7 @@ class SaRelay {
     if (this.initRetryTimer) clearInterval(this.initRetryTimer);
     this.initRetryTimer = null;
     this.clearAck();
+    this.clearBetLogRefresh();
     try {
       this.ws?.close();
     } catch {}

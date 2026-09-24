@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MT Assistant 設定</title>
+    <style>
+      :root {
+        --bg: #0b1520;
+        --panel: #132233;
+        --line: #31506a;
+        --text: #edf6ff;
+        --muted: #9bb0c0;
+        --accent: #2e7ceb;
+        --danger: #c44141;
+        --ok: #2f9e6d;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Segoe UI", "Microsoft JhengHei", sans-serif;
+      }
+      .wrap { padding: 20px 22px 28px; max-width: 540px; margin: 0 auto; }
+      .head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+      .head img { width: 44px; height: 44px; border-radius: 10px; }
+      h1 { margin: 0; font-size: 18px; font-weight: 800; }
+      .sub { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+      .section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 14px 16px;
+        margin-bottom: 10px;
+      }
+      .section h2 {
+        margin: 0 0 10px;
+        font-size: 13px;
+        letter-spacing: 0.04em;
+        color: #c9d8e4;
+      }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+      .row:last-child { margin-bottom: 0; }
+      label.field { display: block; font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+      .seg {
+        display: inline-flex;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .seg button {
+        border: 0;
+        background: transparent;
+        color: var(--text);
+        padding: 9px 14px;
+        font-size: 12px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .seg button.active { background: var(--accent); }
+      select, input[type="number"] {
+        background: #0a1622;
+        border: 1px solid var(--line);
+        color: var(--text);
+        border-radius: 7px;
+        padding: 8px 10px;
+        font-size: 13px;
+        min-width: 0;
+      }
+      .size-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .size-grid label {
+        font-size: 11px;
+        color: var(--muted);
+        display: block;
+        margin-bottom: 4px;
+      }
+      .check {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        margin: 8px 0;
+        font-size: 13px;
+        line-height: 1.35;
+        cursor: pointer;
+      }
+      .check input { margin-top: 2px; width: 16px; height: 16px; }
+      .hint {
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.45;
+        margin-top: 8px;
+      }
+      .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+      .btn {
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 14px;
+        font-size: 12px;
+        font-weight: 800;
+        cursor: pointer;
+        color: #fff;
+      }
+      .btn-primary { background: var(--accent); }
+      .btn-muted { background: #344553; }
+      .btn-danger { background: var(--danger); }
+      .btn:disabled { opacity: 0.55; cursor: default; }
+      .status { margin-top: 10px; font-size: 12px; color: var(--ok); min-height: 18px; }
+      .danger-note {
+        font-size: 11px;
+        color: #f0b4b4;
+        margin-bottom: 8px;
+        line-height: 1.4;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="head">
+        <img id="logo" src="./icon.png" alt="" />
+        <div>
+          <h1>程式設定</h1>
+          <p class="sub">顯示、視窗、啟動與卸載</p>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>顯示模式</h2>
+        <div class="seg" id="modeSeg">
+          <button type="button" data-mode="fullscreen">全螢幕</button>
+          <button type="button" data-mode="windowed">視窗化</button>
+        </div>
+        <p class="hint">快捷鍵：F11 切換全螢幕／視窗</p>
+      </div>
+
+      <div class="section" id="sizeSection">
+        <h2>視窗大小</h2>
+        <label class="field">常用尺寸</label>
+        <div class="row">
+          <select id="preset">
+            <option value="1280x720">1280 × 720</option>
+            <option value="1366x768">1366 × 768</option>
+            <option value="1440x900">1440 × 900</option>
+            <option value="1600x1000">1600 × 1000</option>
+            <option value="1920x1080">1920 × 1080</option>
+            <option value="custom">自訂…</option>
+          </select>
+        </div>
+        <div class="size-grid">
+          <div>
+            <label for="width">寬度</label>
+            <input id="width" type="number" min="1024" max="3840" step="10" />
+          </div>
+          <div>
+            <label for="height">高度</label>
+            <input id="height" type="number" min="640" max="2160" step="10" />
+          </div>
+        </div>
+        <div class="actions" style="margin-top: 12px">
+          <button class="btn btn-primary" id="applySize" type="button">套用視窗大小</button>
+          <button class="btn btn-muted" id="centerWin" type="button">置中視窗</button>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="rememberPosition" />
+          <span>記住視窗位置（下次開啟還原）</span>
+        </label>
+      </div>
+
+      <div class="section">
+        <h2>畫面縮放</h2>
+        <div class="row">
+          <select id="zoom">
+            <option value="0.8">80%</option>
+            <option value="0.9">90%</option>
+            <option value="1">100%（預設）</option>
+            <option value="1.1">110%</option>
+            <option value="1.25">125%</option>
+            <option value="1.5">150%</option>
+          </select>
+          <button class="btn btn-muted" id="zoomReset" type="button">重設 100%</button>
+        </div>
+        <p class="hint">快捷鍵：Ctrl + / Ctrl - 縮放，Ctrl 0 重設</p>
+      </div>
+
+      <div class="section">
+        <h2>行為</h2>
+        <label class="check">
+          <input type="checkbox" id="alwaysOnTop" />
+          <span>視窗永遠置頂（看牌路時不被其他視窗蓋住）</span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="openAtLogin" />
+          <span>開機時自動啟動 MT Assistant</span>
+        </label>
+        <div class="actions" style="margin-top: 10px">
+          <button class="btn btn-muted" id="clearCache" type="button">清除快取</button>
+        </div>
+        <p class="hint">畫面異常或登入卡住時，可先清快取再開一次。</p>
+      </div>
+
+      <div class="section">
+        <h2>卸載程式</h2>
+        <p class="danger-note">
+          開啟 Windows 解除安裝精靈，從這台電腦移除 MT Assistant（與控制台卸載相同）。
+        </p>
+        <button class="btn btn-danger" id="uninstall" type="button">卸載 MT Assistant…</button>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-muted" id="closeBtn" type="button">關閉</button>
+      </div>
+      <div class="status" id="status"></div>
+    </div>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $("status");
+      let settings = {
+        displayMode: "fullscreen",
+        width: 1440,
+        height: 900,
+        rememberPosition: true,
+        alwaysOnTop: false,
+        zoomFactor: 1,
+        openAtLogin: false,
+      };
+
+      function setStatus(msg, ok = true) {
+        statusEl.style.color = ok ? "var(--ok)" : "#f0b4b4";
+        statusEl.textContent = msg || "";
+      }
+
+      function nearestZoomOption(z) {
+        const opts = [0.8, 0.9, 1, 1.1, 1.25, 1.5];
+        let best = opts[0];
+        let dist = Math.abs(z - best);
+        for (const o of opts) {
+          const d = Math.abs(z - o);
+          if (d < dist) {
+            best = o;
+            dist = d;
+          }
+        }
+        return String(best);
+      }
+
+      function syncUi() {
+        document.querySelectorAll("#modeSeg button").forEach((btn) => {
+          btn.classList.toggle("active", btn.dataset.mode === settings.displayMode);
+        });
+        $("width").value = settings.width;
+        $("height").value = settings.height;
+        const key = settings.width + "x" + settings.height;
+        const preset = $("preset");
+        const known = [...preset.options].some((o) => o.value === key);
+        preset.value = known ? key : "custom";
+        $("zoom").value = nearestZoomOption(Number(settings.zoomFactor) || 1);
+        $("rememberPosition").checked = !!settings.rememberPosition;
+        $("alwaysOnTop").checked = !!settings.alwaysOnTop;
+        $("openAtLogin").checked = !!settings.openAtLogin;
+        const windowed = settings.displayMode === "windowed";
+        $("sizeSection").style.opacity = windowed ? "1" : "0.55";
+        $("applySize").disabled = !windowed;
+        $("centerWin").disabled = !windowed;
+        $("width").disabled = !windowed;
+        $("height").disabled = !windowed;
+        preset.disabled = !windowed;
+      }
+
+      async function load() {
+        if (!window.mtDesktop) {
+          setStatus("無法連到桌面主程式", false);
+          return;
+        }
+        settings = await window.mtDesktop.getSettings();
+        syncUi();
+        if (window.mtDesktop.onSettingsChanged) {
+          window.mtDesktop.onSettingsChanged((next) => {
+            settings = next;
+            syncUi();
+          });
+        }
+      }
+
+      document.querySelectorAll("#modeSeg button").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          settings = await window.mtDesktop.setSettings({
+            displayMode: btn.dataset.mode,
+          });
+          syncUi();
+          setStatus(
+            settings.displayMode === "fullscreen"
+              ? "已切換為全螢幕"
+              : "已切換為視窗化",
+          );
+        });
+      });
+
+      $("preset").addEventListener("change", () => {
+        const v = $("preset").value;
+        if (v === "custom") return;
+        const parts = v.split("x").map(Number);
+        $("width").value = parts[0];
+        $("height").value = parts[1];
+      });
+
+      $("applySize").addEventListener("click", async () => {
+        const width = Math.max(1024, Number($("width").value) || 1440);
+        const height = Math.max(640, Number($("height").value) || 900);
+        settings = await window.mtDesktop.setSettings({
+          displayMode: "windowed",
+          width,
+          height,
+        });
+        syncUi();
+        setStatus("已套用 " + settings.width + " × " + settings.height);
+      });
+
+      $("centerWin").addEventListener("click", async () => {
+        settings = await window.mtDesktop.setSettings({ center: true });
+        syncUi();
+        setStatus("視窗已置中");
+      });
+
+      $("zoom").addEventListener("change", async () => {
+        settings = await window.mtDesktop.setSettings({
+          zoomFactor: Number($("zoom").value),
+        });
+        syncUi();
+        setStatus("縮放 " + Math.round(settings.zoomFactor * 100) + "%");
+      });
+
+      $("zoomReset").addEventListener("click", async () => {
+        settings = await window.mtDesktop.setSettings({ zoomFactor: 1 });
+        syncUi();
+        setStatus("縮放已重設為 100%");
+      });
+
+      $("rememberPosition").addEventListener("change", async () => {
+        settings = await window.mtDesktop.setSettings({
+          rememberPosition: $("rememberPosition").checked,
+        });
+        setStatus(
+          settings.rememberPosition ? "已開啟記住視窗位置" : "已關閉記住視窗位置",
+        );
+      });
+
+      $("alwaysOnTop").addEventListener("change", async () => {
+        settings = await window.mtDesktop.setSettings({
+          alwaysOnTop: $("alwaysOnTop").checked,
+        });
+        setStatus(settings.alwaysOnTop ? "已開啟永遠置頂" : "已關閉永遠置頂");
+      });
+
+      $("openAtLogin").addEventListener("change", async () => {
+        settings = await window.mtDesktop.setSettings({
+          openAtLogin: $("openAtLogin").checked,
+        });
+        setStatus(
+          settings.openAtLogin ? "已設定開機自動啟動" : "已取消開機自動啟動",
+        );
+      });
+
+      $("clearCache").addEventListener("click", async () => {
+        const result = await window.mtDesktop.clearCache();
+        if (result && result.ok) setStatus("快取已清除");
+        else setStatus((result && result.error) || "清除失敗", false);
+      });
+
+      $("uninstall").addEventListener("click", async () => {
+        const result = await window.mtDesktop.uninstall();
+        if (result && result.ok) setStatus("已開啟卸載程式");
+        else setStatus((result && result.error) || "找不到卸載程式", false);
+      });
+
+      $("closeBtn").addEventListener("click", () => window.close());
+      document.getElementById("logo").onerror = function () {
+        this.style.display = "none";
+      };
+
+      load();
+    </script>
+  </body>
+</html>

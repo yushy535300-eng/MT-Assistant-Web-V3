@@ -19,7 +19,7 @@ export function reportHistoryStorageKey(platform: ReportPlatformKey) {
   return `report.history.${platform}`;
 }
 
-/** GMT+8 calendar day — same boundary DG already uses. */
+/** GMT+8 calendar day — same boundary as SA 站內「今天」00:00:00–23:59:59 UTC+8. */
 export function reportDay(now = Date.now()) {
   return new Date(now + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }

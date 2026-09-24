@@ -13,7 +13,8 @@
     "build": "pnpm export:web && pnpm build:server",
     "start": "NODE_ENV=production node dist/server/index.js",
     "check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:desktop:win": "node scripts/build-desktop-win.mjs"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",

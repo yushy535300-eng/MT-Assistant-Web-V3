@@ -1,0 +1,70 @@
+{
+  "name": "mt-assistant-desktop",
+  "version": "1.0.8",
+  "private": true,
+  "description": "MT Assistant Windows app — Render cloud shell with settings",
+  "main": "main.cjs",
+  "author": "MT Assistant",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "pack:win": "electron-builder --win nsis --x64"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  },
+  "dependencies": {
+    "png-to-ico": "^3.0.2"
+  },
+  "build": {
+    "appId": "app.mtassistant.desktop",
+    "productName": "MT Assistant",
+    "copyright": "MT Assistant",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "splash.html",
+      "settings.html",
+      "icon.png",
+      "package.json",
+      "build/icon.png",
+      "build/icon.ico"
+    ],
+    "extraResources": [
+      { "from": "build/icon.ico", "to": "icon.ico" },
+      { "from": "build/icon.png", "to": "icon.png" }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "artifactName": "MT-Assistant-Setup-${version}.exe",
+      "signAndEditExecutable": true
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MT Assistant",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "installerHeader": "build/installerHeader.bmp",
+      "installerSidebar": "build/installerSidebar.bmp",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "language": "1028",
+      "installerLanguages": ["zh_TW", "en_US"]
+    },
+    "forceCodeSigning": false,
+    "compression": "maximum",
+    "asar": true
+  }
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mtTodayReportRange } from "../lib/mt-report";
+import { mtTodayReportDay, mtTodayReportRange } from "../lib/mt-report";
 
 describe("MT today report range", () => {
   it("matches official ofalive99 bet/history date strings (Taipei day + literal Z)", () => {
@@ -8,6 +8,7 @@ describe("MT today report range", () => {
     const range = mtTodayReportRange(now);
     expect(range.begin_at).toBe("2026-09-22T00:00:00.000Z");
     expect(range.end_at).toBe("2026-09-22T23:59:59.000Z");
+    expect(mtTodayReportDay(now)).toBe("2026-09-22");
   });
 
   it("keeps calendar day across Taipei midnight boundary", () => {
@@ -18,10 +19,12 @@ describe("MT today report range", () => {
       begin_at: "2026-09-21T00:00:00.000Z",
       end_at: "2026-09-21T23:59:59.000Z",
     });
+    expect(mtTodayReportDay(still21)).toBe("2026-09-21");
     const day22 = new Date("2026-09-21T16:30:00.000Z");
     expect(mtTodayReportRange(day22)).toEqual({
       begin_at: "2026-09-22T00:00:00.000Z",
       end_at: "2026-09-22T23:59:59.000Z",
     });
+    expect(mtTodayReportDay(day22)).toBe("2026-09-22");
   });
 });

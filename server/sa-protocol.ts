@@ -27,7 +27,22 @@ export const SA_CMD = {
   CS_ACK: 35002,
   PS_LOGIN: 55001,
   PS_REQUEST_INIT_CLIENT: 55010,
+  /** Legacy string-date BetRecord summary (still accepted by some builds). */
+  PS_BET_RECORD_SUMMARY_QUERY: 55106,
+  /**
+   * Official 投注記錄 summary the SA SPA actually sends (BetRecord date-row 贏/輸).
+   * Vendor: CMDPsBetRecordSummaryQueryUtc + moment startOf/endOf('day') Asia/Taipei.
+   */
+  PS_BET_RECORD_SUMMARY_QUERY_UTC: 55112,
+  /** Shared reply for both 55106 / 55112. */
+  SP_BET_RECORD_SUMMARY_QUERY: 50144,
+  /** Legacy BetLog day summary (not the BetRecord menu the player opens). */
+  PS_BET_LOG_SUMMARY_QUERY: 55097,
+  SP_BET_LOG_SUMMARY_QUERY: 50127,
 } as const;
+
+/** Vendor BetRecord QUERY_RECENT_ROUND — same constant the SPA uses. */
+export const SA_BET_RECORD_RECENT_ROUND = 10;
 
 /** Vendor TableMode (InitBaccarat.Rest / ScGameRest.OnOrOff). */
 export const SA_TABLE_MODE = {
@@ -506,6 +521,223 @@ export function buildRequestInitClient(hostIds: number[]) {
   w.u8(ids.length);
   for (const id of ids) w.u16(id);
   return wrapCommand(SA_CMD.PS_REQUEST_INIT_CLIENT, w.toBuffer());
+}
+
+/**
+ * Legacy string-date BetRecord summary (cmd 55106). Prefer the UTC builder —
+ * that is what the in-game 「投注記錄」menu actually sends.
+ */
+export function buildPsBetRecordSummaryQuery(
+  fromDate: string,
+  toDate: string,
+  recentRound = SA_BET_RECORD_RECENT_ROUND,
+) {
+  const w = new ByteWriter();
+  w.str(fromDate);
+  w.str(toDate);
+  w.u32(recentRound);
+  return wrapCommand(SA_CMD.PS_BET_RECORD_SUMMARY_QUERY, w.toBuffer());
+}
+
+/**
+ * Official SA 投注記錄 BetRecord summary (cmd 55112 UTC) — identical request
+ * shape to the vendor SPA BetRecord date picker for 「今天」.
+ * FromDateTime/ToDateTime = Taipei day start/end as unix ms (writeUint53).
+ */
+export function buildPsBetRecordSummaryQueryUtc(
+  fromMs: number,
+  toMs: number,
+  recentRound = SA_BET_RECORD_RECENT_ROUND,
+) {
+  const w = new ByteWriter();
+  w.u64(Math.trunc(fromMs));
+  w.u64(Math.trunc(toMs));
+  w.u32(recentRound);
+  return wrapCommand(SA_CMD.PS_BET_RECORD_SUMMARY_QUERY_UTC, w.toBuffer());
+}
+
+/** @deprecated Prefer BetRecord; kept for fixtures/compat. */
+export function buildPsBetLogSummaryQuery(fromDate: string, toDate: string) {
+  const w = new ByteWriter();
+  w.str(fromDate);
+  w.str(toDate);
+  return wrapCommand(SA_CMD.PS_BET_LOG_SUMMARY_QUERY, w.toBuffer());
+}
+
+export type SaBetRecordSummaryRow = {
+  reportTime: number;
+  /** YYYY-MM-DD in Taipei (from ReportTime), same as BetRecord UI date group. */
+  reportDate: string;
+  gameId: number;
+  hostId: number;
+  /** Raw ResultAmount (display = /100). */
+  resultAmountRaw: number;
+  betAmountRaw: number;
+};
+
+function saTaipeiDayFromMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  // Vendor moment(timestamp) treats ReportTime as unix ms.
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(ms));
+  const pick = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === type)?.value || "";
+  return `${pick("year")}-${pick("month")}-${pick("day")}`;
+}
+
+/**
+ * Parse SP_BET_RECORD_SUMMARY_QUERY (50144).
+ * Layout (vendor CMDBetRecordSummary): ReportTime(i64) | FGameID(u64) | HostID(u16)
+ * | GameCount(u32) | GameType(i64) | State(u8) | Result(S) | WinSlot(i64)
+ * | BetAmount(i64) | RollingAmount(i64) | ResultAmount(i64) | Remark(S).
+ * UI day 贏/輸 = sum(ResultAmount)/100 for that Taipei date.
+ */
+export function parseSpBetRecordSummaryQuery(
+  payload: Buffer,
+): SaBetRecordSummaryRow[] {
+  if (!payload || payload.length < 4) return [];
+  try {
+    const r = new ByteReader(payload);
+    const n = r.u32();
+    const out: SaBetRecordSummaryRow[] = [];
+    for (let i = 0; i < n && r.remaining > 0; i++) {
+      const reportTime = r.i64();
+      if (r.remaining < 8) break;
+      const fGameId = r.u64();
+      if (r.remaining < 2 + 4 + 8 + 1) break;
+      const hostId = r.u16();
+      const gameCount = r.u32();
+      void gameCount;
+      const gameType = r.i64();
+      void gameType;
+      const state = r.u8();
+      void state;
+      const result = r.str();
+      void result;
+      if (r.remaining < 32) break;
+      const winSlot = r.i64();
+      void winSlot;
+      const betAmountRaw = r.i64();
+      const rollingRaw = r.i64();
+      void rollingRaw;
+      const resultAmountRaw = r.i64();
+      const remark = r.str();
+      void remark;
+      out.push({
+        reportTime,
+        reportDate: saTaipeiDayFromMs(reportTime),
+        gameId: Number(fGameId),
+        hostId,
+        resultAmountRaw,
+        betAmountRaw,
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+export type SaBetLogDaySummary = {
+  reportDate: string;
+  /** Display units (ResultAmount / 100). */
+  resultAmount: number;
+  rollingAmount: number;
+  turnOverAmount: number;
+};
+
+/**
+ * Parse SP_BET_LOG_SUMMARY_QUERY (50127) — legacy day rows.
+ */
+export function parseSpBetLogSummaryQuery(
+  payload: Buffer,
+): SaBetLogDaySummary[] {
+  if (!payload || payload.length < 4) return [];
+  try {
+    const r = new ByteReader(payload);
+    const n = r.u32();
+    const out: SaBetLogDaySummary[] = [];
+    for (let i = 0; i < n && r.remaining >= 1; i++) {
+      const reportDate = r.str();
+      if (r.remaining < 24) break;
+      const resultRaw = r.i64();
+      const rollingRaw = r.i64();
+      const turnOverRaw = r.i64();
+      out.push({
+        reportDate: String(reportDate || "").trim(),
+        resultAmount: resultRaw / 100,
+        rollingAmount: rollingRaw / 100,
+        turnOverAmount: turnOverRaw / 100,
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Taipei calendar day range for SA report queries (matches vendor SPA). */
+export function saBetLogTodayRange(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const pick = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === type)?.value || "";
+  const day = `${pick("year")}-${pick("month")}-${pick("day")}`;
+  // Same bounds as moment.tz(day,'Asia/Taipei').startOf/endOf('day').valueOf()
+  // used by CMDPsBetRecordSummaryQueryUtc in the vendor SPA.
+  const fromMs = Date.parse(`${day}T00:00:00+08:00`);
+  const toMs = Date.parse(`${day}T23:59:59.999+08:00`);
+  return {
+    day,
+    fromDate: `${day} 00:00:00`,
+    toDate: `${day} 23:59:59`,
+    fromMs,
+    toMs,
+  };
+}
+
+/**
+ * BetRecord UI date-row 贏/輸 = sum(ResultAmount of that day) / 100.
+ * Empty day → 0 (matches official 投注記錄 after midnight).
+ */
+export function sumSaBetRecordTodayPnl(
+  rows: SaBetRecordSummaryRow[],
+  day: string,
+): number {
+  let raw = 0;
+  let hit = false;
+  for (const row of rows) {
+    const d = String(row.reportDate || "").trim().slice(0, 10);
+    if (d !== day) continue;
+    if (!Number.isFinite(row.resultAmountRaw)) continue;
+    raw += row.resultAmountRaw;
+    hit = true;
+  }
+  if (!hit) return 0;
+  return raw / 100;
+}
+
+/** @deprecated Prefer sumSaBetRecordTodayPnl. */
+export function pickSaTodayResultAmount(
+  rows: SaBetLogDaySummary[],
+  day: string,
+): number {
+  for (const row of rows) {
+    const d = String(row.reportDate || "")
+      .trim()
+      .replace(/\//g, "-")
+      .slice(0, 10);
+    if (d === day && Number.isFinite(row.resultAmount)) return row.resultAmount;
+  }
+  return 0;
 }
 
 export type SaHostInfo = { hostId: number; setting: number; gameType: number };

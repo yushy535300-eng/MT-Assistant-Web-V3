@@ -57,6 +57,12 @@ describe("wallet transfer around enter and leave", () => {
     expect(source).not.toContain("YABOZR");
     expect(closeFn).toContain("pullAllGameWalletsToMain");
     expect(closeFn).toContain("void Promise.all(leaveJobs);");
+    // 回牌路 gate only — must clear pendingAutoEnter (no auto-enter after leave).
+    expect(closeFn).toContain("pendingAutoEnterRef.current = false");
+    expect(closeFn).toContain("setWalletTransferBusy(true)");
+    // Enter-time 轉點 then open game in the same openCurrentPlatform call.
+    expect(openFn).toContain("pendingAutoEnterRef.current = true");
+    expect(openFn).toMatch(/quickSweepToMain[\s\S]*setMtOpen\(true\)/);
     expect(source.slice(execStart, execStart + 800)).toContain("transferAllToMainWallet");
     expect(source).toContain("onPress={confirmTransferAll}");
     expect(source).not.toMatch(/hasEnteredGame\s*&&/);

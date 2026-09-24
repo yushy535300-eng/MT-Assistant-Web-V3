@@ -3,6 +3,7 @@ import type { Server as HttpServer, IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
+import { getSaRelay } from "./sa-relay";
 
 export type ExtPlatform = "SA" | "MV";
 
@@ -414,10 +415,18 @@ function injectProxyHook(html: string, session: ProxySession) {
   const saMirrorHook = mirrorSa
     ? `const __frames=[];let __frameTimer=0,__flushing=false;\n` +
       `const __flushFrames=async()=>{if(__flushing||!__frames.length)return;__flushing=true;clearTimeout(__frameTimer);__frameTimer=0;const frames=__frames.splice(0,64);try{await fetch(\"/api/sa/proxy/frames\",{method:\"POST\",credentials:\"include\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({frames,sessionId:__sid}),keepalive:true});}catch{}finally{__flushing=false;if(__frames.length)__frameTimer=setTimeout(__flushFrames,30);}};\n` +
-      `const __mirrorFrame=async value=>{try{let buf;if(value instanceof ArrayBuffer)buf=value;else if(ArrayBuffer.isView(value))buf=value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength);else if(typeof Blob!==\"undefined\"&&value instanceof Blob)buf=await value.arrayBuffer();else return;const bytes=new Uint8Array(buf);let binary=\"\";for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode.apply(null,bytes.subarray(i,i+32768));__frames.push(btoa(binary));if(__frames.length>=32)void __flushFrames();else if(!__frameTimer)__frameTimer=setTimeout(__flushFrames,30);}catch{}};\n`
+      `const __mirrorFrame=async value=>{try{let buf;if(value instanceof ArrayBuffer)buf=value;else if(ArrayBuffer.isView(value))buf=value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength);else if(typeof Blob!==\"undefined\"&&value instanceof Blob)buf=await value.arrayBuffer();else return;const bytes=new Uint8Array(buf);let binary=\"\";for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode.apply(null,bytes.subarray(i,i+32768));__frames.push(btoa(binary));if(__frames.length>=32)void __flushFrames();else if(!__frameTimer)__frameTimer=setTimeout(__flushFrames,30);}catch{}};\n` +
+      `let __pnlSocket=null,__pnlBusy=false,__pnlLocked=false;\n` +
+      // Parse SA 0xaa cmdId (u16le at offset 5). Lock the authenticated game
+      // socket on SP_LOGIN (50001) — same idea as DG locking on cmd=10086 —
+      // so BetRecord 今日輸贏 never goes to a chat/video secondary WS.
+      `function __saCmdId(value){try{let buf;if(value instanceof ArrayBuffer)buf=new Uint8Array(value);else if(ArrayBuffer.isView(value))buf=new Uint8Array(value.buffer,value.byteOffset,value.byteLength);else return 0;if(!buf||buf.length<7||buf[0]!==0xaa)return 0;return buf[5]|(buf[6]<<8);}catch{return 0;}}\n` +
+      `async function __saPnlPoll(){const ws=__pnlSocket;if(__pnlBusy||!ws||ws.readyState!==1)return;__pnlBusy=true;try{const r=await fetch(\"/api/sa/proxy/report-request\",{method:\"POST\",credentials:\"include\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({sessionId:__sid})});if(!r.ok)return;const data=await r.json();if(data.frame&&ws===__pnlSocket&&ws.readyState===1){const bytes=Uint8Array.from(atob(data.frame),c=>c.charCodeAt(0));NativeWS.prototype.send.call(ws,bytes);}}catch{}finally{__pnlBusy=false;}}\n` +
+      `function __saPnlReceive(ws,event){try{const cmd=__saCmdId(event.data);if(cmd===50001){__pnlSocket=ws;__pnlLocked=true;setTimeout(__saPnlPoll,400);}else if(cmd===30006){setTimeout(__saPnlPoll,250);setTimeout(__saPnlPoll,900);}}catch{}}\n` +
+      `const __pnlTimer=setInterval(__saPnlPoll,2000);window.addEventListener(\"pagehide\",()=>{clearInterval(__pnlTimer);__pnlSocket=null;__pnlLocked=false;},{once:true});\n`
     : "";
   const wsHook = mirrorSa
-    ? `const NativeWS=window.WebSocket;if(NativeWS&&!window.__MT_SA_PROXY_WS__){window.__MT_SA_PROXY_WS__=true;class MTSAWebSocket extends NativeWS{constructor(url,protocols){const raw=String(url||\"\");const mapped=mapWs(raw);if(arguments.length>1)super(mapped,protocols);else super(mapped);this.addEventListener(\"message\",event=>{void __mirrorFrame(event.data);});}}window.WebSocket=MTSAWebSocket;}\n`
+    ? `const NativeWS=window.WebSocket;if(NativeWS&&!window.__MT_SA_PROXY_WS__){window.__MT_SA_PROXY_WS__=true;class MTSAWebSocket extends NativeWS{constructor(url,protocols){const raw=String(url||\"\");const mapped=mapWs(raw);if(arguments.length>1)super(mapped,protocols);else super(mapped);this.addEventListener(\"open\",()=>{if(!__pnlLocked){__pnlSocket=this;setTimeout(__saPnlPoll,600);}});this.addEventListener(\"message\",event=>{void __mirrorFrame(event.data);__saPnlReceive(this,event);});}}window.WebSocket=MTSAWebSocket;}\n`
     : `const NativeWS=window.WebSocket;if(NativeWS){class MTExtWS extends NativeWS{constructor(url,protocols){const mapped=mapWs(String(url||\"\"));if(arguments.length>1)super(mapped,protocols);else super(mapped);}}window.WebSocket=MTExtWS;}\n`;
   // Keep the iframe on /api/ext/host/... — SA often escapes via location.href /
   // assign / replace to the vendor origin (which drops our mirror hook).
@@ -936,6 +945,36 @@ export function registerExternalGameProxy(options: RegisterOptions) {
       }
     }
     return res.json({ ok: true, accepted });
+  });
+
+  // Official SA BetRecord summary frame for iframe inject (今日輸贏 = 投注記錄).
+  app.post("/api/sa/proxy/report-request", (req: Request, res: Response) => {
+    let session = sessionFromRequest(req);
+    if (!session) {
+      const sid = String(req.body?.sessionId || "").trim();
+      if (sid) {
+        const byBody = proxySessions.get(sid);
+        if (byBody) {
+          byBody.lastUsed = Date.now();
+          session = byBody;
+        }
+      }
+    }
+    if (!session || session.platform !== "SA" || !hasActiveSession(session.sessionId))
+      return res.status(401).json({ ok: false, error: "session_invalid" });
+    const relay = getSaRelay(session.sessionId);
+    if (!relay) return res.status(404).json({ ok: false, error: "relay_missing" });
+    try {
+      const frame = relay.buildBetLogSummaryRequestFrame();
+      return res.json({
+        ok: true,
+        frame: Buffer.from(frame).toString("base64"),
+      });
+    } catch (error: any) {
+      return res
+        .status(500)
+        .json({ ok: false, error: String(error?.message || error) });
+    }
   });
 
   const sameOriginHandler = async (req: Request, res: Response) => {

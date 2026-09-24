@@ -557,6 +557,7 @@ async function startServer() {
   app.get("/download/mt-assistant-github.zip", (_req, res) => {
     const candidates = [
       path.resolve("/opt/cursor/artifacts/mt-assistant-github.zip"),
+      path.resolve(__dirname, "../../public/download/mt-assistant-github.zip"),
       path.resolve(__dirname, "../../mt_assistant_for_github.zip"),
       path.resolve(__dirname, "../../web-dist/mt-assistant-github.zip"),
     ];
@@ -567,14 +568,133 @@ async function startServer() {
           "Content-Disposition",
           'attachment; filename="mt-assistant-github.zip"',
         );
+        res.setHeader("Cache-Control", "no-store");
         return res.sendFile(file);
       }
     }
     return res.status(404).json({ ok: false, error: "zip_not_found" });
   });
 
-  const staticDir = path.resolve(__dirname, "../../web-dist");
-  const publicDir = path.resolve(__dirname, "../../public");
+  // Explicit locked-good-version alias (same bytes as github zip after ship).
+  app.get("/download/MT-Assistant-locked.zip", (_req, res) => {
+    const candidates = [
+      path.resolve("/opt/cursor/artifacts/mt-assistant-github.zip"),
+      path.resolve(__dirname, "../../public/download/mt-assistant-github.zip"),
+      path.resolve(__dirname, "../../web-dist/mt-assistant-github.zip"),
+    ];
+    for (const file of candidates) {
+      if (fs.existsSync(file)) {
+        res.setHeader("Content-Type", "application/zip");
+        res.setHeader(
+          "Content-Disposition",
+          'attachment; filename="MT-Assistant-locked.zip"',
+        );
+        res.setHeader("Cache-Control", "no-store");
+        return res.sendFile(file);
+      }
+    }
+    return res.status(404).json({ ok: false, error: "zip_not_found" });
+  });
+
+  // Windows desktop installer (NSIS) — plain Setup.exe, runs normally after install.
+  // App encrypts local user data at rest (not the download zip).
+  app.get("/download/MT-Assistant-Setup.exe", (_req, res) => {
+    const candidates: string[] = [
+      path.resolve("/opt/cursor/artifacts/MT-Assistant-Setup.exe"),
+      path.resolve(__dirname, "../../web-dist/MT-Assistant-Setup.exe"),
+    ];
+    try {
+      const releaseDir = path.resolve(__dirname, "../../desktop/release");
+      if (fs.existsSync(releaseDir)) {
+        for (const name of fs.readdirSync(releaseDir)) {
+          if (/^MT-Assistant-Setup-.*\.exe$/i.test(name) && !/\.blockmap$/i.test(name)) {
+            candidates.push(path.join(releaseDir, name));
+          }
+        }
+      }
+    } catch {}
+    let best: { file: string; mtime: number } | null = null;
+    for (const file of candidates) {
+      try {
+        const st = fs.statSync(file);
+        if (!st.isFile() || st.size < 5_000_000) continue;
+        if (!best || st.mtimeMs > best.mtime) best = { file, mtime: st.mtimeMs };
+      } catch {}
+    }
+    if (!best) return res.status(404).json({ ok: false, error: "setup_exe_not_found" });
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="MT-Assistant-Setup.exe"',
+    );
+    return res.sendFile(best.file);
+  });
+
+  // Legacy encrypted-zip URL → redirect people to the plain installer.
+  app.get("/download/MT-Assistant-Setup.zip", (_req, res) => {
+    return res.redirect(302, "/download/MT-Assistant-Setup.exe");
+  });
+
+  // Windows desktop portable exe (Electron) — single-file.
+  app.get("/download/MT-Assistant-portable.exe", (_req, res) => {
+    const candidates = [
+      path.resolve("/opt/cursor/artifacts/MT-Assistant-portable.exe"),
+      path.resolve(
+        __dirname,
+        "../../desktop/release/MT-Assistant-1.0.0-portable.exe",
+      ),
+      path.resolve(__dirname, "../../web-dist/MT-Assistant-portable.exe"),
+    ];
+    try {
+      const releaseDir = path.resolve(__dirname, "../../desktop/release");
+      if (fs.existsSync(releaseDir)) {
+        for (const name of fs.readdirSync(releaseDir)) {
+          if (/portable\.exe$/i.test(name)) {
+            candidates.unshift(path.join(releaseDir, name));
+          }
+        }
+      }
+    } catch {}
+    for (const file of candidates) {
+      if (fs.existsSync(file)) {
+        res.setHeader("Content-Type", "application/octet-stream");
+        res.setHeader(
+          "Content-Disposition",
+          'attachment; filename="MT-Assistant-portable.exe"',
+        );
+        return res.sendFile(file);
+      }
+    }
+    return res.status(404).json({ ok: false, error: "exe_not_found" });
+  });
+
+  // Windows desktop folder zip (extract → MT Assistant.exe).
+  app.get("/download/MT-Assistant-Windows.zip", (_req, res) => {
+    const candidates = [
+      path.resolve("/opt/cursor/artifacts/MT-Assistant-Windows.zip"),
+      path.resolve(__dirname, "../../MT-Assistant-Windows.zip"),
+      path.resolve(__dirname, "../../web-dist/MT-Assistant-Windows.zip"),
+    ];
+    for (const file of candidates) {
+      if (fs.existsSync(file)) {
+        res.setHeader("Content-Type", "application/zip");
+        res.setHeader(
+          "Content-Disposition",
+          'attachment; filename="MT-Assistant-Windows.zip"',
+        );
+        return res.sendFile(file);
+      }
+    }
+    return res.status(404).json({ ok: false, error: "windows_zip_not_found" });
+  });
+
+  // Desktop (Electron) sets MT_WEB_DIST / MT_PUBLIC_DIR to extraResources.
+  const staticDir = path.resolve(
+    process.env.MT_WEB_DIST || path.resolve(__dirname, "../../web-dist"),
+  );
+  const publicDir = path.resolve(
+    process.env.MT_PUBLIC_DIR || path.resolve(__dirname, "../../public"),
+  );
   // Streamer avatars for 美女直播 cards (same-origin; score777 CDN is CF-blocked here).
   app.use(
     "/mv-hosts",
@@ -590,7 +710,10 @@ async function startServer() {
   });
 
   const port = Number(process.env.PORT || 3000);
-  server.listen(port, "0.0.0.0", () => console.log(`[MT Assistant] http://localhost:${port}`));
+  const host = process.env.MT_LISTEN_HOST || "0.0.0.0";
+  server.listen(port, host, () =>
+    console.log(`[MT Assistant] http://127.0.0.1:${port}`),
+  );
 }
 
 startServer().catch((error) => {

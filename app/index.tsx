@@ -48,10 +48,11 @@ import { connectSaLive, type SaTableData, type SaWinReportResult } from "@/lib/s
 import {
   saWinReportTableMatches,
   saWinReportToSettleBody,
+  applySaOfficialPnl,
 } from "@/lib/sa-report";
 import { collectConfirmedMtTableIds } from "@/lib/mt-table-membership";
 import { type DgDailyPnl } from "@/lib/dg-report";
-import { mtTodayReportRange } from "@/lib/mt-report";
+import { mtTodayReportDay, mtTodayReportRange } from "@/lib/mt-report";
 import { saTableLabel } from "@/lib/sa-table-labels";
 import {
   applySaReportSettlement,
@@ -59,6 +60,7 @@ import {
   loadPlatformReport,
   resetPlatformReport,
   saResultMatchesPending,
+  savePlatformReport,
   selectPlatformTodayPnl,
   type PlatformReportBucket,
   type ReportPlatformKey,
@@ -3428,8 +3430,15 @@ export default function HomeScreen() {
   const [walletTransferBusy, setWalletTransferBusy] = useState(false);
   const walletTransferBusyRef = useRef(false);
   const enteringGameWalletRef = useRef(false);
+  /** Animated trailing dots for「轉點中...」while login sweep runs. */
+  const [transferDots, setTransferDots] = useState(".");
   const [loginSweepDone, setLoginSweepDone] = useState(false);
   const loginSweepDoneRef = useRef(false);
+  /** After「轉點中...」finishes, open the platform once without a second click. */
+  const pendingAutoEnterRef = useRef(false);
+  const openCurrentPlatformRef = useRef<(table?: TableData) => Promise<void>>(
+    async () => {},
+  );
   const [floatingOpen, setFloatingOpen] = useState(false);
   const [roomDropdownOpen, setRoomDropdownOpen] = useState(false);
   const roomDropdownOpenRef = useRef(false);
@@ -4376,58 +4385,66 @@ export default function HomeScreen() {
     });
   };
 
-  /** SA-only: GameResult feed → report.pnl.SA / report.history.SA (never MT/DG). */
+  /** SA-only: GameResult → 立刻寫入懸浮「今日輸贏」(report.pnl.SA)。
+   * 跟 DG 一樣：結算當下浮窗就要動。之後官方 BetRecord 心跳再覆寫成報表總計。 */
   const settleSaFromGameResult = (ev: SaWinReportResult) => {
-    setPendingBet((pending) => {
-      if (!pending) return pending;
-      if (pending.reportPlatform && pending.reportPlatform !== "SA") return pending;
-      if (!saResultMatchesPending(ev, pending.tableId)) return pending;
-      const key = `gs:${ev.gameId}`;
-      if (pending.resultKey && pending.resultKey === key) return pending;
-      const { pnl, outcome } = computeBaccaratBetPnl(
-        pending.side,
-        ev.road,
-        pending.amount,
-      );
-      const entry = {
-        side: pending.side,
-        result: ev.road as Result,
-        amount: pending.amount,
-        pnl,
-        at: Date.now(),
-        tableId: pending.tableId,
-        resultKey: key,
-        gameId: ev.gameId,
-      };
-      const next = applySaReportSettlement(saReportRef.current, entry);
-      saReportRef.current = next;
-      setSaReport(next);
-      setBankroll((v) => Math.round(v + pnl));
-      if (outcome !== "push") {
-        setStrategyLevel((level) => {
-          if (strategy === "馬丁") return level;
-          if (strategy === "達朗貝爾")
-            return outcome === "loss"
-              ? Math.min(level + 1, 20)
-              : Math.max(0, level - 1);
-          if (strategy === "Fibonacci")
-            return outcome === "loss"
-              ? Math.min(level + 1, 10)
-              : Math.max(0, level - 2);
-          if (strategy === "Paroli")
-            return outcome === "win" ? (level >= 2 ? 0 : level + 1) : 0;
-          if (strategy === "1-3-2-6")
-            return outcome === "win" ? (level >= 3 ? 0 : level + 1) : 0;
-          return level;
-        });
-      }
-      appendEvent(
-        `SA 輸贏報表 ${pending.tableId}：押${pending.side} ${pending.amount}，開${ev.road}，損益 ${pnl}`,
-      );
-      // Keep settlePending shape available for diagnostics (does not touch MT/DG stores).
-      void saWinReportToSettleBody(ev, pending.tableId);
-      return null;
-    });
+    const pending = pendingBetRef.current;
+    if (!pending) return;
+    if (pending.reportPlatform && pending.reportPlatform !== "SA") return;
+    if (
+      !saResultMatchesPending(ev, pending.tableId) &&
+      !saWinReportTableMatches(ev, pending.tableId)
+    ) {
+      return;
+    }
+    const key = `gs:${ev.gameId}`;
+    if (pending.resultKey && pending.resultKey === key) return;
+    const { pnl, outcome } = computeBaccaratBetPnl(
+      pending.side,
+      ev.road,
+      pending.amount,
+    );
+    const entry = {
+      side: pending.side,
+      result: ev.road as Result,
+      amount: pending.amount,
+      pnl,
+      at: Date.now(),
+      tableId: pending.tableId,
+      resultKey: key,
+      gameId: ev.gameId,
+    };
+    const next = applySaReportSettlement(saReportRef.current, entry);
+    saReportRef.current = next;
+    // Clear pending first so a duplicate GameResult cannot double-settle.
+    pendingBetRef.current = null;
+    setPendingBet(null);
+    // Immediate float update — same tick as GameResult (DG-like).
+    setSaReport(next);
+    setBankroll((v) => Math.round(v + pnl));
+    if (outcome !== "push") {
+      setStrategyLevel((level) => {
+        if (strategy === "馬丁") return level;
+        if (strategy === "達朗貝爾")
+          return outcome === "loss"
+            ? Math.min(level + 1, 20)
+            : Math.max(0, level - 1);
+        if (strategy === "Fibonacci")
+          return outcome === "loss"
+            ? Math.min(level + 1, 10)
+            : Math.max(0, level - 2);
+        if (strategy === "Paroli")
+          return outcome === "win" ? (level >= 2 ? 0 : level + 1) : 0;
+        if (strategy === "1-3-2-6")
+          return outcome === "win" ? (level >= 3 ? 0 : level + 1) : 0;
+        return level;
+      });
+    }
+    const total = next.pnl?.value ?? 0;
+    appendEvent(
+      `SA 今日輸贏即時更新｜${pending.tableId} 押${pending.side} 開${ev.road} 損益 ${pnl}｜今日 ${total > 0 ? "+" : ""}${total}`,
+    );
+    void saWinReportToSettleBody(ev, pending.tableId);
   };
   const settleSaFromGameResultRef = useRef(settleSaFromGameResult);
   settleSaFromGameResultRef.current = settleSaFromGameResult;
@@ -4458,6 +4475,15 @@ export default function HomeScreen() {
   const isBetReportPayload = (payload: any) => {
     const name = eventName(payload);
     if (name.includes("/bet/history")) return true;
+    // Official 投注報表今日總計 — even if action name is stripped/aliased.
+    const totalW =
+      payload?.msg?.total?.all?.w ??
+      payload?.data?.total?.all?.w ??
+      payload?.body?.total?.all?.w ??
+      payload?.msg?.data?.total?.all?.w ??
+      payload?.data?.msg?.total?.all?.w ??
+      payload?.body?.msg?.total?.all?.w;
+    if (totalW != null && String(totalW).trim() !== "") return true;
     const orders = readBetReportOrders(payload);
     if (!orders.length) return false;
     return orders.some(
@@ -4834,6 +4860,8 @@ export default function HomeScreen() {
     let subscribeTimer: ReturnType<typeof setTimeout> | null = null;
     let betReportInFlight = false;
     let betReportRequestAt = 0;
+    // Taipei calendar day of the last applied MT 今日輸贏 (midnight → 0).
+    let mtReportDayKey = mtTodayReportDay();
     // Short-lived settlement sync cycle. We cannot observe the cross-origin MT report UI
     // directly, so after show_win we query the SAME authenticated report endpoint
     // sequentially until its server-side aggregate/order data actually changes.
@@ -4944,6 +4972,14 @@ export default function HomeScreen() {
       if (!authenticated || ws.readyState !== WebSocket.OPEN) return;
       // 只共用現有主 WS，不建立第二條線，也不重新驗證。
       // 報表請求序列化，避免大量請求干擾 MT。
+      // 台北跨日：跟官方一樣歸 0，再用新的 begin_at/end_at 抓當天總計。
+      const dayNow = mtTodayReportDay();
+      if (mtReportDayKey !== dayNow) {
+        mtReportDayKey = dayNow;
+        todayPnlRef.current = 0;
+        setTodayPnl(0);
+        appendEvent(`MT 今日輸贏跨日歸零｜${dayNow}`);
+      }
       if (betReportInFlight) {
         // Never stack report requests. A missing response may be retried after 2s.
         if (Date.now() - betReportRequestAt < 1500) return;
@@ -4955,10 +4991,21 @@ export default function HomeScreen() {
         ws.send(JSON.stringify(reportPayload()));
       } catch {
         betReportInFlight = false;
+        scheduleBetReportLoop(2000);
+        return;
       }
+      // Watchdog: if MT never replies, clear in-flight and keep 今日輸贏 polling alive.
+      setTimeout(() => {
+        if (!isCurrentSocket()) return;
+        if (betReportInFlight && Date.now() - betReportRequestAt >= 7500) {
+          betReportInFlight = false;
+          appendEvent("今日輸贏報表逾時｜重試");
+          scheduleBetReportLoop(1000);
+        }
+      }, 8000);
     };
 
-    const scheduleBetReportLoop = (delay = 5000) => {
+    const scheduleBetReportLoop = (delay = 2000) => {
       if (betReportTimer) clearTimeout(betReportTimer);
       betReportTimer = setTimeout(
         () => {
@@ -4966,15 +5013,16 @@ export default function HomeScreen() {
           if (isCurrentSocket() && authenticated && !betReportInFlight)
             requestBetReport();
         },
-        Math.max(250, delay),
+        Math.max(200, delay),
       );
     };
 
     const startBetReportRefresh = () => {
       if (betReportTimer) clearTimeout(betReportTimer);
       betReportTimer = null;
-      // ROAD X / MT lifecycle: fetch immediately after authenticate, then response-paced 5s.
+      // Heartbeat ~2s like DG: official /bet/history total.all.w → float 今日輸贏.
       requestBetReport();
+      scheduleBetReportLoop(2000);
     };
 
     const scheduleSettlementReportProbe = (delay: number) => {
@@ -5017,14 +5065,19 @@ export default function HomeScreen() {
         `開牌${tableId ? ` ${tableId}` : ""}${gs ? `｜gameSn ${gs}` : ""} → 觸發正式報表同步`,
       );
       reportSyncActive = true;
-      reportSyncDeadline = Date.now() + 8000;
+      reportSyncDeadline = Date.now() + 12000;
       reportSyncBaselinePnl = todayPnlRef.current;
       reportSyncBaselineProcessed = processedBetSnRef.current.size;
       if (reportSyncTimer) clearTimeout(reportSyncTimer);
       reportSyncTimer = null;
+      // Settlement: pull official today total immediately + short probes (DG-like cadence).
+      betReportInFlight = false;
       requestBetReport();
-      // Same settlement burst used by the proven ROAD X flow.
-      scheduleSettlementReportProbe(900);
+      scheduleSettlementReportProbe(200);
+      scheduleSettlementReportProbe(500);
+      scheduleSettlementReportProbe(1000);
+      scheduleSettlementReportProbe(2000);
+      scheduleSettlementReportProbe(3500);
     };
 
     const refreshDataSession = () => {
@@ -5192,46 +5245,48 @@ export default function HomeScreen() {
             `報表回傳｜${reportOrders.length} 筆${newest ? `｜最新 ${orderIdOf(newest) || "—"}｜status ${String(newest?.status ?? "—")}` : ""}`,
           );
           const reportTodayPnl = readTodayPnl(p);
+          // Root rule: float 今日輸贏 = official total.all.w the moment it arrives.
+          // Never invent 0 when the field is missing — that wiped live totals and
+          // made the float lag/desync from 投注報表今日總計.
           if (reportTodayPnl !== null) {
             const changed = todayPnlRef.current !== reportTodayPnl;
             todayPnlRef.current = reportTodayPnl;
             setTodayPnl(reportTodayPnl);
+            mtReportDayKey = mtTodayReportDay();
             if (changed)
               appendEvent(
                 `今日輸贏即時更新｜${reportTodayPnl > 0 ? "+" : ""}${reportTodayPnl.toLocaleString()}`,
               );
+          } else if (name.includes("/bet/history")) {
+            appendEvent("今日輸贏同步｜此報表封包未找到 total.all.w（保留原值）");
           } else {
             appendEvent("今日輸贏同步｜此報表封包未找到 total.all.w");
           }
           const processedBefore = processedBetSnRef.current.size;
           applyBetReport(p);
           const processedAfter = processedBetSnRef.current.size;
-          // Official response re-anchors the display; schedule the next normal refresh from THIS response.
-          scheduleBetReportLoop(5000);
+          // Keep heartbeat alive from THIS reply (do not wait a long idle gap).
+          scheduleBetReportLoop(reportSyncActive ? 400 : 2000);
 
           if (reportSyncActive) {
             const totalChanged =
               reportTodayPnl !== null &&
               reportSyncBaselinePnl !== null &&
               reportTodayPnl !== reportSyncBaselinePnl;
-            const mainSettlementProcessed =
-              processedAfter >
-              Math.max(processedBefore, reportSyncBaselineProcessed);
-            // A newly processed Banker/Player settlement is definitive for Martingale.
-            // totalChanged is definitive for 今日輸贏. If only one arrives first, keep
-            // probing briefly so the other field can catch up in the same settlement.
-            if (
-              mainSettlementProcessed &&
-              (totalChanged || reportTodayPnl === null)
-            ) {
+            // Only release the settlement lock when official total.all.w moved.
+            // Stopping early when total is missing left the float frozen on the
+            // pre-settle value (same class of bug as the SA revert lock).
+            if (totalChanged) {
               reportSyncActive = false;
               if (reportSyncTimer) clearTimeout(reportSyncTimer);
               reportSyncTimer = null;
-              appendEvent("結算報表已追上｜今日輸贏＋馬丁已同步");
+              appendEvent("結算報表已追上｜今日輸贏已同步");
+              scheduleBetReportLoop(2000);
             } else if (Date.now() < reportSyncDeadline) {
-              scheduleSettlementReportProbe(900);
+              scheduleSettlementReportProbe(400);
             } else {
               reportSyncActive = false;
+              scheduleBetReportLoop(2000);
             }
           }
           return;
@@ -5247,25 +5302,42 @@ export default function HomeScreen() {
             rememberSettlementGameSn(p);
             if (Number.isFinite(points) && !memberWinSeen.has(key)) {
               memberWinSeen.add(key);
-              // Never optimistically mutate 今日輸贏 — it must equal official
-              // bet/history total.all.w（投注報表今日總計）, not a running sum of
-              // member/win points which drifts from 總計.
+              // Same pattern as SA/DG feel: bump float NOW from this round's
+              // account P/L, then /bet/history total.all.w overwrites with 總計.
+              // (Martingale still uses bet/history only — never this path.)
+              const base =
+                todayPnlRef.current === null ? 0 : Number(todayPnlRef.current);
+              const next = Math.round(base + points);
+              todayPnlRef.current = next;
+              setTodayPnl(next);
               appendEvent(
-                `MT 即時結算 ${tableId || "—"} 第${round || "—"}局｜補抓官方總計`,
+                `MT 今日輸贏即時更新｜結算 ${points > 0 ? "+" : ""}${Math.round(points)} → ${next > 0 ? "+" : ""}${next.toLocaleString()}`,
               );
             }
             setTimeout(() => {
-              if (isCurrentSocket() && !betReportInFlight) requestBetReport();
+              if (isCurrentSocket()) {
+                betReportInFlight = false;
+                requestBetReport();
+              }
             }, 80);
             setTimeout(() => {
               if (isCurrentSocket()) requestBalance();
             }, 120);
             setTimeout(() => {
-              if (isCurrentSocket() && !betReportInFlight) requestBetReport();
-            }, 650);
+              if (isCurrentSocket()) {
+                betReportInFlight = false;
+                requestBetReport();
+              }
+            }, 500);
+            setTimeout(() => {
+              if (isCurrentSocket()) {
+                betReportInFlight = false;
+                requestBetReport();
+              }
+            }, 1200);
             setTimeout(() => {
               if (isCurrentSocket()) requestBalance();
-            }, 850);
+            }, 700);
           }
           return;
         }
@@ -5280,11 +5352,17 @@ export default function HomeScreen() {
           // observed; recommendation dedupe is handled separately.
           refreshBetReportAfterSettlement(winTableId, p);
         }
-        if (name === "/api/v1/authenticate") {
+        if (name.includes("/api/v1/authenticate")) {
           if (Number(p?.err) === 0) {
             authenticated = true;
             setConnected(true);
             appendEvent("authenticate 成功");
+            // Float shows 0 immediately (DG-like), then bet/history overwrites with 總計.
+            if (todayPnlRef.current === null) {
+              todayPnlRef.current = 0;
+              setTodayPnl(0);
+              mtReportDayKey = mtTodayReportDay();
+            }
             requestTables();
             requestBalance();
             startDealerRefresh();
@@ -5881,8 +5959,22 @@ export default function HomeScreen() {
       setSaStatus("連線中");
     }
     connectSaLive(saGameUrl, accessSessionId, {
-      onResult: (ev: SaWinReportResult) => {
+      // Official BetRecord → float 今日輸贏 (same number as SA 投注記錄).
+      // Overwrites GameResult running total — DG-style: report is source of truth.
+      onPnl: (report) => {
         if (cancelled) return;
+        if (!Number.isFinite(report.value)) return;
+        const next = applySaOfficialPnl(saReportRef.current, report.value);
+        saReportRef.current = next;
+        savePlatformReport("SA", next);
+        setSaReport(next);
+        appendEvent(
+          `SA 今日輸贏即時更新｜官方報表 ${report.value > 0 ? "+" : ""}${report.value.toLocaleString()}`,
+        );
+      },
+      // GameResult → immediate float bump (then official onPnl corrects).
+      onResult: (ev: SaWinReportResult) => {
+        if (cancelled || !ev?.road) return;
         settleSaFromGameResultRef.current(ev);
       },
       onTables: (next: SaTableData[]) => {
@@ -5928,16 +6020,6 @@ export default function HomeScreen() {
         appendEvent(message);
         if (message === "重複登入" || /重複登入/.test(String(message || "")))
           notify("重複登入：背景已讓出，請進入 SA，懸浮改吃遊戲資料", 4000);
-      },
-      onResult: (ev: SaWinReportResult) => {
-        if (cancelled || !ev?.road) return;
-        const pending = pendingBetRef.current;
-        if (!pending) return;
-        if (!saWinReportTableMatches(ev, pending.tableId)) return;
-        // Feed the same BetRecord path as MT show_win → settlePending.
-        settlePendingRef.current(ev.road, {
-          body: saWinReportToSettleBody(ev, pending.tableId),
-        });
       },
     })
       .then((controller) => {
@@ -6241,10 +6323,19 @@ export default function HomeScreen() {
       notify("登入授權已失效，請重新登入");
       return;
     }
+    // Gate (login / 回牌路) 轉點 must NOT open the game. Queue the enter
+    // so when that gate ends we run the enter-time 轉點 and continue in.
+    if (
+      activePlatform !== "MV" &&
+      (!loginSweepDoneRef.current || walletTransferBusyRef.current)
+    ) {
+      pendingAutoEnterRef.current = true;
+      return;
+    }
     setPlatformLaunching(true);
     const liveOnly = activePlatform === "MV";
     enteringGameWalletRef.current = !liveOnly;
-    mtOpenRef.current = true;
+    // Do not mark game open until enter-time 轉點 finishes — button stays「轉點中...」.
     try {
       if (!liveOnly) {
         // Max ~2s wait for any in-flight sweep; never block 25s on enter.
@@ -6254,7 +6345,7 @@ export default function HomeScreen() {
           Date.now() - started < 2000
         )
           await new Promise((resolve) => setTimeout(resolve, 100));
-        // One quick POST all→main. Game login (MTLI/DGLI/SALI) auto-pulls from main.
+        // Enter-time 轉點: show「轉點中...」, then open the game in this same call.
         walletTransferBusyRef.current = true;
         setWalletTransferBusy(true);
         try {
@@ -6270,6 +6361,8 @@ export default function HomeScreen() {
           setWalletTransferBusy(false);
         }
       }
+      mtOpenRef.current = true;
+      setMtOpen(true);
       if (activePlatform === "MT") {
         const url = await getMtLoginUrlFromPlatform(
           loginPlatform,
@@ -6483,6 +6576,7 @@ export default function HomeScreen() {
       setPlatformLaunching(false);
     }
   };
+  openCurrentPlatformRef.current = openCurrentPlatform;
   const closeGameView = () => {
     const wasDg = gameViewPlatform === "DG";
     const wasMv = gameViewPlatform === "MV";
@@ -6502,6 +6596,9 @@ export default function HomeScreen() {
     if (walletTransferBusyRef.current) return;
     const platformToken = platformTokenRef.current;
     if (!platformToken) return;
+    // Same UI gate as login:「轉點中...」only — do NOT enter the game.
+    // Enter happens only when user presses「進入平台」(that 轉點 then continues in).
+    pendingAutoEnterRef.current = false;
     walletTransferBusyRef.current = true;
     setWalletTransferBusy(true);
     void quickSweepToMain(loginPlatform, platformToken)
@@ -7714,6 +7811,58 @@ export default function HomeScreen() {
     );
   };
 
+  const transferBlocking =
+    accessGranted &&
+    activePlatform !== "MV" &&
+    (!loginSweepDone || (walletTransferBusy && !platformLaunching));
+  // Enter-click path: show flowing「轉點中...」while the pre-enter sweep runs,
+  // then openCurrentPlatform continues into the game (no second click).
+  const enterSweepBusy =
+    platformLaunching &&
+    walletTransferBusy &&
+    activePlatform !== "MV";
+  const showTransferDots = transferBlocking || enterSweepBusy;
+  const enterBlocked = platformLaunching || transferBlocking;
+  const enterPlatformLabel = showTransferDots
+    ? `轉點中${transferDots}`
+    : platformLaunching
+      ? "進入中…"
+      : activePlatform === "MV"
+        ? "開啟美女直播"
+        : `進入${platformDisplayName(activePlatform)}平台`;
+
+  // Flowing「...」for login/回牌路 gate and for the enter-time sweep.
+  useEffect(() => {
+    if (!showTransferDots) {
+      setTransferDots(".");
+      return;
+    }
+    let n = 0;
+    const id = setInterval(() => {
+      n = (n % 3) + 1;
+      setTransferDots(".".repeat(n));
+    }, 420);
+    return () => clearInterval(id);
+  }, [showTransferDots]);
+
+  // User pressed「進入」during login/回牌路 gate → after gate ends, run
+  // enter-time 轉點 and open the game (no second click).
+  useEffect(() => {
+    if (!accessGranted) return;
+    if (transferBlocking || platformLaunching) return;
+    if (!pendingAutoEnterRef.current) return;
+    if (activePlatform === "MV") {
+      pendingAutoEnterRef.current = false;
+      return;
+    }
+    if (mtOpenRef.current) {
+      pendingAutoEnterRef.current = false;
+      return;
+    }
+    pendingAutoEnterRef.current = false;
+    void openCurrentPlatformRef.current();
+  }, [accessGranted, transferBlocking, platformLaunching, activePlatform]);
+
   if (!accessGranted)
     return (
       <AccessScreen
@@ -7745,17 +7894,16 @@ export default function HomeScreen() {
           setDgWasOpened(false);
           gameViewUrlRef.current = "";
           setGameViewUrl("");
+          loginSweepDoneRef.current = false;
+          setLoginSweepDone(false);
+          walletTransferBusyRef.current = false;
+          setWalletTransferBusy(false);
+          // Do not auto-enter after login sweep — user clicks「進入」themselves.
+          pendingAutoEnterRef.current = false;
           setAccessGranted(true);
         }}
       />
     );
-
-  const enterBlocked = platformLaunching;
-  const enterPlatformLabel = platformLaunching
-    ? "進入中…"
-    : activePlatform === "MV"
-      ? "開啟美女直播"
-      : `進入${platformDisplayName(activePlatform)}平台`;
 
   return (
     <ScreenContainer
@@ -7996,8 +8144,14 @@ export default function HomeScreen() {
                 </View>
               </View>
               <Pressable
-                disabled={enterBlocked}
-                onPress={() => void openCurrentPlatform()}
+                disabled={platformLaunching}
+                onPress={() => {
+                  if (transferBlocking) {
+                    pendingAutoEnterRef.current = true;
+                    return;
+                  }
+                  void openCurrentPlatform();
+                }}
                 style={[
                   s.enterPlatformBtn,
                   activePlatform === "DG"

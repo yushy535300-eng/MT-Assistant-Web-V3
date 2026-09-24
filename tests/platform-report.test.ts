@@ -110,4 +110,14 @@ describe("platform-keyed 今日輸贏 isolation", () => {
     expect(saResultMatchesPending(result, "901")).toBe(true);
     expect(saResultMatchesPending(result, "D02")).toBe(false);
   });
+
+  it("reportDay matches SA 站內「今天」UTC+8 calendar window", () => {
+    // Screenshot: 2026/09/24 00:00:00–23:59:59 UTC+8 → day 2026-09-24
+    const morningUtc8 = Date.parse("2026-09-23T16:00:00.000Z"); // 00:00 Taipei
+    const eveningUtc8 = Date.parse("2026-09-24T15:59:59.000Z"); // 23:59 Taipei
+    expect(reportDay(morningUtc8)).toBe("2026-09-24");
+    expect(reportDay(eveningUtc8)).toBe("2026-09-24");
+    // Before midnight Taipei still previous day
+    expect(reportDay(Date.parse("2026-09-23T15:59:59.000Z"))).toBe("2026-09-23");
+  });
 });

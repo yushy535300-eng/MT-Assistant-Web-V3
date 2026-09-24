@@ -50,8 +50,14 @@ type SaCallbacks = {
   onTables: (tables: SaTableData[]) => void;
   onStatus?: (status: SaStatus, message?: string) => void;
   onEvent?: (message: string) => void;
-  /** Live ScGameResult road — feeds SA 今日輸贏 bucket only (never MT/DG). */
+  /** Live ScGameResult road — feeds SA settle / history (never MT/DG). */
   onResult?: (result: SaWinReportResult) => void;
+  /** Official BetRecord summary 今日輸贏 — same number as SA 投注記錄. */
+  onPnl?: (report: {
+    value: number;
+    day: string;
+    updatedAt: number;
+  }) => void;
 };
 
 type SaController = { close: () => void };
@@ -122,6 +128,22 @@ export async function connectSaLive(
     const data = jsonOf<SaWinReportResult | null>(raw as MessageEvent, null);
     if (data?.road && (data.tableId || data.apiId || data.roomId)) {
       callbacks.onResult?.(data);
+    }
+  });
+  source.addEventListener("pnl", (raw: Event) => {
+    if (closed) return;
+    const data = jsonOf<{
+      value?: number;
+      day?: string;
+      updatedAt?: number;
+    } | null>(raw as MessageEvent, null);
+    // Always forward a finite official total — float must move like DG.
+    if (data && Number.isFinite(Number(data.value))) {
+      callbacks.onPnl?.({
+        value: Number(data.value),
+        day: String(data.day || ""),
+        updatedAt: Number(data.updatedAt) || Date.now(),
+      });
     }
   });
   source.addEventListener("event", (raw: Event) => {

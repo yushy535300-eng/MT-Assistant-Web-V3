@@ -15,3 +15,16 @@ android-tz-wrapper/build/
 android-tz-wrapper/app/build/
 android-tz-wrapper/local.properties
 mt_assistant_for_github.zip
+
+# Desktop Electron build outputs (download from /download/* instead)
+desktop/node_modules/
+desktop/release/
+desktop/web-dist/
+desktop/public/
+desktop/server/
+desktop/server.mjs
+desktop/WORKING_VERSION.txt
+MT-Assistant-Windows.zip
+web-dist/MT-Assistant-Windows.zip
+web-dist/MT-Assistant-portable.exe
+mt_assistant_for_github.zip
