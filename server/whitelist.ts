@@ -33,6 +33,20 @@ export async function ensureWhitelistTables() {
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`);
   await db.query(`ALTER TABLE tz_whitelist ADD COLUMN IF NOT EXISTS platform VARCHAR(16) NOT NULL DEFAULT 'TZ'`);
+
+  // v2.94: v2.91 曾把舊白名單誤改成 ACCOUNT。
+  // 這批原始白名單預設就是 TZ，因此還原成 TZ。
+  await db.query(`DELETE FROM tz_whitelist a
+    WHERE UPPER(a.platform)='ACCOUNT'
+      AND EXISTS (
+        SELECT 1 FROM tz_whitelist b
+        WHERE UPPER(b.platform)='TZ'
+          AND LOWER(b.username)=LOWER(a.username)
+          AND b.id<>a.id
+      )`);
+  await db.query(`UPDATE tz_whitelist
+    SET platform='TZ', updated_at=NOW()
+    WHERE UPPER(platform)='ACCOUNT'`);
   // 舊版本曾用「帳號本身」作唯一鍵；雙平台後必須改成「平台 + 帳號」。
   await db.query(`DROP INDEX IF EXISTS tz_whitelist_username_ci`);
   await db.query(`DROP INDEX IF EXISTS tz_whitelist_username_lower_idx`);
