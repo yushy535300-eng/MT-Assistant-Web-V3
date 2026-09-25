@@ -30,7 +30,7 @@ export const appRouter = router({
         if (!username || !input.tzToken.trim()) return { success: false, sessionId: "", reason: "invalid_login" } as const;
 
         const platform=input.platform;
-        const access = await authorizeWhitelist(username, platform);
+        const access = await authorizeWhitelist(username);
         if (!access.allowed) return { success: false, sessionId: "", reason: access.reason } as const;
 
         const existing = await findTrackerSessionByUser(platform, username);
@@ -44,7 +44,7 @@ export const appRouter = router({
         const current = await loadTrackerSession(input.sessionId);
         if (!current) return { valid: false, reason: "session_expired" } as const;
 
-        const access = await authorizeWhitelist(current.username, current.platform);
+        const access = await authorizeWhitelist(current.username);
         if (!access.allowed) {
           await deleteTrackerSession(input.sessionId);
           return { valid: false, reason: access.reason } as const;

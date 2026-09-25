@@ -1,0 +1,14 @@
+共用白名單 v2.91
+
+1. 白名單只存登入帳號。
+2. 不把密碼存進 PostgreSQL。
+3. 不用 TZ / OFA 當白名單識別條件。
+4. 帳號存在於 tz_whitelist = MT Assistant 與聖甲之心助手皆可使用。
+5. 後台刪除帳號 = 兩個程式皆不能使用。
+6. 實際密碼由 TZ / OFA 官方登入 API 驗證。
+7. 兩個 Render Web Service 的 DATABASE_URL 必須是同一顆 PostgreSQL。
+8. 建議兩邊 ADMIN_PASSWORD 也設成一樣，管理較方便。
+
+後台：
+https://mt-assistant-web-v3.onrender.com/admin
+https://scarabheart2.onrender.com/admin

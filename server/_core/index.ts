@@ -9,7 +9,7 @@ import { appRouter, hasActiveTrackerSession, requireTrackerSession } from "../ro
 import { createContext } from "./context";
 import { randomUUID } from "node:crypto";
 import { adminPage } from "../admin-page";
-import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
+import { listWhitelist, upsertWhitelist, deleteWhitelist } from "../whitelist";
 import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken, sweepIdleDgRelays } from "../dg-relay";
 import { startSaRelay, getSaRelay, stopSaRelay, sweepIdleSaRelays, ensureSaRelayShell } from "../sa-relay";
 import { registerDgGameProxy } from "../dg-game-proxy";
@@ -215,35 +215,11 @@ async function startServer() {
   app.post("/api/admin/whitelist-form", requireAdmin, async (req, res) => {
     try {
       const u = String(req.body?.username || "").trim();
-      if (!u) return adminRedirect(res, "請輸入平台帳號");
-      const platform = String(req.body?.platform || "TZ").toUpperCase();
-      const d = String(req.body?.days || "permanent");
-      await upsertWhitelist({
-        username: u,
-        platform,
-        permanent: d === "permanent",
-        days: d === "permanent" ? null : Number(d),
-        note: String(req.body?.note || ""),
-      });
-      adminRedirect(res, `${u} 已新增並立即生效`);
+      if (!u) return adminRedirect(res, "請輸入登入帳號");
+      await upsertWhitelist({ username: u });
+      adminRedirect(res, `${u} 已加入共用白名單`);
     } catch (e: any) {
       adminRedirect(res, `新增失敗：${e?.message || e}`);
-    }
-  });
-  app.post("/api/admin/whitelist/:id/toggle-form", requireAdmin, async (req, res) => {
-    try {
-      await setWhitelistEnabled(Number(req.params.id), String(req.body?.enabled) === "1");
-      adminRedirect(res, "授權狀態已更新");
-    } catch (e: any) {
-      adminRedirect(res, `操作失敗：${e?.message || e}`);
-    }
-  });
-  app.post("/api/admin/whitelist/:id/extend-form", requireAdmin, async (req, res) => {
-    try {
-      await extendWhitelist(Number(req.params.id), 30);
-      adminRedirect(res, "已延長 30 天");
-    } catch (e: any) {
-      adminRedirect(res, `操作失敗：${e?.message || e}`);
     }
   });
   app.post("/api/admin/whitelist/:id/delete-form", requireAdmin, async (req, res) => {
