@@ -2234,45 +2234,28 @@ function AccessScreen({
     setError("");
     try {
       const deviceId = getTzLoginDeviceId();
-      // 白名單只判斷「登入帳號」是否存在，不儲存平台與密碼。
+      // 登入介面維持原本 TZ 帳號 / TZ 密碼；實際驗證平台由後台白名單決定。
       const resolved: any = await resolvePlatform.mutateAsync({
         username: username.trim(),
       });
       if (!resolved?.found) {
         const messages: any = {
-          not_whitelisted: "此登入帳號尚未取得使用權限",
+          not_whitelisted: "此 TZ 帳號尚未取得使用權限，請聯繫 LINE 協助",
+          disabled: "此 TZ 帳號授權已停用",
+          expired: "此 TZ 帳號授權已到期",
           database_unavailable: "授權服務暫時無法使用",
         };
         setError(messages[resolved?.reason] || "登入驗證失敗");
         return;
       }
-
-      // 平台由實際帳密登入結果判斷，不再寫進白名單。
-      // 先試 TZ；若不是 TZ 帳號，再自動試 OFA。
-      let platform: "TZ" | "OFA" = "TZ";
-      let platformToken = "";
-      let tzError: any = null;
-      try {
-        platformToken = await loginToPlatformFromBrowser(
-          "TZ",
-          username.trim(),
-          password,
-          deviceId,
-        );
-      } catch (error: any) {
-        tzError = error;
-        try {
-          platformToken = await loginToPlatformFromBrowser(
-            "OFA",
-            username.trim(),
-            password,
-            deviceId,
-          );
-          platform = "OFA";
-        } catch {
-          throw tzError;
-        }
-      }
+      const platform = (resolved.platform === "OFA" ? "OFA" : "TZ") as
+        "TZ" | "OFA";
+      const platformToken = await loginToPlatformFromBrowser(
+        platform,
+        username.trim(),
+        password,
+        deviceId,
+      );
       const access = await login.mutateAsync({
         username: username.trim(),
         tzToken: platformToken,
@@ -2282,10 +2265,12 @@ function AccessScreen({
       if (!access.success) {
         const reason = (access as any).reason;
         const messages: any = {
-          not_whitelisted: "此登入帳號尚未取得使用權限",
+          not_whitelisted: "此 TZ 帳號尚未取得使用權限，請聯繫 LINE 協助",
+          disabled: "此 TZ 帳號授權已停用",
+          expired: "此 TZ 帳號授權已到期",
           database_unavailable: "授權服務暫時無法使用",
         };
-        setError(messages[reason] || "登入驗證失敗");
+        setError(messages[reason] || "TZ 登入驗證失敗");
         return;
       }
       // 登入 MT Assistant 只建立 TZ/OFA 授權工作階段。
@@ -2413,7 +2398,7 @@ function AccessScreen({
           <View style={s.loginDivider} />
           <View style={s.loginHintRow}>
             <Text style={s.loginHint} numberOfLines={1}>
-              請輸入登入帳號與密碼，驗證成功即可進入。
+              請輸入 TZ 帳號與密碼，驗證成功即可進入。
             </Text>
             <Pressable
               style={({ pressed }: any) => [
@@ -2426,17 +2411,17 @@ function AccessScreen({
             </Pressable>
           </View>
           {notice ? <Text style={s.kickNotice}>⚠ {notice}</Text> : null}
-          <Text style={s.loginLabel}>登入帳號</Text>
+          <Text style={s.loginLabel}>TZ 帳號</Text>
           <TextInput
             value={username}
             onChangeText={setUsername}
-            placeholder="輸入登入帳號"
+            placeholder="輸入 TZ 帳號"
             placeholderTextColor="#63798B"
             autoCapitalize="none"
             autoCorrect={false}
             style={s.loginInput}
           />
-          <Text style={s.loginLabel}>登入密碼</Text>
+          <Text style={s.loginLabel}>TZ 密碼</Text>
           <View style={s.passwordWrap}>
             <TextInput
               value={password}
