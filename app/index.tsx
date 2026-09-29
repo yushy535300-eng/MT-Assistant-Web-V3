@@ -718,6 +718,67 @@ function analysisText(table?: TableData) {
   ].join("\n");
 }
 
+
+function providerAnalysisText(provider: AiProvider, table?: TableData) {
+  if (!table) return `【${AI_PROVIDER_OPTIONS.find((x) => x.key === provider)?.label ?? "AI"}】等待牌局資料。`;
+  const seq = roadSides(table.results);
+  const label = AI_PROVIDER_OPTIONS.find((x) => x.key === provider)?.label ?? "AI";
+  if (seq.length < 3) return `【${label}】目前資料累積中，第三顆開始判斷牌型。`;
+
+  const info = getPatternInfo(table.results);
+  const ask = buildAskRoad(table.results);
+  const prefs = [
+    derivedTailPreference(table.results, 1),
+    derivedTailPreference(table.results, 2),
+    derivedTailPreference(table.results, 3),
+  ];
+  const colorName = (x: Result | null) => x === "莊" ? "紅" : x === "閒" ? "藍" : "—";
+  const prefName = (x: "莊" | "閒" | null) => x === "莊" ? "偏紅" : x === "閒" ? "偏藍" : "資料不足";
+  const bankerAsk = [ask.banker.bigEye, ask.banker.small, ask.banker.cockroach];
+  const playerAsk = [ask.player.bigEye, ask.player.small, ask.player.cockroach];
+  const local = localProviderDecision(provider, table.results ?? []);
+
+  const road = roadSides(table.results);
+  const recent = road.slice(-12);
+  const recentBanker = recent.filter((x) => x === "莊").length;
+  const recentPlayer = recent.filter((x) => x === "閒").length;
+  const last = road.at(-1);
+  let streak = 0;
+  if (last) for (let i = road.length - 1; i >= 0 && road[i] === last; i -= 1) streak += 1;
+  let changes = 0;
+  for (let i = Math.max(1, road.length - 8); i < road.length; i += 1) if (road[i] !== road[i - 1]) changes += 1;
+
+  const roadLineByProvider: Record<AiProvider, string> = {
+    chatgpt: `【大路】${info.label}，近段節奏${changes >= 5 ? "切換較密" : streak >= 3 ? "連續性較強" : "偏混合"}。`,
+    gemini: `【大路】${info.label}，目前結構以${streak >= 3 ? "短龍延續" : changes >= 5 ? "單跳／轉折" : "混合段"}為主。`,
+    grok: `【大路】${info.label}，短線最近${Math.min(6, road.length)}手${changes >= 4 ? "切換頻繁" : "動能較集中"}。`,
+    meta: `【大路】${info.label}，近12手莊${recentBanker}／閒${recentPlayer}，分布${Math.abs(recentBanker-recentPlayer) <= 2 ? "接近" : "已有偏向"}。`,
+    combined: `【大路】${info.label}，四種角度綜合比對目前節奏、結構與分布。`,
+    road: `【大路】${info.label}。`,
+  };
+  const finishByProvider: Record<AiProvider, string> = {
+    chatgpt: `【綜合】依近期節奏、連續性與轉折判斷，本局推薦${local.side}。`,
+    gemini: `【結構】依大路結構、單跳／短龍與轉折位置判斷，本局推薦${local.side}。`,
+    grok: `【短線】依最近幾手動能與切換速度判斷，本局推薦${local.side}。`,
+    meta: `【比例】依近期莊閒分布、偏移與回補條件判斷，本局推薦${local.side}。`,
+    combined: (() => {
+      const parts = (["chatgpt","gemini","grok","meta"] as AiProvider[]).map((x) => ({ key:x, ...localProviderDecision(x, table.results ?? []) }));
+      const b = parts.filter((x) => x.side === "莊").length;
+      const pl = parts.filter((x) => x.side === "閒").length;
+      return `【綜合】ChatGPT ${parts[0].side}／Gemini ${parts[1].side}／Grok ${parts[2].side}／Meta AI ${parts[3].side}；莊${b}：閒${pl}，本局推薦${local.side}。`;
+    })(),
+    road: `【綜合】依大路、下三路與莊閒問路綜合判斷，本局推薦${local.side}。`,
+  };
+
+  return [
+    `【${label}】`,
+    roadLineByProvider[provider],
+    `【大眼仔】${prefName(prefs[0])}；【小路】${prefName(prefs[1])}；【曱甴路】${prefName(prefs[2])}。`,
+    `【莊問路】${bankerAsk.map(colorName).join("・")}；【閒問路】${playerAsk.map(colorName).join("・")}。`,
+    finishByProvider[provider],
+  ].join("\n");
+}
+
 function localProviderDecision(provider: AiProvider, results: Result[]) {
   const road = roadSides(results);
   const base = roadDecision(results);
@@ -3464,7 +3525,7 @@ export default function HomeScreen() {
   // Mobile uses the SAME 560px desktop canvas. Only the outer canvas is scaled.
   // This keeps desktop typography/card proportions instead of shrinking a wider 660px canvas.
   const panelMobileCanvasWidth = panelDesktopWidth;
-  const panelMobileTargetWidth = Math.min(width * 0.9, 520);
+  const panelMobileTargetWidth = Math.min(Math.max(280, width - 20), 520);
   const panelBaseWidth = desktop ? panelDesktopWidth : panelMobileCanvasWidth;
   const panelMobileScale = Math.min(
     1,
@@ -3758,7 +3819,6 @@ export default function HomeScreen() {
   const [aiMenuOpen, setAiMenuOpen] = useState(false);
   const [aiResult, setAiResult] = useState<AiAnalysisResult | null>(null);
   const [aiError, setAiError] = useState("");
-  const aiAnalyze = trpc.aiAnalysis.analyze.useMutation();
   useEffect(() => {
     if (Platform.OS !== "web" || typeof window === "undefined") return;
     try {
@@ -3968,67 +4028,15 @@ export default function HomeScreen() {
       setAiError("");
       return;
     }
-    const providerForRequest = aiProvider;
-    const d = roadDecision(assistTable.results ?? []);
-    if (providerForRequest === "road") {
-      setAiResult({
-        provider: "road",
-        side: d.side,
-        confidence: confidencePercent(d.scoreBanker, d.scorePlayer),
-        summary: `依大路、下三路與莊閒問路綜合判斷，本局推薦${d.side}。`,
-      });
-      setAiError("");
-      return;
-    }
-    if (!accessSessionId) {
-      const local = localProviderDecision(providerForRequest, assistTable.results ?? []);
-      setAiResult({
-        provider: providerForRequest,
-        side: local.side,
-        confidence: local.confidence,
-        summary: `依目前牌路節奏與結構判斷，本局推薦${local.side}。`,
-      });
-      setAiError("");
-      return;
-    }
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      aiAnalyze
-        .mutateAsync({
-          sessionId: accessSessionId,
-          provider: providerForRequest,
-          tableName: assistRoomTitle(assistTable, activePlatform) || assistTable.id,
-          dealer: assistTable.name || "—",
-          round: assistTable.round ?? 0,
-          results: (assistTable.results ?? []).slice(-120),
-          pattern: detectPattern(assistTable.results ?? []),
-          localScoreBanker: d.scoreBanker,
-          localScorePlayer: d.scorePlayer,
-        })
-        .then((result) => {
-          if (cancelled) return;
-          setAiResult(result as AiAnalysisResult);
-          setAiError("");
-        })
-        .catch(() => {
-          if (cancelled) return;
-          const local = localProviderDecision(providerForRequest, assistTable.results ?? []);
-          const summaries: Record<Exclude<AiProvider, "road">, string> = {
-            chatgpt: `從近期節奏與連續性判斷，本局推薦${local.side}。`,
-            gemini: `從路型結構與轉折位置判斷，本局推薦${local.side}。`,
-            grok: `從最近幾局短線動能判斷，本局推薦${local.side}。`,
-            meta: `從莊閒分布與回補條件判斷，本局推薦${local.side}。`,
-            combined: `整合四種牌路角度後，本局推薦${local.side}。`,
-          };
-          setAiResult({ provider: providerForRequest, side: local.side, confidence: local.confidence, summary: summaries[providerForRequest] });
-          setAiError("");
-        });
-    }, 220);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [aiProvider, aiRoadFingerprint, accessSessionId, activePlatform]);
+    const local = localProviderDecision(aiProvider, assistTable.results ?? []);
+    setAiResult({
+      provider: aiProvider,
+      side: local.side,
+      confidence: local.confidence,
+      summary: providerAnalysisText(aiProvider, assistTable),
+    });
+    setAiError("");
+  }, [aiProvider, aiRoadFingerprint, activePlatform]);
   const effectiveRecommendation: "莊" | "閒" =
     aiResult?.side === "莊" || aiResult?.side === "閒"
       ? aiResult.side
@@ -4036,12 +4044,7 @@ export default function HomeScreen() {
   const effectiveConfidenceState = aiResult
     ? confidenceState(aiResult.confidence)
     : assistConfidenceState;
-  const askRoadLine = analysisText(assistTable)
-    .split("\n")
-    .find((line) => line.includes("【莊問路】") || line.includes("【閒問路】")) || "";
-  const effectiveAnalysisText = aiResult
-    ? `【${aiProviderLabel}】${aiResult.summary}${askRoadLine ? `\n${askRoadLine}` : ""}`
-    : `【${aiProviderLabel}】正在整理目前牌路，推薦結果會依現有路勢更新。${askRoadLine ? `\n${askRoadLine}` : ""}`;
+  const effectiveAnalysisText = aiResult?.summary || providerAnalysisText(aiProvider, assistTable);
 
   const resolveTableV38 = (table: TableData) =>
     tableIdKeys(table).map((id) => v38ByTable[id]).find(Boolean);
@@ -4112,6 +4115,50 @@ export default function HomeScreen() {
   useEffect(() => {
     if (Platform.OS !== "web" || typeof document === "undefined") return;
     document.title = "MT Assistant";
+
+    // Mobile web: fit the UI to the real device viewport and prevent accidental pinch zoom.
+    // Keep the whole page inside the visible phone width; orientation changes are handled
+    // by useWindowDimensions and the browser visual viewport.
+    const phoneWeb = isPhoneWebClient(width);
+    if (phoneWeb) {
+      let viewportMeta = document.querySelector('meta[name="viewport"]') as HTMLMetaElement | null;
+      if (!viewportMeta) {
+        viewportMeta = document.createElement("meta");
+        viewportMeta.name = "viewport";
+        document.head.appendChild(viewportMeta);
+      }
+      viewportMeta.content =
+        "width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover";
+
+      const mobileViewportStyleId = "mt-mobile-fixed-viewport-v1";
+      let mobileViewportStyle = document.getElementById(mobileViewportStyleId) as HTMLStyleElement | null;
+      if (!mobileViewportStyle) {
+        mobileViewportStyle = document.createElement("style");
+        mobileViewportStyle.id = mobileViewportStyleId;
+        document.head.appendChild(mobileViewportStyle);
+      }
+      mobileViewportStyle.textContent = `
+        @media (max-width: 999px) {
+          html, body, #root {
+            width: 100% !important;
+            max-width: 100vw !important;
+            min-width: 0 !important;
+            overflow-x: hidden !important;
+            -webkit-text-size-adjust: 100% !important;
+            text-size-adjust: 100% !important;
+          }
+          html, body {
+            min-height: 100dvh !important;
+            overscroll-behavior-x: none !important;
+            touch-action: pan-y !important;
+            -webkit-tap-highlight-color: transparent !important;
+          }
+          #root {
+            min-height: 100dvh !important;
+          }
+        }
+      `;
+    }
     let homeTitle = document.querySelector(
       'meta[name="apple-mobile-web-app-title"]',
     ) as HTMLMetaElement | null;
@@ -7199,6 +7246,7 @@ export default function HomeScreen() {
                   {RADAR_PREDICT_OPTIONS.map((item) => (
                     <Pressable
                       key={item.key}
+                      hitSlop={!desktop ? 8 : 0}
                       onPress={() => {
                         setRadarPredictSource(item.key);
                         setRadarSourceMenuOpen(false);
@@ -7608,6 +7656,7 @@ export default function HomeScreen() {
           <View style={[s.row, s.floatHeaderActions]}>
             <View style={s.headerAiWrap}>
               <Pressable
+                hitSlop={!desktop ? 10 : 0}
                 onPress={() => setAiMenuOpen((v) => !v)}
                 style={({ pressed }: any) => [
                   s.headerAiBtn,
@@ -7645,14 +7694,14 @@ export default function HomeScreen() {
                 </View>
               ) : null}
             </View>
-            <Pressable onPress={syncAssist} style={[s.iconTextBtn, !desktop && s.iconTextBtnMobile]} hitSlop={!desktop ? 6 : 0}>
+            <Pressable onPress={syncAssist} style={[s.iconTextBtn, !desktop && s.iconTextBtnMobile]} hitSlop={!desktop ? 10 : 0}>
               <MaterialIcons name="sync" size={!desktop ? 17 : 15} color="#fff" />
               <Text style={[s.iconText, !desktop && s.iconTextMobile]}>同步</Text>
             </Pressable>
             <Pressable
               onPress={() => setV38Open((v) => !v)}
               style={[s.iconTextBtn, !desktop && s.iconTextBtnMobile, v38Open && s.v38LaunchActive]}
-              hitSlop={!desktop ? 6 : 0}
+              hitSlop={!desktop ? 10 : 0}
             >
               <MaterialIcons name="calculate" size={!desktop ? 17 : 15} color="#fff" />
               <Text style={[s.iconText, !desktop && s.iconTextMobile]}>算牌</Text>
@@ -7660,12 +7709,12 @@ export default function HomeScreen() {
             <Pressable
               onPress={() => setTerminalParityOpen((v) => !v)}
               style={[s.iconTextBtn, !desktop && s.iconTextBtnMobile, terminalParityOpen && s.v38LaunchActive]}
-              hitSlop={!desktop ? 6 : 0}
+              hitSlop={!desktop ? 10 : 0}
             >
               <MaterialIcons name="functions" size={!desktop ? 17 : 15} color="#fff" />
               <Text style={[s.iconText, !desktop && s.iconTextMobile]}>奇偶</Text>
             </Pressable>
-            <Pressable onPress={() => setFloatingOpen(false)} style={[s.iconBtn, !desktop && s.iconBtnMobile]} hitSlop={!desktop ? 6 : 0}>
+            <Pressable onPress={() => setFloatingOpen(false)} style={[s.iconBtn, !desktop && s.iconBtnMobile]} hitSlop={!desktop ? 10 : 0}>
               <MaterialIcons name="close" size={!desktop ? 21 : 18} color="#fff" />
             </Pressable>
           </View>
@@ -10400,7 +10449,7 @@ const s = StyleSheet.create({
     userSelect: "none" as any,
     cursor: "grab" as any,
   },
-  floatHeaderMobile: { height: 46, paddingHorizontal: 6 },
+  floatHeaderMobile: { height: 60, minHeight: 60, paddingHorizontal: 9, paddingVertical: 5 },
   floatHeadLeft: { flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 0 },
   floatHeaderActions: { position: "relative", zIndex: 5200, overflow: "visible", flexShrink: 1 },
   floatBrandLine: { flexDirection: "row", alignItems: "center", gap: 7 },
@@ -10428,8 +10477,8 @@ const s = StyleSheet.create({
     gap: 3,
     alignItems: "center",
   },
-  iconTextBtnMobile: { height: 34, paddingHorizontal: 8, borderRadius: 6, gap: 4 },
-  iconBtnMobile: { width: 34, height: 34, borderRadius: 6 },
+  iconTextBtnMobile: { height: 44, minHeight: 44, paddingHorizontal: 10, borderRadius: 8, gap: 5 },
+  iconBtnMobile: { width: 44, height: 44, borderRadius: 8 },
   iconText: { color: "#fff", fontSize: 8, fontWeight: "800" },
   iconTextMobile: { fontSize: 9 },
   headerAiWrap: { position: "relative", zIndex: 5600, overflow: "visible" },
@@ -10446,10 +10495,10 @@ const s = StyleSheet.create({
     justifyContent: "space-between",
     gap: 4,
   },
-  headerAiBtnMobile: { height: 34, width: 112, borderRadius: 6, paddingHorizontal: 7 },
+  headerAiBtnMobile: { height: 44, minHeight: 44, width: 130, borderRadius: 8, paddingHorizontal: 9 },
   headerAiBtnLeft: { flexDirection: "row", alignItems: "center", gap: 5, minWidth: 0, flexShrink: 1 },
   headerAiText: { color: "#EAF6FF", fontSize: 8.5, fontWeight: "900", flexShrink: 1 },
-  headerAiTextMobile: { fontSize: 9.5 },
+  headerAiTextMobile: { fontSize: 10 },
   headerAiMenu: {
     position: "absolute",
     top: 30,
@@ -10463,7 +10512,7 @@ const s = StyleSheet.create({
     zIndex: 5900,
     elevation: 590,
   },
-  headerAiMenuMobile: { top: 37, width: 154 },
+  headerAiMenuMobile: { top: 47, width: 176 },
   headerAiMenuItem: {
     height: 31,
     paddingHorizontal: 8,
@@ -10473,9 +10522,9 @@ const s = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: "#294B64",
   },
-  headerAiMenuItemMobile: { height: 40, paddingHorizontal: 10, gap: 8 },
+  headerAiMenuItemMobile: { height: 48, minHeight: 48, paddingHorizontal: 12, gap: 9 },
   headerAiMenuText: { color: "#F2FAFF", fontSize: 9.5, fontWeight: "900" },
-  headerAiMenuTextMobile: { fontSize: 11 },
+  headerAiMenuTextMobile: { fontSize: 11.5 },
   selectorWrap: {
     marginHorizontal: 6,
     marginTop: 6,
@@ -11261,7 +11310,7 @@ const s = StyleSheet.create({
     bottom: "auto" as any,
     borderRadius: 9,
   },
-  floatHeaderMobile: { height: 28, paddingHorizontal: 6 },
+  floatHeaderMobile: { height: 60, minHeight: 60, paddingHorizontal: 9, paddingVertical: 5 },
   selectorWrapMobile: { marginHorizontal: 5, marginTop: 4 },
   selectorMobile: { height: 28, paddingHorizontal: 7 },
   assistPageMobile: {
