@@ -1,0 +1,23 @@
+AI 推薦測試版 2026-09-29
+
+本版修改範圍：
+1. 原懸浮面板尺寸、三欄比例、字體與既有功能不改。
+2. AI 選單提高層級，避免被「今日輸贏 / AI分析」蓋住。
+3. ChatGPT / Gemini / Grok / Meta AI 使用各品牌官方網站圖示來源顯示小圓形 Logo。
+4. ChatGPT：使用 OPENAI_API_KEY 呼叫 OpenAI Responses API。
+5. Gemini：使用 GEMINI_API_KEY 呼叫 Gemini API。
+6. Grok：使用 XAI_API_KEY 呼叫 xAI API。
+7. Meta AI：本版不需要付費 API；依桌台、局數與當局資料產生每局固定的隨機莊/閒推薦，下一局才重新產生。
+8. AI綜合：整合 ChatGPT / Gemini / Grok / Meta AI 四個結果；前三者若 API 未設定或失敗，會列為不可用，不會複製其他 AI 的答案。
+
+Render Environment Variables：
+OPENAI_API_KEY=...
+GEMINI_API_KEY=...
+XAI_API_KEY=...
+
+可選模型覆寫：
+OPENAI_MODEL=gpt-5.6
+GEMINI_MODEL=gemini-2.5-flash
+XAI_MODEL=grok-4.7
+
+Meta AI 不需要 META_AI_API_KEY。

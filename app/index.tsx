@@ -81,45 +81,13 @@ type AiAnalysisResult = {
 const AI_PROVIDER_OPTIONS: Array<{
   key: AiProvider;
   label: string;
-  badgeText: string;
-  badgeBackground: string;
-  badgeColor: string;
+  logoUri?: string;
 }> = [
-  {
-    key: "chatgpt",
-    label: "ChatGPT",
-    badgeText: "C",
-    badgeBackground: "#1F9D6A",
-    badgeColor: "#F7FFFB",
-  },
-  {
-    key: "gemini",
-    label: "Gemini",
-    badgeText: "G",
-    badgeBackground: "#5B72FF",
-    badgeColor: "#F8FAFF",
-  },
-  {
-    key: "grok",
-    label: "Grok",
-    badgeText: "X",
-    badgeBackground: "#1A2430",
-    badgeColor: "#F4F8FB",
-  },
-  {
-    key: "meta",
-    label: "Meta AI",
-    badgeText: "M",
-    badgeBackground: "#1977F3",
-    badgeColor: "#F7FBFF",
-  },
-  {
-    key: "combined",
-    label: "AI綜合",
-    badgeText: "AI",
-    badgeBackground: "#8A46FF",
-    badgeColor: "#FBF8FF",
-  },
+  { key: "chatgpt", label: "ChatGPT", logoUri: "https://chatgpt.com/favicon.ico" },
+  { key: "gemini", label: "Gemini", logoUri: "https://gemini.google.com/favicon.ico" },
+  { key: "grok", label: "Grok", logoUri: "https://grok.com/favicon.ico" },
+  { key: "meta", label: "Meta AI", logoUri: "https://www.meta.ai/favicon.ico" },
+  { key: "combined", label: "AI綜合" },
 ];
 
 /** Set iframe.src only when the URL actually changes. Rewriting the same src
@@ -152,23 +120,34 @@ function StableGameIframe({
 
 function AiProviderBadge({ provider, compact = false }: { provider: AiProvider; compact?: boolean }) {
   const option = AI_PROVIDER_OPTIONS.find((item) => item.key === provider) ?? AI_PROVIDER_OPTIONS[4];
-  return (
-    <View
-      style={[
-        s.aiProviderBadge,
-        compact && s.aiProviderBadgeCompact,
-        { backgroundColor: option.badgeBackground },
-      ]}
-    >
-      <Text
+  const size = compact ? 12 : 14;
+  if (option.logoUri) {
+    return (
+      <View
         style={[
-          s.aiProviderBadgeText,
-          compact && s.aiProviderBadgeTextCompact,
-          { color: option.badgeColor },
+          s.aiProviderBadge,
+          compact && s.aiProviderBadgeCompact,
+          { backgroundColor: "#F7FAFC" },
         ]}
       >
-        {option.badgeText}
-      </Text>
+        <Image
+          source={{ uri: option.logoUri }}
+          resizeMode="contain"
+          style={{ width: size - 3, height: size - 3, borderRadius: (size - 3) / 2 }}
+        />
+      </View>
+    );
+  }
+  return (
+    <View style={[s.aiCombinedBadge, compact && s.aiCombinedBadgeCompact]}>
+      <View style={s.aiCombinedDotRow}>
+        <View style={[s.aiCombinedDot, { backgroundColor: "#10A37F" }]} />
+        <View style={[s.aiCombinedDot, { backgroundColor: "#6C7DFF" }]} />
+      </View>
+      <View style={s.aiCombinedDotRow}>
+        <View style={[s.aiCombinedDot, { backgroundColor: "#E8EEF3" }]} />
+        <View style={[s.aiCombinedDot, { backgroundColor: "#168AFF" }]} />
+      </View>
     </View>
   );
 }
@@ -3890,8 +3869,8 @@ export default function HomeScreen() {
   const effectiveAnalysisText = aiResult
     ? `【${aiProviderLabel}】${aiResult.summary}`
     : aiError
-      ? `【${aiProviderLabel}】${aiError}；暫時沿用原本牌路分析。\n${analysisText(assistTable)}`
-      : analysisText(assistTable);
+      ? `【${aiProviderLabel}】${aiError}；目前沒有使用此 AI 的結果。`
+      : `【${aiProviderLabel}】正在取得真實 AI 分析…`;
   const radarSignals = useMemo(
     () =>
       assistPool.map((table) => {
@@ -10270,7 +10249,13 @@ const s = StyleSheet.create({
   roomConfidence: { flexDirection: "row", alignItems: "center", gap: 5 },
   roomConfidenceText: { fontSize: 8, fontWeight: "900", textShadowRadius: 7 },
   assistPage: { padding: 6, minHeight: 150 },
-  decisionRow: { flexDirection: "row", gap: 5 },
+  decisionRow: {
+    flexDirection: "row",
+    gap: 5,
+    position: "relative",
+    zIndex: 700,
+    overflow: "visible",
+  },
   decisionBox: {
     flex: 1,
     minHeight: 68,
@@ -10280,12 +10265,12 @@ const s = StyleSheet.create({
     borderRadius: 5,
     padding: 7,
   },
-  recommendDecisionBox: { position: "relative", zIndex: 60, overflow: "visible" },
+  recommendDecisionBox: { position: "relative", zIndex: 900, overflow: "visible" },
   aiProviderFloatWrap: {
     position: "absolute",
     top: -9,
     left: 6,
-    zIndex: 90,
+    zIndex: 1100,
     overflow: "visible",
   },
   aiProviderFloatBtn: {
@@ -10318,7 +10303,8 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,.18)",
+    borderColor: "rgba(255,255,255,.22)",
+    overflow: "hidden",
     flexShrink: 0,
   },
   aiProviderBadgeCompact: {
@@ -10326,16 +10312,21 @@ const s = StyleSheet.create({
     height: 12,
     borderRadius: 6,
   },
-  aiProviderBadgeText: {
-    fontSize: 6.2,
-    fontWeight: "900",
-    lineHeight: 7,
-    letterSpacing: -0.2,
+  aiCombinedBadge: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: "#132A3B",
+    borderWidth: 1,
+    borderColor: "rgba(154,203,235,.50)",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 1,
+    flexShrink: 0,
   },
-  aiProviderBadgeTextCompact: {
-    fontSize: 5.4,
-    lineHeight: 6,
-  },
+  aiCombinedBadgeCompact: { width: 12, height: 12, borderRadius: 6 },
+  aiCombinedDotRow: { flexDirection: "row", gap: 1 },
+  aiCombinedDot: { width: 3, height: 3, borderRadius: 1.5 },
   aiProviderMenu: {
     position: "absolute",
     top: 20,
@@ -10346,8 +10337,8 @@ const s = StyleSheet.create({
     borderColor: "#315D79",
     backgroundColor: "#081722",
     overflow: "hidden",
-    zIndex: 100,
-    elevation: 20,
+    zIndex: 1200,
+    elevation: 120,
   },
   aiProviderMenuItem: {
     height: 24,
@@ -10393,6 +10384,8 @@ const s = StyleSheet.create({
     marginTop: 4,
   },
   todayPnlBox: {
+    position: "relative",
+    zIndex: 1,
     marginTop: 5,
     backgroundColor: "#102335",
     borderWidth: 1,
@@ -10406,6 +10399,8 @@ const s = StyleSheet.create({
   },
   todayPnlValue: { fontSize: 16, fontWeight: "900" },
   aiBox: {
+    position: "relative",
+    zIndex: 0,
     marginTop: 5,
     backgroundColor: "#0B1925",
     borderRadius: 5,

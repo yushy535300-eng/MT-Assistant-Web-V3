@@ -4,26 +4,31 @@ MT Assistant AI 推薦測試版（2026-09-29）
 1. 保留原本懸浮面板尺寸、三欄比例、字體、間距、桌台/荷官/局數、最近、牌型、今日輸贏、止損、馬丁與其他功能。
 2. 只在「推薦下注」區加入浮動 AI 選單，不參與原排版尺寸計算，不壓縮原內容。
 3. 選項：ChatGPT / Gemini / Grok / Meta AI / AI綜合。
-4. AI 有成功回傳時，推薦莊/閒與可信度改用該 AI 結果；下方「AI分析」顯示該 AI 的分析摘要。
-5. AI API 未設定或失敗時，不製造假結果，會沿用原本牌路推薦並顯示未設定/錯誤訊息。
-6. AI綜合：並行呼叫已設定的四個 AI，依實際回覆做共識整合；未設定的模型會列為不可用。
+4. 修正 AI 下拉選單層級：選單浮在推薦區、今日輸贏與 AI分析之上，不會再被下面區塊遮住。
+5. ChatGPT / Gemini / Grok / Meta AI 顯示各自官方網站的小型圓形圖示；AI綜合使用獨立四點綜合圖示。
+6. 四家 AI 是四次獨立 API 呼叫，各自使用獨立提示詞與自己的模型，不會複製同一個分析結果。
+7. 如果某家 API 未設定或呼叫失敗，AI分析會明確顯示未連線/錯誤，不會把本地牌路文字冒充該 AI 回覆。
+8. AI綜合：並行呼叫已設定的四個 AI，只有實際成功回覆的模型才會被納入共識，並保留各家摘要。
+9. 不保證四個 AI 每局一定給不同莊/閒方向；若獨立分析後結論相同，仍會顯示相同方向，但摘要來源是不同 API 真實回覆。
 
 伺服器環境變數：
 ChatGPT:
   OPENAI_API_KEY=...
-  OPENAI_MODEL=gpt-5.6   （可自行改模型）
+  OPENAI_MODEL=gpt-5.6
 
 Gemini:
   GEMINI_API_KEY=...
-  GEMINI_MODEL=gemini-2.5-flash   （可自行改模型）
+  GEMINI_MODEL=gemini-2.5-flash
 
 Grok:
   XAI_API_KEY=...
-  XAI_MODEL=grok-4.7   （可自行改模型）
+  XAI_MODEL=grok-4.7
 
-Meta AI:
+Meta AI / Llama:
   META_AI_API_URL=你的 Meta/Llama 相容 Chat Completions endpoint
   META_AI_API_KEY=...
   META_AI_MODEL=...
 
-注意：API Key 只放 Render / Server 環境變數，不要寫進前端 app/index.tsx。
+注意：
+- API Key 只放 Render / Server 環境變數，不要寫進前端 app/index.tsx。
+- 沒有對應 API Key 時，程式不會偽造該 AI 的分析。
