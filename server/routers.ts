@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { publicProcedure, router } from "./_core/trpc";
 import { randomUUID } from "node:crypto";
+import { runAiAnalysis } from "./ai-analysis";
 import { authorizeWhitelist, getWhitelistPlatform } from "./whitelist";
 import {
   deleteTrackerSession,
@@ -14,6 +15,21 @@ export { hasActiveTrackerSession } from "./sessions";
 export { requireTrackerSession } from "./sessions";
 
 export const appRouter = router({
+  aiAnalysis: router({
+    analyze: publicProcedure
+      .input(z.object({
+        sessionId: z.string().min(1).max(128),
+        provider: z.enum(["chatgpt", "gemini", "grok", "meta", "combined"]),
+        tableName: z.string().max(160).optional(),
+        dealer: z.string().max(160).optional(),
+        round: z.number().int().min(0).max(999999).optional(),
+        results: z.array(z.string().max(8)).max(120),
+        pattern: z.string().max(120).optional(),
+        localScoreBanker: z.number().finite().optional(),
+        localScorePlayer: z.number().finite().optional(),
+      }))
+      .mutation(async ({ input }) => runAiAnalysis(input)),
+  }),
   trackerAccess: router({
     resolvePlatform: publicProcedure
       .input(z.object({ username:z.string().min(1).max(128) }))

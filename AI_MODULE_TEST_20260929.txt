@@ -1,0 +1,29 @@
+MT Assistant AI 推薦測試版（2026-09-29）
+
+本次修改範圍：
+1. 保留原本懸浮面板尺寸、三欄比例、字體、間距、桌台/荷官/局數、最近、牌型、今日輸贏、止損、馬丁與其他功能。
+2. 只在「推薦下注」區加入浮動 AI 選單，不參與原排版尺寸計算，不壓縮原內容。
+3. 選項：ChatGPT / Gemini / Grok / Meta AI / AI綜合。
+4. AI 有成功回傳時，推薦莊/閒與可信度改用該 AI 結果；下方「AI分析」顯示該 AI 的分析摘要。
+5. AI API 未設定或失敗時，不製造假結果，會沿用原本牌路推薦並顯示未設定/錯誤訊息。
+6. AI綜合：並行呼叫已設定的四個 AI，依實際回覆做共識整合；未設定的模型會列為不可用。
+
+伺服器環境變數：
+ChatGPT:
+  OPENAI_API_KEY=...
+  OPENAI_MODEL=gpt-5.6   （可自行改模型）
+
+Gemini:
+  GEMINI_API_KEY=...
+  GEMINI_MODEL=gemini-2.5-flash   （可自行改模型）
+
+Grok:
+  XAI_API_KEY=...
+  XAI_MODEL=grok-4.7   （可自行改模型）
+
+Meta AI:
+  META_AI_API_URL=你的 Meta/Llama 相容 Chat Completions endpoint
+  META_AI_API_KEY=...
+  META_AI_MODEL=...
+
+注意：API Key 只放 Render / Server 環境變數，不要寫進前端 app/index.tsx。

@@ -67,6 +67,60 @@ import {
 } from "@/lib/platform-report";
 
 type PlatformKey = "MT" | "DG" | "SA" | "MV";
+type AiProvider = "chatgpt" | "gemini" | "grok" | "meta" | "combined";
+type AiSide = "莊" | "閒" | "觀望";
+type AiAnalysisResult = {
+  provider: AiProvider;
+  side: AiSide;
+  confidence: number;
+  summary: string;
+  availableProviders?: string[];
+  unavailableProviders?: string[];
+};
+
+const AI_PROVIDER_OPTIONS: Array<{
+  key: AiProvider;
+  label: string;
+  badgeText: string;
+  badgeBackground: string;
+  badgeColor: string;
+}> = [
+  {
+    key: "chatgpt",
+    label: "ChatGPT",
+    badgeText: "C",
+    badgeBackground: "#1F9D6A",
+    badgeColor: "#F7FFFB",
+  },
+  {
+    key: "gemini",
+    label: "Gemini",
+    badgeText: "G",
+    badgeBackground: "#5B72FF",
+    badgeColor: "#F8FAFF",
+  },
+  {
+    key: "grok",
+    label: "Grok",
+    badgeText: "X",
+    badgeBackground: "#1A2430",
+    badgeColor: "#F4F8FB",
+  },
+  {
+    key: "meta",
+    label: "Meta AI",
+    badgeText: "M",
+    badgeBackground: "#1977F3",
+    badgeColor: "#F7FBFF",
+  },
+  {
+    key: "combined",
+    label: "AI綜合",
+    badgeText: "AI",
+    badgeBackground: "#8A46FF",
+    badgeColor: "#FBF8FF",
+  },
+];
 
 /** Set iframe.src only when the URL actually changes. Rewriting the same src
  *  on every React render reloads DG (spinner / digital table / live video flash). */
@@ -94,6 +148,29 @@ function StableGameIframe({
     style,
     allow,
   });
+}
+
+function AiProviderBadge({ provider, compact = false }: { provider: AiProvider; compact?: boolean }) {
+  const option = AI_PROVIDER_OPTIONS.find((item) => item.key === provider) ?? AI_PROVIDER_OPTIONS[4];
+  return (
+    <View
+      style={[
+        s.aiProviderBadge,
+        compact && s.aiProviderBadgeCompact,
+        { backgroundColor: option.badgeBackground },
+      ]}
+    >
+      <Text
+        style={[
+          s.aiProviderBadgeText,
+          compact && s.aiProviderBadgeTextCompact,
+          { color: option.badgeColor },
+        ]}
+      >
+        {option.badgeText}
+      </Text>
+    </View>
+  );
 }
 
 type Result = RoadResult;
@@ -3569,6 +3646,11 @@ export default function HomeScreen() {
   const [initialBankroll, setInitialBankroll] = useState(100000);
   const [baseBet, setBaseBet] = useState(1000);
   const [strategy, setStrategy] = useState<StrategyName>("馬丁");
+  const [aiProvider, setAiProvider] = useState<AiProvider>("combined");
+  const [aiMenuOpen, setAiMenuOpen] = useState(false);
+  const [aiResult, setAiResult] = useState<AiAnalysisResult | null>(null);
+  const [aiError, setAiError] = useState("");
+  const aiAnalyze = trpc.aiAnalysis.analyze.useMutation();
   const [strategyLevel, setStrategyLevel] = useState(0);
   const strategyRef = useRef<StrategyName>("馬丁");
   const baseBetRef = useRef(baseBet);
@@ -3755,6 +3837,61 @@ export default function HomeScreen() {
     assistDecision.scorePlayer,
   );
   const assistConfidenceState = confidenceState(assistConfidence);
+  const aiProviderOption =
+    AI_PROVIDER_OPTIONS.find((x) => x.key === aiProvider) || AI_PROVIDER_OPTIONS[4];
+  const aiProviderLabel = aiProviderOption.label;
+  const aiRoadFingerprint = `${assistTable?.apiId ?? assistTable?.id ?? ""}|${
+    assistTable?.round ?? 0
+  }|${(assistTable?.results ?? []).slice(-60).join("")}`;
+  useEffect(() => {
+    if (!accessSessionId || !assistTable || (assistTable.results?.length ?? 0) < 3) {
+      setAiResult(null);
+      setAiError("");
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      const d = roadDecision(assistTable.results ?? []);
+      aiAnalyze
+        .mutateAsync({
+          sessionId: accessSessionId,
+          provider: aiProvider,
+          tableName: assistRoomTitle(assistTable, activePlatform) || assistTable.id,
+          dealer: assistTable.name || "—",
+          round: assistTable.round ?? 0,
+          results: (assistTable.results ?? []).slice(-120),
+          pattern: detectPattern(assistTable.results ?? []),
+          localScoreBanker: d.scoreBanker,
+          localScorePlayer: d.scorePlayer,
+        })
+        .then((result) => {
+          if (cancelled) return;
+          setAiResult(result as AiAnalysisResult);
+          setAiError("");
+        })
+        .catch((error: any) => {
+          if (cancelled) return;
+          setAiResult(null);
+          setAiError(String(error?.message || "AI 分析暫時無法使用"));
+        });
+    }, 280);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [aiProvider, aiRoadFingerprint, accessSessionId, activePlatform]);
+  const effectiveRecommendation: "莊" | "閒" =
+    aiResult?.side === "莊" || aiResult?.side === "閒"
+      ? aiResult.side
+      : recommendation;
+  const effectiveConfidenceState = aiResult
+    ? confidenceState(aiResult.confidence)
+    : assistConfidenceState;
+  const effectiveAnalysisText = aiResult
+    ? `【${aiProviderLabel}】${aiResult.summary}`
+    : aiError
+      ? `【${aiProviderLabel}】${aiError}；暫時沿用原本牌路分析。\n${analysisText(assistTable)}`
+      : analysisText(assistTable);
   const radarSignals = useMemo(
     () =>
       assistPool.map((table) => {
@@ -6945,7 +7082,52 @@ export default function HomeScreen() {
               {detectPattern(assistTable?.results ?? [])}
             </Text>
           </View>
-          <View style={s.decisionBox}>
+          <View style={[s.decisionBox, s.recommendDecisionBox]}>
+            <View style={s.aiProviderFloatWrap}>
+              <Pressable
+                onPress={() => setAiMenuOpen((v) => !v)}
+                style={({ pressed }: any) => [
+                  s.aiProviderFloatBtn,
+                  pressed && s.aiProviderFloatBtnPressed,
+                ]}
+              >
+                <View style={s.aiProviderFloatContent}>
+                  <AiProviderBadge provider={aiProvider} compact />
+                  <Text numberOfLines={1} style={s.aiProviderFloatText}>
+                    {aiProviderLabel}
+                  </Text>
+                </View>
+                <MaterialIcons
+                  name={aiMenuOpen ? "keyboard-arrow-up" : "keyboard-arrow-down"}
+                  size={12}
+                  color="#D9F2FF"
+                />
+              </Pressable>
+              {aiMenuOpen ? (
+                <View style={s.aiProviderMenu}>
+                  {AI_PROVIDER_OPTIONS.map((item) => (
+                    <Pressable
+                      key={item.key}
+                      onPress={() => {
+                        setAiProvider(item.key);
+                        setAiMenuOpen(false);
+                        setAiResult(null);
+                        setAiError("");
+                      }}
+                      style={[
+                        s.aiProviderMenuItem,
+                        aiProvider === item.key && s.aiProviderMenuItemActive,
+                      ]}
+                    >
+                      <View style={s.aiProviderMenuItemRow}>
+                        <AiProviderBadge provider={item.key} />
+                        <Text style={s.aiProviderMenuText}>{item.label}</Text>
+                      </View>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+            </View>
             <View style={s.recommendHeader}>
               <View style={s.recommendTitleConfidence}>
                 <Text style={s.smallLabel}>推薦下注</Text>
@@ -6953,8 +7135,8 @@ export default function HomeScreen() {
                   style={[
                     s.signalDotSmall,
                     {
-                      backgroundColor: assistConfidenceState.color,
-                      shadowColor: assistConfidenceState.color,
+                      backgroundColor: effectiveConfidenceState.color,
+                      shadowColor: effectiveConfidenceState.color,
                     },
                   ]}
                 />
@@ -6963,12 +7145,12 @@ export default function HomeScreen() {
                   style={[
                     s.confidenceText,
                     {
-                      color: assistConfidenceState.color,
-                      textShadowColor: assistConfidenceState.color,
+                      color: effectiveConfidenceState.color,
+                      textShadowColor: effectiveConfidenceState.color,
                     },
                   ]}
                 >
-                  {assistConfidenceState.label}
+                  {effectiveConfidenceState.label}
                 </Text>
               </View>
               <Pressable
@@ -6982,9 +7164,9 @@ export default function HomeScreen() {
               </Pressable>
             </View>
             <Text
-              style={[s.recommendText, { color: resultColor(recommendation) }]}
+              style={[s.recommendText, { color: resultColor(effectiveRecommendation) }]}
             >
-              {recommendation} {nextAmount.toLocaleString()}
+              {effectiveRecommendation} {nextAmount.toLocaleString()}
             </Text>
             <View style={s.recommendMetaRow}>
               <Text style={[s.microText, s.recommendStrategyMeta]}>
@@ -7029,7 +7211,7 @@ export default function HomeScreen() {
               <Text style={s.stopLossMiniBtnText}>止損設定</Text>
             </Pressable>
           </View>
-          <Text style={s.aiText}>{analysisText(assistTable)}</Text>
+          <Text style={s.aiText}>{effectiveAnalysisText}</Text>
         </View>
       </View>
     );
@@ -10098,6 +10280,89 @@ const s = StyleSheet.create({
     borderRadius: 5,
     padding: 7,
   },
+  recommendDecisionBox: { position: "relative", zIndex: 60, overflow: "visible" },
+  aiProviderFloatWrap: {
+    position: "absolute",
+    top: -9,
+    left: 6,
+    zIndex: 90,
+    overflow: "visible",
+  },
+  aiProviderFloatBtn: {
+    height: 18,
+    minWidth: 62,
+    maxWidth: 82,
+    paddingHorizontal: 5,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: "#315D79",
+    backgroundColor: "#123149",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 2,
+  },
+  aiProviderFloatBtnPressed: { opacity: 0.76 },
+  aiProviderFloatContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  aiProviderFloatText: { color: "#D9F2FF", fontSize: 7.5, fontWeight: "900", flexShrink: 1 },
+  aiProviderBadge: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,.18)",
+    flexShrink: 0,
+  },
+  aiProviderBadgeCompact: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+  aiProviderBadgeText: {
+    fontSize: 6.2,
+    fontWeight: "900",
+    lineHeight: 7,
+    letterSpacing: -0.2,
+  },
+  aiProviderBadgeTextCompact: {
+    fontSize: 5.4,
+    lineHeight: 6,
+  },
+  aiProviderMenu: {
+    position: "absolute",
+    top: 20,
+    left: 0,
+    width: 92,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "#315D79",
+    backgroundColor: "#081722",
+    overflow: "hidden",
+    zIndex: 100,
+    elevation: 20,
+  },
+  aiProviderMenuItem: {
+    height: 24,
+    paddingHorizontal: 7,
+    justifyContent: "center",
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#294B64",
+  },
+  aiProviderMenuItemActive: { backgroundColor: "#173D58" },
+  aiProviderMenuItemRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  aiProviderMenuText: { color: "#F2FAFF", fontSize: 8, fontWeight: "900" },
   smallLabel: { color: "#FFFFFF", fontSize: 12, fontWeight: "900" },
   latestLine: {
     flexDirection: "row",
