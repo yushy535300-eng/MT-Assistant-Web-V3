@@ -22,6 +22,7 @@ import {
 } from "react-native";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import FontAwesome6 from "@expo/vector-icons/FontAwesome6";
+import Svg, { Circle, G, Path, Rect } from "react-native-svg";
 import * as Linking from "expo-linking";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { ScreenContainer } from "@/components/screen-container";
@@ -81,12 +82,11 @@ type AiAnalysisResult = {
 const AI_PROVIDER_OPTIONS: Array<{
   key: AiProvider;
   label: string;
-  logoUri?: string;
 }> = [
-  { key: "chatgpt", label: "ChatGPT", logoUri: "https://chatgpt.com/favicon.ico" },
-  { key: "gemini", label: "Gemini", logoUri: "https://gemini.google.com/favicon.ico" },
-  { key: "grok", label: "Grok", logoUri: "https://grok.com/favicon.ico" },
-  { key: "meta", label: "Meta AI", logoUri: "https://www.meta.ai/favicon.ico" },
+  { key: "chatgpt", label: "ChatGPT" },
+  { key: "gemini", label: "Gemini" },
+  { key: "grok", label: "Grok" },
+  { key: "meta", label: "Meta AI" },
   { key: "combined", label: "AI綜合" },
 ];
 
@@ -119,22 +119,56 @@ function StableGameIframe({
 }
 
 function AiProviderBadge({ provider, compact = false }: { provider: AiProvider; compact?: boolean }) {
-  const option = AI_PROVIDER_OPTIONS.find((item) => item.key === provider) ?? AI_PROVIDER_OPTIONS[4];
   const size = compact ? 12 : 14;
-  if (option.logoUri) {
+  const iconSize = compact ? 10 : 12;
+  if (provider === "chatgpt") {
     return (
-      <View
-        style={[
-          s.aiProviderBadge,
-          compact && s.aiProviderBadgeCompact,
-          { backgroundColor: "#F7FAFC" },
-        ]}
-      >
-        <Image
-          source={{ uri: option.logoUri }}
-          resizeMode="contain"
-          style={{ width: size - 3, height: size - 3, borderRadius: (size - 3) / 2 }}
-        />
+      <View style={[s.aiProviderBadge, compact && s.aiProviderBadgeCompact, { backgroundColor: "#10A37F" }]}>
+        <Svg width={iconSize} height={iconSize} viewBox="0 0 24 24">
+          <G fill="none" stroke="#FFFFFF" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <Rect x="8.4" y="1.9" width="7.2" height="11" rx="3.3" transform="rotate(0 12 12)" />
+            <Rect x="8.4" y="1.9" width="7.2" height="11" rx="3.3" transform="rotate(60 12 12)" />
+            <Rect x="8.4" y="1.9" width="7.2" height="11" rx="3.3" transform="rotate(120 12 12)" />
+          </G>
+          <Circle cx="12" cy="12" r="2.2" fill="#10A37F" stroke="#FFFFFF" strokeWidth="1.5" />
+        </Svg>
+      </View>
+    );
+  }
+  if (provider === "gemini") {
+    return (
+      <View style={[s.aiProviderBadge, compact && s.aiProviderBadgeCompact, { backgroundColor: "#F7F7FF" }]}>
+        <Svg width={iconSize} height={iconSize} viewBox="0 0 24 24">
+          <Path d="M12 2L14.8 9.2L22 12L14.8 14.8L12 22L9.2 14.8L2 12L9.2 9.2Z" fill="#6E77FF" />
+          <Path d="M12 4.8L14 10L19.2 12L14 14L12 19.2L10 14L4.8 12L10 10Z" fill="#9EAEFF" opacity="0.92" />
+        </Svg>
+      </View>
+    );
+  }
+  if (provider === "grok") {
+    return (
+      <View style={[s.aiProviderBadge, compact && s.aiProviderBadgeCompact, { backgroundColor: "#111820" }]}>
+        <Svg width={iconSize} height={iconSize} viewBox="0 0 24 24">
+          <Path d="M5 5L19 19" stroke="#FFFFFF" strokeWidth="3" strokeLinecap="round" />
+          <Path d="M15.8 5H19V8.2" stroke="#FFFFFF" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+          <Path d="M5 19L11 13" stroke="#FFFFFF" strokeWidth="3" strokeLinecap="round" />
+        </Svg>
+      </View>
+    );
+  }
+  if (provider === "meta") {
+    return (
+      <View style={[s.aiProviderBadge, compact && s.aiProviderBadgeCompact, { backgroundColor: "#F5F9FF" }]}>
+        <Svg width={iconSize} height={iconSize} viewBox="0 0 24 24">
+          <Path
+            d="M3 14.2C4.6 8.1 7.7 5.7 9.8 10.1C11 12.6 11.7 14 12.2 14C12.9 14 13.7 12.5 15 10C17.2 5.9 20.1 8.4 21 14"
+            fill="none"
+            stroke="#168AFF"
+            strokeWidth="2.35"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </Svg>
       </View>
     );
   }
@@ -145,7 +179,7 @@ function AiProviderBadge({ provider, compact = false }: { provider: AiProvider; 
         <View style={[s.aiCombinedDot, { backgroundColor: "#6C7DFF" }]} />
       </View>
       <View style={s.aiCombinedDotRow}>
-        <View style={[s.aiCombinedDot, { backgroundColor: "#E8EEF3" }]} />
+        <View style={[s.aiCombinedDot, { backgroundColor: "#F6F8FB" }]} />
         <View style={[s.aiCombinedDot, { backgroundColor: "#168AFF" }]} />
       </View>
     </View>
@@ -10294,17 +10328,20 @@ const s = StyleSheet.create({
     borderRadius: 5,
     padding: 7,
   },
-  recommendDecisionBox: { position: "relative", zIndex: 900, overflow: "visible" },
+  recommendDecisionBox: { position: "relative", zIndex: 1500, overflow: "visible" },
   aiProviderInlineWrap: {
     position: "relative",
-    zIndex: 1100,
+    zIndex: 2100,
     overflow: "visible",
     marginTop: 4,
     marginLeft: 8,
+    width: 108,
+    alignItems: "flex-end",
+    flexShrink: 0,
   },
   aiProviderFloatBtn: {
     height: 24,
-    width: 104,
+    width: 108,
     paddingHorizontal: 7,
     borderRadius: 5,
     borderWidth: 1,
@@ -10359,18 +10396,18 @@ const s = StyleSheet.create({
     position: "absolute",
     top: 27,
     right: 0,
-    width: 122,
+    width: 108,
     borderRadius: 5,
     borderWidth: 1,
     borderColor: "#315D79",
     backgroundColor: "#081722",
     overflow: "hidden",
-    zIndex: 1200,
-    elevation: 120,
+    zIndex: 2400,
+    elevation: 240,
   },
   aiProviderMenuItem: {
     height: 29,
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
     justifyContent: "center",
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: "#294B64",
@@ -10379,9 +10416,10 @@ const s = StyleSheet.create({
   aiProviderMenuItemRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: 5,
+    minWidth: 0,
   },
-  aiProviderMenuText: { color: "#F2FAFF", fontSize: 9.5, fontWeight: "900", flexShrink: 1 },
+  aiProviderMenuText: { color: "#F2FAFF", fontSize: 9, fontWeight: "900", flexShrink: 1 },
   smallLabel: { color: "#FFFFFF", fontSize: 12, fontWeight: "900" },
   latestLine: {
     flexDirection: "row",
@@ -10413,7 +10451,7 @@ const s = StyleSheet.create({
   },
   todayPnlBox: {
     position: "relative",
-    zIndex: 1,
+    zIndex: 10,
     marginTop: 5,
     backgroundColor: "#102335",
     borderWidth: 1,
@@ -10428,7 +10466,7 @@ const s = StyleSheet.create({
   todayPnlValue: { fontSize: 16, fontWeight: "900" },
   aiBox: {
     position: "relative",
-    zIndex: 0,
+    zIndex: 5,
     marginTop: 5,
     backgroundColor: "#0B1925",
     borderRadius: 5,
