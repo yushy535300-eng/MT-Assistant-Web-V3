@@ -93,16 +93,32 @@ function distributionScore(road: string[], take: number) {
   return arr.reduce((sum, x) => sum + sideValue(x), 0);
 }
 
-function tieBreak(input: AnalysisInput, road: string[]): AiSide {
-  const local = Number(input.localScoreBanker ?? 0) - Number(input.localScorePlayer ?? 0);
-  if (Math.abs(local) > 0.01) return local > 0 ? "莊" : "閒";
-  const last = road.at(-1);
-  if (last === "莊" || last === "閒") return last;
-  return (Number(input.round ?? 0) % 2 === 0) ? "莊" : "閒";
+function providerTieBreak(provider: Provider, input: AnalysisInput, road: string[]): AiSide {
+  const last = road.at(-1) as AiSide | undefined;
+  if (provider === "chatgpt") {
+    const trend = weightedMomentum(road, 8);
+    if (Math.abs(trend) > 0.01) return trend > 0 ? "莊" : "閒";
+    return last ?? ((Number(input.round ?? 0) % 2 === 0) ? "莊" : "閒");
+  }
+  if (provider === "gemini") {
+    if (last && alternationRate(road, 6) >= 0.67) return inverseSide(last);
+    const structure = distributionScore(road, 10);
+    if (structure !== 0) return structure > 0 ? "莊" : "閒";
+    return last ? inverseSide(last) : "莊";
+  }
+  if (provider === "grok") {
+    const fast = weightedMomentum(road, 4);
+    if (Math.abs(fast) > 0.01) return fast > 0 ? "莊" : "閒";
+    return last ?? "閒";
+  }
+  // Meta is intentionally more sensitive to correction / mean-reversion conditions.
+  const balance = distributionScore(road, 12);
+  if (Math.abs(balance) >= 2) return balance > 0 ? "閒" : "莊";
+  return last ? inverseSide(last) : ((Number(input.round ?? 0) % 2 === 0) ? "閒" : "莊");
 }
 
-function decideSide(score: number, input: AnalysisInput, road: string[]): AiSide {
-  if (Math.abs(score) < 0.18) return tieBreak(input, road);
+function decideSide(score: number, provider: Provider, input: AnalysisInput, road: string[]): AiSide {
+  if (Math.abs(score) < 0.55) return providerTieBreak(provider, input, road);
   return score > 0 ? "莊" : "閒";
 }
 
@@ -124,16 +140,18 @@ function chatgptAnalysis(input: AnalysisInput): ProviderResult {
   const streak = currentStreak(road);
   const alt = alternationRate(road, 10);
   const momentum = weightedMomentum(road, 12);
-  const continuation = streak.length >= 2 ? sideValue(streak.side) * Math.min(2.3, streak.length * 0.55) : 0;
-  const alternatingBias = alt >= 0.72 && road.length >= 2 ? -sideValue(road.at(-1) || "") * 1.15 : 0;
-  const score = momentum * 0.42 + continuation + alternatingBias;
-  const side = decideSide(score, input, road);
+  const continuation = streak.length >= 2 ? sideValue(streak.side) * Math.min(2.0, streak.length * 0.5) : 0;
+  const alternatingBias = alt >= 0.78 && road.length >= 2 ? -sideValue(road.at(-1) || "") * 0.8 : 0;
+  const score = momentum * 0.34 + continuation + alternatingBias;
+  const side = decideSide(score, "chatgpt", input, road);
   const confidence = confidenceFromScore(score, 57);
   const templates = [
-    `近${Math.min(12, recent.length)}局節奏以${sideWord(side)}延續較完整，短線轉折尚未破壞主方向，本局偏${side}。`,
-    `近期序列的連續性高於反向訊號，${sideWord(side)}在最近一段的節奏較穩，本局推薦${side}。`,
-    `${streak.length >= 2 ? `目前出現${streak.side}${streak.length}連，` : "近期走勢以短段切換為主，"}${sideWord(side)}的延續條件較明顯，本局看${side}。`,
-    `最近牌路的重心逐步往${sideWord(side)}移動，交替訊號不足以扭轉當前節奏，本局推薦${side}。`,
+    `近${Math.min(12, recent.length)}局的節奏重心偏向${sideWord(side)}，連續段仍有延伸空間，本局推薦${side}。`,
+    `近期走勢的連續性高於反向訊號，${sideWord(side)}在最近一段較穩，本局看${side}。`,
+    `${streak.length >= 2 ? `目前形成${streak.side}${streak.length}連，` : "目前以短段切換為主，"}${sideWord(side)}的延續條件較完整，本局偏${side}。`,
+    `最近牌路的節奏逐步往${sideWord(side)}靠攏，短線轉折還不足以改變主方向，本局推薦${side}。`,
+    `從最近幾段的銜接來看，${sideWord(side)}延續性略勝一籌，本局先看${side}。`,
+    `近期節奏出現明顯重心，${sideWord(side)}的連續表現較完整，本局偏向${side}。`,
   ];
   return { provider: "chatgpt", side, confidence, summary: templates[variantIndex(input, "chatgpt", templates.length)] };
 }
@@ -143,22 +161,23 @@ function geminiAnalysis(input: AnalysisInput): ProviderResult {
   const alt6 = alternationRate(road, 6);
   const alt10 = alternationRate(road, 10);
   const streak = currentStreak(road);
-  const structure = distributionScore(road, 14) * 0.28;
-  const transition = (alt10 - alt6) * 3.1;
-  let score = structure;
-  if (streak.length >= 3) score += sideValue(streak.side) * 1.35;
-  if (alt6 >= 0.8 && road.length >= 2) score += -sideValue(road.at(-1) || "") * 1.4;
-  if (transition > 0.35) score += -sideValue(road.at(-1) || "") * 0.55;
+  const last = road.at(-1);
+  let score = (1 - alt6) * distributionScore(road, 14) * 0.18;
+  if (last && alt6 >= 0.72) score += -sideValue(last) * 1.6;
+  if (streak.length === 2 || streak.length === 3) score += sideValue(streak.side) * 0.85;
+  if (streak.length >= 5) score += -sideValue(streak.side) * 0.5;
+  if (alt10 > alt6 + 0.18 && last) score += -sideValue(last) * 0.45;
   const patternText = String(input.pattern || "");
-  if (/莊/.test(patternText)) score += 0.35;
-  if (/閒/.test(patternText)) score -= 0.35;
-  const side = decideSide(score, input, road);
+  if (/單跳|雙跳|跳/.test(patternText) && last) score += -sideValue(last) * 0.35;
+  const side = decideSide(score, "gemini", input, road);
   const confidence = confidenceFromScore(score, 55);
   const templates = [
     `從路型結構看，近期由${alt6 > 0.65 ? "交替" : "連續"}段主導，${sideWord(side)}的型態一致性較高，本局偏${side}。`,
-    `比較前後兩段牌路後，${sideWord(side)}的結構延續較完整，轉折訊號仍未形成，本局推薦${side}。`,
-    `目前路型的短龍與切換節奏偏向${sideWord(side)}，另一側回轉條件較弱，本局看${side}。`,
-    `牌型變化顯示${sideWord(side)}仍保有結構優勢，近期轉向幅度不足，本局推薦${side}。`,
+    `比較前後兩段牌路後，${sideWord(side)}的結構較完整，目前轉折訊號仍不足，本局推薦${side}。`,
+    `目前短龍與切換節奏較偏${sideWord(side)}，另一側的結構尚未成形，本局看${side}。`,
+    `牌型變化顯示${sideWord(side)}的路型較順，近期反向切換幅度偏弱，本局推薦${side}。`,
+    `從交替率與連續段的變化判斷，${sideWord(side)}目前結構較有利，本局偏${side}。`,
+    `近期路型的轉折位置較支持${sideWord(side)}，另一側尚未形成完整接續，本局看${side}。`,
   ];
   return { provider: "gemini", side, confidence, summary: templates[variantIndex(input, "gemini", templates.length, 17)] };
 }
@@ -166,19 +185,21 @@ function geminiAnalysis(input: AnalysisInput): ProviderResult {
 function grokAnalysis(input: AnalysisInput): ProviderResult {
   const road = cleanRoad(input.results);
   const fast = weightedMomentum(road, 5);
-  const short = weightedMomentum(road, 7);
+  const ultraFast = weightedMomentum(road, 3);
   const streak = currentStreak(road);
   const last = road.at(-1);
-  let score = fast * 0.72 + short * 0.24;
-  if (streak.length >= 2) score += sideValue(streak.side) * Math.min(1.7, streak.length * 0.48);
-  if (alternationRate(road, 5) >= 0.75 && last) score += -sideValue(last) * 0.85;
-  const side = decideSide(score, input, road);
+  let score = fast * 0.68 + ultraFast * 0.36;
+  if (streak.length >= 2) score += sideValue(streak.side) * Math.min(1.4, streak.length * 0.42);
+  if (alternationRate(road, 5) >= 0.8 && last) score += -sideValue(last) * 0.55;
+  const side = decideSide(score, "grok", input, road);
   const confidence = confidenceFromScore(score, 58);
   const templates = [
-    `近幾局的短線動能明顯偏${sideWord(side)}，最近轉折沒有把力度完全打掉，本局推薦${side}。`,
-    `看最近5到7局，${sideWord(side)}的推進速度較快，短線仍佔上風，本局偏${side}。`,
-    `最新一段的節奏重心落在${sideWord(side)}，反向訊號雖有出現但力度較弱，本局看${side}。`,
-    `短線動能目前由${sideWord(side)}掌握，最近幾局的變化仍支持延續，本局推薦${side}。`,
+    `近5局的短線動能明顯偏${sideWord(side)}，最新轉折還沒把力度打掉，本局推薦${side}。`,
+    `最近3到5局的推進速度由${sideWord(side)}佔優，短線節奏仍支持${side}。`,
+    `最新一段的動能重心落在${sideWord(side)}，反向力度目前較弱，本局看${side}。`,
+    `短線變化目前由${sideWord(side)}掌握，最近幾局仍維持有效推進，本局推薦${side}。`,
+    `把最近幾局單獨拉出來看，${sideWord(side)}的即時動能較強，本局偏${side}。`,
+    `近期快速節奏偏向${sideWord(side)}，最新局勢尚未出現足夠反向力道，本局看${side}。`,
   ];
   return { provider: "grok", side, confidence, summary: templates[variantIndex(input, "grok", templates.length, 29)] };
 }
@@ -189,18 +210,20 @@ function metaAnalysis(input: AnalysisInput): ProviderResult {
   const shortDist = distributionScore(road, 8);
   const streak = currentStreak(road);
   const imbalance = Math.abs(longDist);
-  let score = shortDist * 0.38 + longDist * 0.16;
-  // Meta focuses more on imbalance / correction: very one-sided long runs get a measured counter-weight.
-  if (imbalance >= 6) score += longDist > 0 ? -1.55 : 1.55;
-  if (streak.length >= 4) score += streak.side === "莊" ? -0.85 : 0.85;
-  if (streak.length === 2 || streak.length === 3) score += sideValue(streak.side) * 0.48;
-  const side = decideSide(score, input, road);
+  // Meta deliberately emphasizes balance / correction more than the other three models.
+  let score = -longDist * 0.20 - shortDist * 0.28;
+  if (imbalance <= 2) score += shortDist * 0.12;
+  if (streak.length >= 4) score += -sideValue(streak.side) * 1.3;
+  else if (streak.length === 2) score += sideValue(streak.side) * 0.2;
+  const side = decideSide(score, "meta", input, road);
   const confidence = confidenceFromScore(score, 54);
   const templates = [
-    `從近期莊閒分布看，${sideWord(side)}的比例與回補條件較有利，本局推薦${side}。`,
-    `目前序列存在${imbalance >= 5 ? "較明顯的分布失衡" : "輕度比例偏移"}，綜合回補與延續後偏向${side}。`,
-    `${sideWord(side)}在近期分布中的位置較有優勢，現階段反向回補壓力較小，本局看${side}。`,
-    `依最近一段的比例與連續段分布，${sideWord(side)}條件略優，本局推薦${side}。`,
+    `從近期莊閒分布看，${sideWord(side)}的平衡與回補條件較有利，本局推薦${side}。`,
+    `目前序列呈現${imbalance >= 5 ? "較明顯的比例失衡" : "輕度比例偏移"}，綜合回補條件後偏向${side}。`,
+    `${sideWord(side)}在近期分布中的位置較有利，現階段修正空間更支持${side}。`,
+    `依最近一段的比例與連續段分布，${sideWord(side)}的平衡條件略優，本局推薦${side}。`,
+    `近期莊閒比例出現偏移，從回補與反轉條件判斷，本局較偏${side}。`,
+    `從長短區間的分布差異看，${sideWord(side)}目前更符合回補節奏，本局看${side}。`,
   ];
   return { provider: "meta", side, confidence, summary: templates[variantIndex(input, "meta", templates.length, 43)] };
 }
@@ -223,7 +246,7 @@ function combinedAnalysis(input: AnalysisInput): AiAnalysisResult {
   } else {
     const bWeight = banker.reduce((sum, x) => sum + x.confidence, 0);
     const pWeight = player.reduce((sum, x) => sum + x.confidence, 0);
-    side = bWeight === pWeight ? tieBreak(input, cleanRoad(input.results)) : bWeight > pWeight ? "莊" : "閒";
+    side = bWeight === pWeight ? providerTieBreak("chatgpt", input, cleanRoad(input.results)) : bWeight > pWeight ? "莊" : "閒";
   }
   const winners = results.filter((x) => x.side === side);
   const confidence = clamp(Math.round(winners.reduce((sum, x) => sum + x.confidence, 0) / Math.max(1, winners.length)), 55, 89);

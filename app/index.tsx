@@ -3882,25 +3882,104 @@ export default function HomeScreen() {
         })
         .catch(() => {
           if (cancelled) return;
-          const results = (assistTable.results ?? []).filter((x) => x === "莊" || x === "閒");
-          const recent = results.slice(-12);
-          const localDelta = Number(d.scoreBanker ?? 0) - Number(d.scorePlayer ?? 0);
-          const recentDelta = recent.reduce((sum, x) => sum + (x === "莊" ? 1 : -1), 0);
-          const last = recent.at(-1);
-          let score = localDelta + recentDelta * 0.45;
-          if (aiProvider === "chatgpt") score += last === "莊" ? 0.7 : last === "閒" ? -0.7 : 0;
-          if (aiProvider === "gemini") score += detectPattern(results).includes("莊") ? 0.6 : detectPattern(results).includes("閒") ? -0.6 : 0;
-          if (aiProvider === "grok") score += recent.slice(-5).reduce((sum, x, i) => sum + (x === "莊" ? 1 : -1) * (i + 1), 0) * 0.08;
-          if (aiProvider === "meta") score += recentDelta > 4 ? -1.1 : recentDelta < -4 ? 1.1 : 0;
-          const side: AiSide = score === 0 ? (last === "閒" ? "閒" : "莊") : score > 0 ? "莊" : "閒";
-          const summaries: Record<AiProvider, string> = {
-            chatgpt: `近期連續性與節奏較支持${side}方，本局推薦${side}。`,
-            gemini: `目前路型結構偏向${side}方延續，轉折訊號仍較弱，本局推薦${side}。`,
-            grok: `最近幾局短線動能偏${side}方，現階段節奏仍支持${side}。`,
-            meta: `近期莊閒分布與回補條件較偏${side}方，本局推薦${side}。`,
-            combined: `綜合目前牌路訊號後偏向${side}方，本局推薦${side}。`,
+          const road = (assistTable.results ?? []).filter((x) => x === "莊" || x === "閒");
+          const value = (x?: string) => x === "莊" ? 1 : x === "閒" ? -1 : 0;
+          const weighted = (take: number) => {
+            const arr = road.slice(-take);
+            return arr.reduce((sum, x, i) => {
+              const w = 1 + (i / Math.max(1, arr.length - 1)) * 1.8;
+              return sum + value(x) * w;
+            }, 0);
           };
-          setAiResult({ provider: aiProvider, side, confidence: 60, summary: summaries[aiProvider] });
+          const distribution = (take: number) => road.slice(-take).reduce((sum, x) => sum + value(x), 0);
+          const alternation = (take: number) => {
+            const arr = road.slice(-take);
+            if (arr.length < 2) return 0;
+            let changes = 0;
+            for (let i = 1; i < arr.length; i += 1) if (arr[i] !== arr[i - 1]) changes += 1;
+            return changes / (arr.length - 1);
+          };
+          const streakSide = road.at(-1) as "莊" | "閒" | undefined;
+          let streakLen = streakSide ? 1 : 0;
+          for (let i = road.length - 2; streakSide && i >= 0; i -= 1) {
+            if (road[i] !== streakSide) break;
+            streakLen += 1;
+          }
+          const last = road.at(-1) as "莊" | "閒" | undefined;
+          const opposite = (x?: string): "莊" | "閒" => x === "莊" ? "閒" : "莊";
+          const pick = (score: number, fallback: "莊" | "閒"): "莊" | "閒" =>
+            Math.abs(score) < 0.55 ? fallback : score > 0 ? "莊" : "閒";
+
+          const chatScore = weighted(12) * 0.34 + (streakLen >= 2 ? value(streakSide) * Math.min(2, streakLen * 0.5) : 0) + (alternation(10) >= 0.78 ? -value(last) * 0.8 : 0);
+          const chatFallback = weighted(8) >= 0 ? "莊" : "閒";
+          const chatSide = pick(chatScore, chatFallback);
+
+          let gemScore = (1 - alternation(6)) * distribution(14) * 0.18;
+          if (last && alternation(6) >= 0.72) gemScore += -value(last) * 1.6;
+          if (streakLen === 2 || streakLen === 3) gemScore += value(streakSide) * 0.85;
+          if (streakLen >= 5) gemScore += -value(streakSide) * 0.5;
+          const gemFallback = last && alternation(6) >= 0.67 ? opposite(last) : distribution(10) >= 0 ? "莊" : "閒";
+          const gemSide = pick(gemScore, gemFallback);
+
+          let grokScore = weighted(5) * 0.68 + weighted(3) * 0.36;
+          if (streakLen >= 2) grokScore += value(streakSide) * Math.min(1.4, streakLen * 0.42);
+          if (last && alternation(5) >= 0.8) grokScore += -value(last) * 0.55;
+          const grokSide = pick(grokScore, weighted(4) >= 0 ? "莊" : "閒");
+
+          const longDist = distribution(18);
+          const shortDist = distribution(8);
+          let metaScore = -longDist * 0.20 - shortDist * 0.28;
+          if (Math.abs(longDist) <= 2) metaScore += shortDist * 0.12;
+          if (streakLen >= 4) metaScore += -value(streakSide) * 1.3;
+          else if (streakLen === 2) metaScore += value(streakSide) * 0.2;
+          const metaFallback = Math.abs(distribution(12)) >= 2
+            ? (distribution(12) > 0 ? "閒" : "莊")
+            : opposite(last);
+          const metaSide = pick(metaScore, metaFallback);
+
+          const sides: Record<Exclude<AiProvider, "combined">, "莊" | "閒"> = {
+            chatgpt: chatSide,
+            gemini: gemSide,
+            grok: grokSide,
+            meta: metaSide,
+          };
+          const providerSide = aiProvider === "combined"
+            ? ([chatSide, gemSide, grokSide, metaSide].filter((x) => x === "莊").length >= 2 ? "莊" : "閒")
+            : sides[aiProvider];
+          const seed = Math.abs((assistTable.round ?? 0) + road.length + providerSide.length) % 4;
+          const summarySets: Record<AiProvider, string[]> = {
+            chatgpt: [
+              `最近牌路的節奏重心偏向${providerSide}方，連續性仍較完整，本局推薦${providerSide}。`,
+              `近期走勢的延續訊號較支持${providerSide}方，短線反轉力道不足，本局看${providerSide}。`,
+              `從最近幾段的銜接來看，${providerSide}方節奏較穩，本局偏${providerSide}。`,
+              `最近路勢逐步往${providerSide}方靠攏，目前主方向仍未被破壞，本局推薦${providerSide}。`,
+            ],
+            gemini: [
+              `目前路型結構較偏${providerSide}方，交替與連續段的組合更支持${providerSide}。`,
+              `從牌型切換位置判斷，${providerSide}方的結構較完整，本局推薦${providerSide}。`,
+              `近期短龍與轉折節奏較支持${providerSide}方，本局看${providerSide}。`,
+              `目前路型的變化仍由${providerSide}方佔優，反向結構尚未成形。`,
+            ],
+            grok: [
+              `最近幾局的短線動能偏${providerSide}方，最新節奏仍支持${providerSide}。`,
+              `近5局推進速度由${providerSide}方佔優，本局推薦${providerSide}。`,
+              `最新一段的動能重心落在${providerSide}方，反向力道目前較弱。`,
+              `短線節奏目前由${providerSide}方掌握，本局偏${providerSide}。`,
+            ],
+            meta: [
+              `從近期莊閒分布與回補條件來看，${providerSide}方目前較有利。`,
+              `近期比例出現偏移，依平衡與修正條件，本局較偏${providerSide}。`,
+              `從長短區間的分布差異判斷，${providerSide}方更符合目前回補節奏。`,
+              `目前莊閒比例與連續段位置較支持${providerSide}方，本局推薦${providerSide}。`,
+            ],
+            combined: [
+              `綜合四種牌路角度後，本局偏向${providerSide}。`,
+              `整合近期節奏、路型、短線動能與分布後，本局推薦${providerSide}。`,
+              `四組判斷整合後，整體訊號較集中在${providerSide}方。`,
+              `綜合目前牌路的多項訊號，本局以${providerSide}方為主。`,
+            ],
+          };
+          setAiResult({ provider: aiProvider, side: providerSide, confidence: 60, summary: summarySets[aiProvider][seed] });
           setAiError("");
         });
     }, 280);
@@ -7171,30 +7250,6 @@ export default function HomeScreen() {
                     color="#D9F2FF"
                   />
                 </Pressable>
-                {aiMenuOpen ? (
-                  <View style={s.aiProviderMenu}>
-                    {AI_PROVIDER_OPTIONS.map((item) => (
-                      <Pressable
-                        key={item.key}
-                        onPress={() => {
-                          setAiProvider(item.key);
-                          setAiMenuOpen(false);
-                          setAiResult(null);
-                          setAiError("");
-                        }}
-                        style={[
-                          s.aiProviderMenuItem,
-                          aiProvider === item.key && s.aiProviderMenuItemActive,
-                        ]}
-                      >
-                        <View style={s.aiProviderMenuItemRow}>
-                          <AiProviderBadge provider={item.key} />
-                          <Text numberOfLines={1} style={s.aiProviderMenuText}>{item.label}</Text>
-                        </View>
-                      </Pressable>
-                    ))}
-                  </View>
-                ) : null}
               </View>
             </View>
             <View style={s.recommendMetaRow}>
@@ -7203,6 +7258,30 @@ export default function HomeScreen() {
                 {nextAmount.toLocaleString()}
               </Text>
             </View>
+            {aiMenuOpen ? (
+              <View style={s.aiProviderMenu}>
+                {AI_PROVIDER_OPTIONS.map((item) => (
+                  <Pressable
+                    key={item.key}
+                    onPress={() => {
+                      setAiProvider(item.key);
+                      setAiMenuOpen(false);
+                      setAiResult(null);
+                      setAiError("");
+                    }}
+                    style={[
+                      s.aiProviderMenuItem,
+                      aiProvider === item.key && s.aiProviderMenuItemActive,
+                    ]}
+                  >
+                    <View style={s.aiProviderMenuItemRow}>
+                      <AiProviderBadge provider={item.key} />
+                      <Text numberOfLines={1} style={s.aiProviderMenuText}>{item.label}</Text>
+                    </View>
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
           </View>
         </View>
         <View style={s.todayPnlBox}>
@@ -10321,14 +10400,14 @@ const s = StyleSheet.create({
     zIndex: 2100,
     overflow: "visible",
     marginTop: 4,
-    marginLeft: 8,
-    width: 108,
+    marginLeft: 6,
+    width: 96,
     alignItems: "flex-end",
     flexShrink: 0,
   },
   aiProviderFloatBtn: {
     height: 24,
-    width: 108,
+    width: 96,
     paddingHorizontal: 7,
     borderRadius: 5,
     borderWidth: 1,
@@ -10381,16 +10460,16 @@ const s = StyleSheet.create({
   aiCombinedDot: { width: 3, height: 3, borderRadius: 1.5 },
   aiProviderMenu: {
     position: "absolute",
-    top: 27,
-    right: 0,
-    width: 108,
+    top: 68,
+    right: 7,
+    width: 104,
     borderRadius: 5,
     borderWidth: 1,
     borderColor: "#315D79",
     backgroundColor: "#081722",
     overflow: "hidden",
-    zIndex: 2400,
-    elevation: 240,
+    zIndex: 3200,
+    elevation: 320,
   },
   aiProviderMenuItem: {
     height: 29,
