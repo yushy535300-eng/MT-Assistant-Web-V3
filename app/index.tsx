@@ -68,7 +68,8 @@ import {
 } from "@/lib/platform-report";
 
 type PlatformKey = "MT" | "DG" | "SA" | "MV";
-type AiProvider = "chatgpt" | "gemini" | "grok" | "meta" | "combined";
+type AiProvider = "chatgpt" | "gemini" | "grok" | "meta" | "combined" | "road";
+type RadarPredictSource = AiProvider | "counting" | "parity";
 type AiSide = "莊" | "閒" | "觀望";
 type AiAnalysisResult = {
   provider: AiProvider;
@@ -88,6 +89,13 @@ const AI_PROVIDER_OPTIONS: Array<{
   { key: "grok", label: "Grok" },
   { key: "meta", label: "Meta AI" },
   { key: "combined", label: "AI綜合" },
+  { key: "road", label: "牌路策略" },
+];
+
+const RADAR_PREDICT_OPTIONS: Array<{ key: RadarPredictSource; label: string }> = [
+  ...AI_PROVIDER_OPTIONS,
+  { key: "counting", label: "算牌" },
+  { key: "parity", label: "奇偶" },
 ];
 
 /** Set iframe.src only when the URL actually changes. Rewriting the same src
@@ -170,6 +178,13 @@ function AiProviderBadge({ provider, compact = false }: { provider: AiProvider; 
       </View>
     );
   }
+  if (provider === "road") {
+    return (
+      <View style={[s.aiProviderBadge, compact && s.aiProviderBadgeCompact, { backgroundColor: "#173B57" }]}>
+        <MaterialIcons name="timeline" size={compact ? 9 : 11} color="#EAF7FF" />
+      </View>
+    );
+  }
   return (
     <View style={[s.aiCombinedBadge, compact && s.aiCombinedBadgeCompact]}>
       <View style={s.aiCombinedDotRow}>
@@ -180,6 +195,22 @@ function AiProviderBadge({ provider, compact = false }: { provider: AiProvider; 
         <View style={[s.aiCombinedDot, { backgroundColor: "#F6F8FB" }]} />
         <View style={[s.aiCombinedDot, { backgroundColor: "#168AFF" }]} />
       </View>
+    </View>
+  );
+}
+
+function PredictionSourceBadge({ source, compact = false }: { source: RadarPredictSource; compact?: boolean }) {
+  if (source !== "counting" && source !== "parity") {
+    return <AiProviderBadge provider={source} compact={compact} />;
+  }
+  const size = compact ? 12 : 14;
+  return (
+    <View style={[s.aiProviderBadge, compact && s.aiProviderBadgeCompact, { backgroundColor: source === "counting" ? "#244B68" : "#5A3D78" }]}>
+      <MaterialIcons
+        name={source === "counting" ? "calculate" : "functions"}
+        size={Math.max(9, size - 3)}
+        color="#F4FAFF"
+      />
     </View>
   );
 }
@@ -685,6 +716,69 @@ function analysisText(table?: TableData) {
     `【莊問路】${bankerAsk.map(colorName).join("・")}；【閒問路】${playerAsk.map(colorName).join("・")}。`,
     `【綜合】莊 ${d.scoreBanker.toFixed(1)}／閒 ${d.scorePlayer.toFixed(1)}，整段牌路與三路問路綜合後，我會選${d.side}。`,
   ].join("\n");
+}
+
+function localProviderDecision(provider: AiProvider, results: Result[]) {
+  const road = roadSides(results);
+  const base = roadDecision(results);
+  const fallback = base.side;
+  const value = (x?: Result | string | null) => x === "莊" ? 1 : x === "閒" ? -1 : 0;
+  const weighted = (take: number) => {
+    const arr = road.slice(-take);
+    return arr.reduce((sum, x, i) => sum + value(x) * (1 + (i / Math.max(1, arr.length - 1)) * 1.7), 0);
+  };
+  const distribution = (take: number) => road.slice(-take).reduce((sum, x) => sum + value(x), 0);
+  const alternation = (take: number) => {
+    const arr = road.slice(-take);
+    if (arr.length < 2) return 0;
+    let changes = 0;
+    for (let i = 1; i < arr.length; i += 1) if (arr[i] !== arr[i - 1]) changes += 1;
+    return changes / (arr.length - 1);
+  };
+  const last = road.at(-1) as "莊" | "閒" | undefined;
+  const opposite = (x?: "莊" | "閒") => x === "莊" ? "閒" as const : "莊" as const;
+  let streak = 0;
+  if (last) {
+    for (let i = road.length - 1; i >= 0 && road[i] === last; i -= 1) streak += 1;
+  }
+  const pick = (score: number, tie: "莊" | "閒") => Math.abs(score) < 0.5 ? tie : score > 0 ? "莊" as const : "閒" as const;
+  if (provider === "road") {
+    return { side: base.side, confidence: confidencePercent(base.scoreBanker, base.scorePlayer) };
+  }
+  if (provider === "chatgpt") {
+    const score = weighted(12) * 0.34 + (streak >= 2 ? value(last) * Math.min(2, streak * 0.5) : 0) + (alternation(10) >= 0.78 ? -value(last) * 0.75 : 0);
+    return { side: pick(score, fallback), confidence: Math.max(45, Math.min(92, 58 + Math.round(Math.abs(score) * 4))) };
+  }
+  if (provider === "gemini") {
+    let score = (1 - alternation(6)) * distribution(14) * 0.2;
+    if (last && alternation(6) >= 0.72) score += -value(last) * 1.55;
+    if (streak === 2 || streak === 3) score += value(last) * 0.9;
+    if (streak >= 5) score -= value(last) * 0.55;
+    const tie = last && alternation(6) >= 0.67 ? opposite(last) : fallback;
+    return { side: pick(score, tie), confidence: Math.max(44, Math.min(90, 56 + Math.round(Math.abs(score) * 5))) };
+  }
+  if (provider === "grok") {
+    let score = weighted(5) * 0.7 + weighted(3) * 0.38;
+    if (streak >= 2) score += value(last) * Math.min(1.45, streak * 0.42);
+    if (last && alternation(5) >= 0.8) score -= value(last) * 0.55;
+    return { side: pick(score, weighted(4) >= 0 ? "莊" : "閒"), confidence: Math.max(46, Math.min(93, 60 + Math.round(Math.abs(score) * 3))) };
+  }
+  if (provider === "meta") {
+    const longDist = distribution(18), shortDist = distribution(8);
+    let score = -longDist * 0.2 - shortDist * 0.28;
+    if (Math.abs(longDist) <= 2) score += shortDist * 0.12;
+    if (streak >= 4) score -= value(last) * 1.25;
+    const tie = Math.abs(distribution(12)) >= 2 ? (distribution(12) > 0 ? "閒" : "莊") : opposite(last);
+    return { side: pick(score, tie), confidence: Math.max(43, Math.min(88, 55 + Math.round(Math.abs(score) * 4))) };
+  }
+  const parts = (["chatgpt", "gemini", "grok", "meta"] as AiProvider[]).map((x) => localProviderDecision(x, results));
+  const banker = parts.filter((x) => x.side === "莊");
+  const player = parts.filter((x) => x.side === "閒");
+  const bWeight = banker.reduce((s, x) => s + x.confidence, 0);
+  const pWeight = player.reduce((s, x) => s + x.confidence, 0);
+  const side = banker.length === player.length ? (bWeight >= pWeight ? "莊" : "閒") : (banker.length > player.length ? "莊" : "閒");
+  const winners = parts.filter((x) => x.side === side);
+  return { side, confidence: Math.round(winners.reduce((s, x) => s + x.confidence, 0) / Math.max(1, winners.length)) };
 }
 
 function strategyAmount(
@@ -3507,6 +3601,9 @@ export default function HomeScreen() {
   const [analysisTable, setAnalysisTable] = useState<TableData | null>(null);
   const [radarOpen, setRadarOpen] = useState(false);
   const [radarDetailId, setRadarDetailId] = useState<string | null>(null);
+  const [radarSettingsOpen, setRadarSettingsOpen] = useState(false);
+  const [radarSourceMenuOpen, setRadarSourceMenuOpen] = useState(false);
+  const [radarPredictSource, setRadarPredictSource] = useState<RadarPredictSource>("combined");
   const [mtOpen, setMtOpen] = useState(false);
   const [gameViewPlatform, setGameViewPlatform] = useState<PlatformKey>("MT");
   const [gameViewUrl, setGameViewUrl] = useState("");
@@ -3662,6 +3759,17 @@ export default function HomeScreen() {
   const [aiResult, setAiResult] = useState<AiAnalysisResult | null>(null);
   const [aiError, setAiError] = useState("");
   const aiAnalyze = trpc.aiAnalysis.analyze.useMutation();
+  useEffect(() => {
+    if (Platform.OS !== "web" || typeof window === "undefined") return;
+    try {
+      const saved = window.localStorage.getItem("mt.radar.predictSource") as RadarPredictSource | null;
+      if (saved && RADAR_PREDICT_OPTIONS.some((item) => item.key === saved)) setRadarPredictSource(saved);
+    } catch {}
+  }, []);
+  useEffect(() => {
+    if (Platform.OS !== "web" || typeof window === "undefined") return;
+    try { window.localStorage.setItem("mt.radar.predictSource", radarPredictSource); } catch {}
+  }, [radarPredictSource]);
   const [strategyLevel, setStrategyLevel] = useState(0);
   const strategyRef = useRef<StrategyName>("馬丁");
   const baseBetRef = useRef(baseBet);
@@ -3855,18 +3963,40 @@ export default function HomeScreen() {
     assistTable?.round ?? 0
   }|${(assistTable?.results ?? []).slice(-60).join("")}`;
   useEffect(() => {
-    if (!accessSessionId || !assistTable) {
+    if (!assistTable) {
       setAiResult(null);
+      setAiError("");
+      return;
+    }
+    const providerForRequest = aiProvider;
+    const d = roadDecision(assistTable.results ?? []);
+    if (providerForRequest === "road") {
+      setAiResult({
+        provider: "road",
+        side: d.side,
+        confidence: confidencePercent(d.scoreBanker, d.scorePlayer),
+        summary: `依大路、下三路與莊閒問路綜合判斷，本局推薦${d.side}。`,
+      });
+      setAiError("");
+      return;
+    }
+    if (!accessSessionId) {
+      const local = localProviderDecision(providerForRequest, assistTable.results ?? []);
+      setAiResult({
+        provider: providerForRequest,
+        side: local.side,
+        confidence: local.confidence,
+        summary: `依目前牌路節奏與結構判斷，本局推薦${local.side}。`,
+      });
       setAiError("");
       return;
     }
     let cancelled = false;
     const timer = setTimeout(() => {
-      const d = roadDecision(assistTable.results ?? []);
       aiAnalyze
         .mutateAsync({
           sessionId: accessSessionId,
-          provider: aiProvider,
+          provider: providerForRequest,
           tableName: assistRoomTitle(assistTable, activePlatform) || assistTable.id,
           dealer: assistTable.name || "—",
           round: assistTable.round ?? 0,
@@ -3882,107 +4012,18 @@ export default function HomeScreen() {
         })
         .catch(() => {
           if (cancelled) return;
-          const road = (assistTable.results ?? []).filter((x) => x === "莊" || x === "閒");
-          const value = (x?: string) => x === "莊" ? 1 : x === "閒" ? -1 : 0;
-          const weighted = (take: number) => {
-            const arr = road.slice(-take);
-            return arr.reduce((sum, x, i) => {
-              const w = 1 + (i / Math.max(1, arr.length - 1)) * 1.8;
-              return sum + value(x) * w;
-            }, 0);
+          const local = localProviderDecision(providerForRequest, assistTable.results ?? []);
+          const summaries: Record<Exclude<AiProvider, "road">, string> = {
+            chatgpt: `從近期節奏與連續性判斷，本局推薦${local.side}。`,
+            gemini: `從路型結構與轉折位置判斷，本局推薦${local.side}。`,
+            grok: `從最近幾局短線動能判斷，本局推薦${local.side}。`,
+            meta: `從莊閒分布與回補條件判斷，本局推薦${local.side}。`,
+            combined: `整合四種牌路角度後，本局推薦${local.side}。`,
           };
-          const distribution = (take: number) => road.slice(-take).reduce((sum, x) => sum + value(x), 0);
-          const alternation = (take: number) => {
-            const arr = road.slice(-take);
-            if (arr.length < 2) return 0;
-            let changes = 0;
-            for (let i = 1; i < arr.length; i += 1) if (arr[i] !== arr[i - 1]) changes += 1;
-            return changes / (arr.length - 1);
-          };
-          const streakSide = road.at(-1) as "莊" | "閒" | undefined;
-          let streakLen = streakSide ? 1 : 0;
-          for (let i = road.length - 2; streakSide && i >= 0; i -= 1) {
-            if (road[i] !== streakSide) break;
-            streakLen += 1;
-          }
-          const last = road.at(-1) as "莊" | "閒" | undefined;
-          const opposite = (x?: string): "莊" | "閒" => x === "莊" ? "閒" : "莊";
-          const pick = (score: number, fallback: "莊" | "閒"): "莊" | "閒" =>
-            Math.abs(score) < 0.55 ? fallback : score > 0 ? "莊" : "閒";
-
-          const chatScore = weighted(12) * 0.34 + (streakLen >= 2 ? value(streakSide) * Math.min(2, streakLen * 0.5) : 0) + (alternation(10) >= 0.78 ? -value(last) * 0.8 : 0);
-          const chatFallback = weighted(8) >= 0 ? "莊" : "閒";
-          const chatSide = pick(chatScore, chatFallback);
-
-          let gemScore = (1 - alternation(6)) * distribution(14) * 0.18;
-          if (last && alternation(6) >= 0.72) gemScore += -value(last) * 1.6;
-          if (streakLen === 2 || streakLen === 3) gemScore += value(streakSide) * 0.85;
-          if (streakLen >= 5) gemScore += -value(streakSide) * 0.5;
-          const gemFallback = last && alternation(6) >= 0.67 ? opposite(last) : distribution(10) >= 0 ? "莊" : "閒";
-          const gemSide = pick(gemScore, gemFallback);
-
-          let grokScore = weighted(5) * 0.68 + weighted(3) * 0.36;
-          if (streakLen >= 2) grokScore += value(streakSide) * Math.min(1.4, streakLen * 0.42);
-          if (last && alternation(5) >= 0.8) grokScore += -value(last) * 0.55;
-          const grokSide = pick(grokScore, weighted(4) >= 0 ? "莊" : "閒");
-
-          const longDist = distribution(18);
-          const shortDist = distribution(8);
-          let metaScore = -longDist * 0.20 - shortDist * 0.28;
-          if (Math.abs(longDist) <= 2) metaScore += shortDist * 0.12;
-          if (streakLen >= 4) metaScore += -value(streakSide) * 1.3;
-          else if (streakLen === 2) metaScore += value(streakSide) * 0.2;
-          const metaFallback = Math.abs(distribution(12)) >= 2
-            ? (distribution(12) > 0 ? "閒" : "莊")
-            : opposite(last);
-          const metaSide = pick(metaScore, metaFallback);
-
-          const sides: Record<Exclude<AiProvider, "combined">, "莊" | "閒"> = {
-            chatgpt: chatSide,
-            gemini: gemSide,
-            grok: grokSide,
-            meta: metaSide,
-          };
-          const providerSide = aiProvider === "combined"
-            ? ([chatSide, gemSide, grokSide, metaSide].filter((x) => x === "莊").length >= 2 ? "莊" : "閒")
-            : sides[aiProvider];
-          const seed = Math.abs((assistTable.round ?? 0) + road.length + providerSide.length) % 4;
-          const summarySets: Record<AiProvider, string[]> = {
-            chatgpt: [
-              `最近牌路的節奏重心偏向${providerSide}方，連續性仍較完整，本局推薦${providerSide}。`,
-              `近期走勢的延續訊號較支持${providerSide}方，短線反轉力道不足，本局看${providerSide}。`,
-              `從最近幾段的銜接來看，${providerSide}方節奏較穩，本局偏${providerSide}。`,
-              `最近路勢逐步往${providerSide}方靠攏，目前主方向仍未被破壞，本局推薦${providerSide}。`,
-            ],
-            gemini: [
-              `目前路型結構較偏${providerSide}方，交替與連續段的組合更支持${providerSide}。`,
-              `從牌型切換位置判斷，${providerSide}方的結構較完整，本局推薦${providerSide}。`,
-              `近期短龍與轉折節奏較支持${providerSide}方，本局看${providerSide}。`,
-              `目前路型的變化仍由${providerSide}方佔優，反向結構尚未成形。`,
-            ],
-            grok: [
-              `最近幾局的短線動能偏${providerSide}方，最新節奏仍支持${providerSide}。`,
-              `近5局推進速度由${providerSide}方佔優，本局推薦${providerSide}。`,
-              `最新一段的動能重心落在${providerSide}方，反向力道目前較弱。`,
-              `短線節奏目前由${providerSide}方掌握，本局偏${providerSide}。`,
-            ],
-            meta: [
-              `從近期莊閒分布與回補條件來看，${providerSide}方目前較有利。`,
-              `近期比例出現偏移，依平衡與修正條件，本局較偏${providerSide}。`,
-              `從長短區間的分布差異判斷，${providerSide}方更符合目前回補節奏。`,
-              `目前莊閒比例與連續段位置較支持${providerSide}方，本局推薦${providerSide}。`,
-            ],
-            combined: [
-              `綜合四種牌路角度後，本局偏向${providerSide}。`,
-              `整合近期節奏、路型、短線動能與分布後，本局推薦${providerSide}。`,
-              `四組判斷整合後，整體訊號較集中在${providerSide}方。`,
-              `綜合目前牌路的多項訊號，本局以${providerSide}方為主。`,
-            ],
-          };
-          setAiResult({ provider: aiProvider, side: providerSide, confidence: 60, summary: summarySets[aiProvider][seed] });
+          setAiResult({ provider: providerForRequest, side: local.side, confidence: local.confidence, summary: summaries[providerForRequest] });
           setAiError("");
         });
-    }, 280);
+    }, 220);
     return () => {
       cancelled = true;
       clearTimeout(timer);
@@ -3995,45 +4036,78 @@ export default function HomeScreen() {
   const effectiveConfidenceState = aiResult
     ? confidenceState(aiResult.confidence)
     : assistConfidenceState;
+  const askRoadLine = analysisText(assistTable)
+    .split("\n")
+    .find((line) => line.includes("【莊問路】") || line.includes("【閒問路】")) || "";
   const effectiveAnalysisText = aiResult
-    ? `【${aiProviderLabel}】${aiResult.summary}`
-    : `【${aiProviderLabel}】正在整理目前牌路，推薦結果會依現有路勢更新。`;
+    ? `【${aiProviderLabel}】${aiResult.summary}${askRoadLine ? `\n${askRoadLine}` : ""}`
+    : `【${aiProviderLabel}】正在整理目前牌路，推薦結果會依現有路勢更新。${askRoadLine ? `\n${askRoadLine}` : ""}`;
+
+  const resolveTableV38 = (table: TableData) =>
+    tableIdKeys(table).map((id) => v38ByTable[id]).find(Boolean);
+  const paritySideFromV38 = (data?: V38PokerState): "莊" | "閒" | null => {
+    if (!data?.complete) return null;
+    const dealt = [...(data.player || []), ...(data.banker || [])];
+    if (!dealt.length) return null;
+    const side = terminalParityResult(dealt).side;
+    return side === "莊" || side === "閒" ? side : null;
+  };
   const radarSignals = useMemo(
     () =>
       assistPool.map((table) => {
         const results = table.results ?? [];
-        const ready = roadSides(results).length >= 3;
-        const decision = roadDecision(results);
-        const confidence = ready
-          ? confidencePercent(decision.scoreBanker, decision.scorePlayer)
-          : 0;
+        const roadReady = roadSides(results).length >= 3;
+        const road = roadDecision(results);
+        const roadConfidence = roadReady ? confidencePercent(road.scoreBanker, road.scorePlayer) : 0;
+        let side: "莊" | "閒" = road.side;
+        let confidence = roadConfidence;
+        let ready = roadReady;
+        if (radarPredictSource === "counting") {
+          const poker = resolveTableV38(table);
+          if (poker?.complete && (poker.recommendation === "莊" || poker.recommendation === "閒")) {
+            side = poker.recommendation;
+            confidence = 72;
+            ready = true;
+          }
+        } else if (radarPredictSource === "parity") {
+          const parity = paritySideFromV38(resolveTableV38(table));
+          if (parity) {
+            side = parity;
+            confidence = 70;
+            ready = true;
+          }
+        } else {
+          const local = localProviderDecision(radarPredictSource, results);
+          side = local.side;
+          confidence = roadReady ? local.confidence : 0;
+          ready = roadReady;
+        }
         return {
           table,
           id: table.apiId ?? `BAG${table.id}`,
           ready,
-          decision,
+          decision: { ...road, side },
           confidence,
         };
       }),
-    [assistPool],
+    [assistPool, radarPredictSource, v38ByTable],
   );
   const bestRadar = radarSignals
     .filter((x) => x.ready)
     .reduce<(typeof radarSignals)[number] | null>(
-      (best, item) =>
-        !best || item.confidence > best.confidence ? item : best,
+      (best, item) => !best || item.confidence > best.confidence ? item : best,
       null,
     );
   const radarDetailTable = radarDetailId
     ? (assistPool.find((t) => tableMatchesAssistId(t, radarDetailId)) ?? null)
     : null;
-  const radarDetailDecision = roadDecision(radarDetailTable?.results ?? []);
+  const radarDetailDecision = radarDetailTable
+    ? { ...roadDecision(radarDetailTable.results ?? []), side: radarSignals.find((x) => x.table === radarDetailTable)?.decision.side ?? roadDecision(radarDetailTable.results ?? []).side }
+    : roadDecision([]);
   const radarDetailConfidence = radarDetailTable
-    ? confidencePercent(
-        radarDetailDecision.scoreBanker,
-        radarDetailDecision.scorePlayer,
-      )
+    ? (radarSignals.find((x) => x.table === radarDetailTable)?.confidence ?? 0)
     : 0;
+
 
   useEffect(() => {
     if (Platform.OS !== "web" || typeof document === "undefined") return;
@@ -6974,6 +7048,7 @@ export default function HomeScreen() {
   const maxDrawdown = Math.max(0, peakBankroll - bankroll);
 
   const MultiTableRadar = ({ insideMt = false }: { insideMt?: boolean }) => {
+    const radarPredictOption = RADAR_PREDICT_OPTIONS.find((item) => item.key === radarPredictSource) ?? RADAR_PREDICT_OPTIONS[4];
     // Keep the current best table at the first position on both desktop and mobile.
     const signals = [...radarSignals].sort((a, b) => {
       if (a.id === bestRadar?.id) return -1;
@@ -6997,7 +7072,10 @@ export default function HomeScreen() {
           ]}
         >
           <View style={s.radarCardTop}>
-            <Text style={s.radarRoom}>{item.id}</Text>
+            <View style={s.radarCardSource}>
+              <PredictionSourceBadge source={radarPredictSource} compact />
+              <Text style={s.radarRoom}>{item.id}</Text>
+            </View>
             {best ? <Text style={s.radarPick}>首選</Text> : null}
           </View>
           <View style={s.radarCardMain}>
@@ -7093,8 +7171,10 @@ export default function HomeScreen() {
       <View
         style={[
           s.radarPanel,
+          radarSettingsOpen && s.radarPanelSettingsOpen,
           insideMt && s.radarPanelMt,
           !desktop && s.radarPanelMobile,
+          !desktop && radarSettingsOpen && s.radarPanelMobileSettingsOpen,
         ]}
       >
         <View style={s.radarHead}>
@@ -7102,10 +7182,54 @@ export default function HomeScreen() {
             <Text style={s.radarKicker}>MT MATRIX · MULTI-TABLE RADAR</Text>
             <Text style={s.radarTitle}>多桌雷達</Text>
           </View>
-          <Pressable onPress={() => setRadarOpen(false)} style={s.radarClose}>
-            <MaterialIcons name="keyboard-arrow-up" size={20} color="#DCEEFF" />
-          </Pressable>
+          <View style={s.radarHeadActions}>
+            <Pressable
+              onPress={() => {
+                setRadarSettingsOpen((v) => !v);
+                setRadarSourceMenuOpen(false);
+              }}
+              style={s.radarSettingsToggle}
+            >
+              <MaterialIcons name="tune" size={13} color="#9DDCFF" />
+              <Text style={s.radarSettingsToggleText}>設定</Text>
+              <MaterialIcons name={radarSettingsOpen ? "keyboard-arrow-up" : "keyboard-arrow-down"} size={13} color="#DCEEFF" />
+            </Pressable>
+            <Pressable onPress={() => setRadarOpen(false)} style={s.radarClose}>
+              <MaterialIcons name="keyboard-arrow-up" size={20} color="#DCEEFF" />
+            </Pressable>
+          </View>
         </View>
+        {radarSettingsOpen ? (
+          <View style={s.radarSettingsRow}>
+            <Text style={s.radarSettingsLabel}>預測來源</Text>
+            <View style={s.radarSourceSelectWrap}>
+              <Pressable onPress={() => setRadarSourceMenuOpen((v) => !v)} style={s.radarSourceSelect}>
+                <View style={s.radarSourceSelectLeft}>
+                  <PredictionSourceBadge source={radarPredictSource} />
+                  <Text style={s.radarSourceSelectText}>{radarPredictOption.label}</Text>
+                </View>
+                <MaterialIcons name={radarSourceMenuOpen ? "keyboard-arrow-up" : "keyboard-arrow-down"} size={14} color="#DCEEFF" />
+              </Pressable>
+              {radarSourceMenuOpen ? (
+                <View style={s.radarSourceMenu}>
+                  {RADAR_PREDICT_OPTIONS.map((item) => (
+                    <Pressable
+                      key={item.key}
+                      onPress={() => {
+                        setRadarPredictSource(item.key);
+                        setRadarSourceMenuOpen(false);
+                      }}
+                      style={[s.radarSourceMenuItem, radarPredictSource === item.key && s.radarSourceMenuItemActive]}
+                    >
+                      <PredictionSourceBadge source={item.key} />
+                      <Text style={s.radarSourceMenuText}>{item.label}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+            </View>
+          </View>
+        ) : null}
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -10400,14 +10524,14 @@ const s = StyleSheet.create({
     zIndex: 2100,
     overflow: "visible",
     marginTop: 4,
-    marginLeft: 6,
-    width: 96,
+    marginLeft: 8,
+    width: 102,
     alignItems: "flex-end",
     flexShrink: 0,
   },
   aiProviderFloatBtn: {
-    height: 24,
-    width: 96,
+    height: 25,
+    width: 102,
     paddingHorizontal: 7,
     borderRadius: 5,
     borderWidth: 1,
@@ -10460,9 +10584,9 @@ const s = StyleSheet.create({
   aiCombinedDot: { width: 3, height: 3, borderRadius: 1.5 },
   aiProviderMenu: {
     position: "absolute",
-    top: 68,
+    top: 74,
     right: 7,
-    width: 104,
+    width: 136,
     borderRadius: 5,
     borderWidth: 1,
     borderColor: "#315D79",
@@ -10472,8 +10596,8 @@ const s = StyleSheet.create({
     elevation: 320,
   },
   aiProviderMenuItem: {
-    height: 29,
-    paddingHorizontal: 6,
+    height: 31,
+    paddingHorizontal: 8,
     justifyContent: "center",
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: "#294B64",
@@ -10485,7 +10609,7 @@ const s = StyleSheet.create({
     gap: 5,
     minWidth: 0,
   },
-  aiProviderMenuText: { color: "#F2FAFF", fontSize: 9, fontWeight: "900", flexShrink: 1 },
+  aiProviderMenuText: { color: "#F2FAFF", fontSize: 10, fontWeight: "900", flexShrink: 1 },
   smallLabel: { color: "#FFFFFF", fontSize: 12, fontWeight: "900" },
   latestLine: {
     flexDirection: "row",
@@ -10684,7 +10808,7 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     gap: 3,
-    marginTop: 3,
+    marginTop: 7,
   },
   recommendStrategyMeta: { marginTop: 0, flexShrink: 1 },
   confidenceInline: {
@@ -10777,8 +10901,10 @@ const s = StyleSheet.create({
     shadowRadius: 10,
     elevation: 18,
   },
+  radarPanelSettingsOpen: { height: 132 },
   radarPanelMt: { zIndex: 9998 },
   radarPanelMobile: { top: 61, left: 7, right: 7, height: 144 },
+  radarPanelMobileSettingsOpen: { height: 184 },
   radarHead: {
     height: 27,
     flexDirection: "row",
@@ -10793,6 +10919,72 @@ const s = StyleSheet.create({
   },
   radarTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   radarTitle: { color: "#F4FAFF", fontSize: 11, fontWeight: "900" },
+  radarHeadActions: { flexDirection: "row", alignItems: "center", gap: 5 },
+  radarSettingsToggle: {
+    height: 24,
+    paddingHorizontal: 7,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "#315D79",
+    backgroundColor: "#0B1A28",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+  },
+  radarSettingsToggleText: { color: "#DCEEFF", fontSize: 8, fontWeight: "900" },
+  radarSettingsRow: {
+    height: 34,
+    marginBottom: 4,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "#294B64",
+    backgroundColor: "#0A1722",
+    paddingHorizontal: 7,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    zIndex: 300,
+    overflow: "visible",
+  },
+  radarSettingsLabel: { color: "#AFCBE0", fontSize: 8, fontWeight: "900" },
+  radarSourceSelectWrap: { position: "relative", width: 144, zIndex: 400, overflow: "visible" },
+  radarSourceSelect: {
+    height: 25,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "#315D79",
+    backgroundColor: "#123149",
+    paddingHorizontal: 7,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  radarSourceSelectLeft: { flexDirection: "row", alignItems: "center", gap: 5, minWidth: 0 },
+  radarSourceSelectText: { color: "#EAF6FF", fontSize: 9, fontWeight: "900", flexShrink: 1 },
+  radarSourceMenu: {
+    position: "absolute",
+    top: 28,
+    right: 0,
+    width: 154,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "#315D79",
+    backgroundColor: "#081722",
+    overflow: "hidden",
+    zIndex: 900,
+    elevation: 90,
+  },
+  radarSourceMenuItem: {
+    height: 29,
+    paddingHorizontal: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#294B64",
+  },
+  radarSourceMenuItemActive: { backgroundColor: "#173D58" },
+  radarSourceMenuText: { color: "#F2FAFF", fontSize: 9, fontWeight: "900" },
   radarBest: { color: "#63C7FF", fontSize: 8, fontWeight: "900" },
   radarWaiting: { color: "#82929D", fontSize: 8, fontWeight: "800" },
   radarClose: {
@@ -10832,6 +11024,7 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
+  radarCardSource: { flexDirection: "row", alignItems: "center", gap: 4, minWidth: 0 },
   radarRoom: { color: "#E8EEF2", fontSize: 8, fontWeight: "900" },
   radarPick: {
     color: "#EAF8FF",
