@@ -7178,40 +7178,24 @@ export default function HomeScreen() {
         ]}
       >
         <View style={s.radarHead}>
-          <View>
-            <Text style={s.radarKicker}>MT MATRIX · MULTI-TABLE RADAR</Text>
-            <Text style={s.radarTitle}>多桌雷達</Text>
-          </View>
-          <View style={s.radarHeadActions}>
-            <Pressable
-              onPress={() => {
-                setRadarSettingsOpen((v) => !v);
-                setRadarSourceMenuOpen(false);
-              }}
-              style={s.radarSettingsToggle}
-            >
-              <MaterialIcons name="tune" size={13} color="#9DDCFF" />
-              <Text style={s.radarSettingsToggleText}>設定</Text>
-              <MaterialIcons name={radarSettingsOpen ? "keyboard-arrow-up" : "keyboard-arrow-down"} size={13} color="#DCEEFF" />
-            </Pressable>
-            <Pressable onPress={() => setRadarOpen(false)} style={s.radarClose}>
-              <MaterialIcons name="keyboard-arrow-up" size={20} color="#DCEEFF" />
-            </Pressable>
-          </View>
-        </View>
-        {radarSettingsOpen ? (
-          <View style={s.radarSettingsRow}>
-            <Text style={s.radarSettingsLabel}>預測來源</Text>
-            <View style={s.radarSourceSelectWrap}>
-              <Pressable onPress={() => setRadarSourceMenuOpen((v) => !v)} style={s.radarSourceSelect}>
+          <View style={s.radarTitleCluster}>
+            <View>
+              <Text style={s.radarKicker}>MT MATRIX · MULTI-TABLE RADAR</Text>
+              <Text style={s.radarTitle}>多桌雷達</Text>
+            </View>
+            <View style={[s.radarSourceSelectWrap, !desktop && s.radarSourceSelectWrapMobile]}>
+              <Pressable
+                onPress={() => setRadarSourceMenuOpen((v) => !v)}
+                style={[s.radarSourceSelect, !desktop && s.radarSourceSelectMobile]}
+              >
                 <View style={s.radarSourceSelectLeft}>
                   <PredictionSourceBadge source={radarPredictSource} />
-                  <Text style={s.radarSourceSelectText}>{radarPredictOption.label}</Text>
+                  <Text numberOfLines={1} style={s.radarSourceSelectText}>{radarPredictOption.label}</Text>
                 </View>
                 <MaterialIcons name={radarSourceMenuOpen ? "keyboard-arrow-up" : "keyboard-arrow-down"} size={14} color="#DCEEFF" />
               </Pressable>
               {radarSourceMenuOpen ? (
-                <View style={s.radarSourceMenu}>
+                <View style={[s.radarSourceMenu, !desktop && s.radarSourceMenuMobile]}>
                   {RADAR_PREDICT_OPTIONS.map((item) => (
                     <Pressable
                       key={item.key}
@@ -7219,7 +7203,11 @@ export default function HomeScreen() {
                         setRadarPredictSource(item.key);
                         setRadarSourceMenuOpen(false);
                       }}
-                      style={[s.radarSourceMenuItem, radarPredictSource === item.key && s.radarSourceMenuItemActive]}
+                      style={[
+                        s.radarSourceMenuItem,
+                        !desktop && s.radarSourceMenuItemMobile,
+                        radarPredictSource === item.key && s.radarSourceMenuItemActive,
+                      ]}
                     >
                       <PredictionSourceBadge source={item.key} />
                       <Text style={s.radarSourceMenuText}>{item.label}</Text>
@@ -7229,7 +7217,12 @@ export default function HomeScreen() {
               ) : null}
             </View>
           </View>
-        ) : null}
+          <View style={s.radarHeadActions}>
+            <Pressable onPress={() => setRadarOpen(false)} style={[s.radarClose, !desktop && s.radarCloseMobile]}>
+              <MaterialIcons name="keyboard-arrow-up" size={20} color="#DCEEFF" />
+            </Pressable>
+          </View>
+        </View>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -7354,27 +7347,6 @@ export default function HomeScreen() {
               >
                 {effectiveRecommendation} {nextAmount.toLocaleString()}
               </Text>
-              <View style={s.aiProviderInlineWrap}>
-                <Pressable
-                  onPress={() => setAiMenuOpen((v) => !v)}
-                  style={({ pressed }: any) => [
-                    s.aiProviderFloatBtn,
-                    pressed && s.aiProviderFloatBtnPressed,
-                  ]}
-                >
-                  <View style={s.aiProviderFloatContent}>
-                    <AiProviderBadge provider={aiProvider} />
-                    <Text numberOfLines={1} style={s.aiProviderFloatText}>
-                      {aiProviderLabel}
-                    </Text>
-                  </View>
-                  <MaterialIcons
-                    name={aiMenuOpen ? "keyboard-arrow-up" : "keyboard-arrow-down"}
-                    size={14}
-                    color="#D9F2FF"
-                  />
-                </Pressable>
-              </View>
             </View>
             <View style={s.recommendMetaRow}>
               <Text style={[s.microText, s.recommendStrategyMeta]}>
@@ -7382,30 +7354,6 @@ export default function HomeScreen() {
                 {nextAmount.toLocaleString()}
               </Text>
             </View>
-            {aiMenuOpen ? (
-              <View style={s.aiProviderMenu}>
-                {AI_PROVIDER_OPTIONS.map((item) => (
-                  <Pressable
-                    key={item.key}
-                    onPress={() => {
-                      setAiProvider(item.key);
-                      setAiMenuOpen(false);
-                      setAiResult(null);
-                      setAiError("");
-                    }}
-                    style={[
-                      s.aiProviderMenuItem,
-                      aiProvider === item.key && s.aiProviderMenuItemActive,
-                    ]}
-                  >
-                    <View style={s.aiProviderMenuItemRow}>
-                      <AiProviderBadge provider={item.key} />
-                      <Text numberOfLines={1} style={s.aiProviderMenuText}>{item.label}</Text>
-                    </View>
-                  </Pressable>
-                ))}
-              </View>
-            ) : null}
           </View>
         </View>
         <View style={s.todayPnlBox}>
@@ -7632,6 +7580,7 @@ export default function HomeScreen() {
         <View
           style={[
             s.floatHeader,
+            !desktop && s.floatHeaderMobile,
             Platform.OS === "web"
               ? ({
                   touchAction: "none",
@@ -7656,27 +7605,68 @@ export default function HomeScreen() {
               <ThreadsSignature />
             </View>
           </View>
-          <View style={s.row}>
-            <Pressable onPress={syncAssist} style={s.iconTextBtn}>
-              <MaterialIcons name="sync" size={15} color="#fff" />
-              <Text style={s.iconText}>同步</Text>
+          <View style={[s.row, s.floatHeaderActions]}>
+            <View style={s.headerAiWrap}>
+              <Pressable
+                onPress={() => setAiMenuOpen((v) => !v)}
+                style={({ pressed }: any) => [
+                  s.headerAiBtn,
+                  !desktop && s.headerAiBtnMobile,
+                  pressed && s.aiProviderFloatBtnPressed,
+                ]}
+              >
+                <View style={s.headerAiBtnLeft}>
+                  <AiProviderBadge provider={aiProvider} />
+                  <Text numberOfLines={1} style={[s.headerAiText, !desktop && s.headerAiTextMobile]}>{aiProviderLabel}</Text>
+                </View>
+                <MaterialIcons name={aiMenuOpen ? "keyboard-arrow-up" : "keyboard-arrow-down"} size={15} color="#D9F2FF" />
+              </Pressable>
+              {aiMenuOpen ? (
+                <View style={[s.headerAiMenu, !desktop && s.headerAiMenuMobile]}>
+                  {AI_PROVIDER_OPTIONS.map((item) => (
+                    <Pressable
+                      key={item.key}
+                      onPress={() => {
+                        setAiProvider(item.key);
+                        setAiMenuOpen(false);
+                        setAiResult(null);
+                        setAiError("");
+                      }}
+                      style={[
+                        s.headerAiMenuItem,
+                        !desktop && s.headerAiMenuItemMobile,
+                        aiProvider === item.key && s.aiProviderMenuItemActive,
+                      ]}
+                    >
+                      <AiProviderBadge provider={item.key} />
+                      <Text style={[s.headerAiMenuText, !desktop && s.headerAiMenuTextMobile]}>{item.label}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+            </View>
+            <Pressable onPress={syncAssist} style={[s.iconTextBtn, !desktop && s.iconTextBtnMobile]} hitSlop={!desktop ? 6 : 0}>
+              <MaterialIcons name="sync" size={!desktop ? 17 : 15} color="#fff" />
+              <Text style={[s.iconText, !desktop && s.iconTextMobile]}>同步</Text>
             </Pressable>
             <Pressable
               onPress={() => setV38Open((v) => !v)}
-              style={[s.iconTextBtn, v38Open && s.v38LaunchActive]}
+              style={[s.iconTextBtn, !desktop && s.iconTextBtnMobile, v38Open && s.v38LaunchActive]}
+              hitSlop={!desktop ? 6 : 0}
             >
-              <MaterialIcons name="calculate" size={15} color="#fff" />
-              <Text style={s.iconText}>算牌</Text>
+              <MaterialIcons name="calculate" size={!desktop ? 17 : 15} color="#fff" />
+              <Text style={[s.iconText, !desktop && s.iconTextMobile]}>算牌</Text>
             </Pressable>
             <Pressable
               onPress={() => setTerminalParityOpen((v) => !v)}
-              style={[s.iconTextBtn, terminalParityOpen && s.v38LaunchActive]}
+              style={[s.iconTextBtn, !desktop && s.iconTextBtnMobile, terminalParityOpen && s.v38LaunchActive]}
+              hitSlop={!desktop ? 6 : 0}
             >
-              <MaterialIcons name="functions" size={15} color="#fff" />
-              <Text style={s.iconText}>奇偶</Text>
+              <MaterialIcons name="functions" size={!desktop ? 17 : 15} color="#fff" />
+              <Text style={[s.iconText, !desktop && s.iconTextMobile]}>奇偶</Text>
             </Pressable>
-            <Pressable onPress={() => setFloatingOpen(false)} style={s.iconBtn}>
-              <MaterialIcons name="close" size={18} color="#fff" />
+            <Pressable onPress={() => setFloatingOpen(false)} style={[s.iconBtn, !desktop && s.iconBtnMobile]} hitSlop={!desktop ? 6 : 0}>
+              <MaterialIcons name="close" size={!desktop ? 21 : 18} color="#fff" />
             </Pressable>
           </View>
         </View>
@@ -10396,6 +10386,9 @@ const s = StyleSheet.create({
   floatPanelMt: { zIndex: 9999 },
   floatHeader: {
     height: 38,
+    position: "relative",
+    zIndex: 5000,
+    overflow: "visible",
     paddingHorizontal: 9,
     flexDirection: "row",
     alignItems: "center",
@@ -10407,7 +10400,9 @@ const s = StyleSheet.create({
     userSelect: "none" as any,
     cursor: "grab" as any,
   },
-  floatHeadLeft: { flexDirection: "row", alignItems: "center", gap: 8 },
+  floatHeaderMobile: { height: 46, paddingHorizontal: 6 },
+  floatHeadLeft: { flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 0 },
+  floatHeaderActions: { position: "relative", zIndex: 5200, overflow: "visible", flexShrink: 1 },
   floatBrandLine: { flexDirection: "row", alignItems: "center", gap: 7 },
   floatTitle: {
     color: "#F5FAFD",
@@ -10433,7 +10428,54 @@ const s = StyleSheet.create({
     gap: 3,
     alignItems: "center",
   },
+  iconTextBtnMobile: { height: 34, paddingHorizontal: 8, borderRadius: 6, gap: 4 },
+  iconBtnMobile: { width: 34, height: 34, borderRadius: 6 },
   iconText: { color: "#fff", fontSize: 8, fontWeight: "800" },
+  iconTextMobile: { fontSize: 9 },
+  headerAiWrap: { position: "relative", zIndex: 5600, overflow: "visible" },
+  headerAiBtn: {
+    height: 27,
+    width: 102,
+    paddingHorizontal: 6,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "#315D79",
+    backgroundColor: "#123149",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 4,
+  },
+  headerAiBtnMobile: { height: 34, width: 112, borderRadius: 6, paddingHorizontal: 7 },
+  headerAiBtnLeft: { flexDirection: "row", alignItems: "center", gap: 5, minWidth: 0, flexShrink: 1 },
+  headerAiText: { color: "#EAF6FF", fontSize: 8.5, fontWeight: "900", flexShrink: 1 },
+  headerAiTextMobile: { fontSize: 9.5 },
+  headerAiMenu: {
+    position: "absolute",
+    top: 30,
+    right: 0,
+    width: 140,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "#315D79",
+    backgroundColor: "#081722",
+    overflow: "hidden",
+    zIndex: 5900,
+    elevation: 590,
+  },
+  headerAiMenuMobile: { top: 37, width: 154 },
+  headerAiMenuItem: {
+    height: 31,
+    paddingHorizontal: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#294B64",
+  },
+  headerAiMenuItemMobile: { height: 40, paddingHorizontal: 10, gap: 8 },
+  headerAiMenuText: { color: "#F2FAFF", fontSize: 9.5, fontWeight: "900" },
+  headerAiMenuTextMobile: { fontSize: 11 },
   selectorWrap: {
     marginHorizontal: 6,
     marginTop: 6,
@@ -10901,10 +10943,10 @@ const s = StyleSheet.create({
     shadowRadius: 10,
     elevation: 18,
   },
-  radarPanelSettingsOpen: { height: 132 },
+  radarPanelSettingsOpen: { height: 92 },
   radarPanelMt: { zIndex: 9998 },
   radarPanelMobile: { top: 61, left: 7, right: 7, height: 144 },
-  radarPanelMobileSettingsOpen: { height: 184 },
+  radarPanelMobileSettingsOpen: { height: 144 },
   radarHead: {
     height: 27,
     flexDirection: "row",
@@ -10918,6 +10960,7 @@ const s = StyleSheet.create({
     letterSpacing: 1,
   },
   radarTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  radarTitleCluster: { flexDirection: "row", alignItems: "center", gap: 10, position: "relative", zIndex: 500, overflow: "visible" },
   radarTitle: { color: "#F4FAFF", fontSize: 11, fontWeight: "900" },
   radarHeadActions: { flexDirection: "row", alignItems: "center", gap: 5 },
   radarSettingsToggle: {
@@ -10947,7 +10990,8 @@ const s = StyleSheet.create({
     overflow: "visible",
   },
   radarSettingsLabel: { color: "#AFCBE0", fontSize: 8, fontWeight: "900" },
-  radarSourceSelectWrap: { position: "relative", width: 144, zIndex: 400, overflow: "visible" },
+  radarSourceSelectWrap: { position: "relative", width: 136, zIndex: 600, overflow: "visible" },
+  radarSourceSelectWrapMobile: { width: 148 },
   radarSourceSelect: {
     height: 25,
     borderRadius: 5,
@@ -10959,13 +11003,14 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
+  radarSourceSelectMobile: { height: 34, paddingHorizontal: 8, borderRadius: 6 },
   radarSourceSelectLeft: { flexDirection: "row", alignItems: "center", gap: 5, minWidth: 0 },
   radarSourceSelectText: { color: "#EAF6FF", fontSize: 9, fontWeight: "900", flexShrink: 1 },
   radarSourceMenu: {
     position: "absolute",
     top: 28,
     right: 0,
-    width: 154,
+    width: 158,
     borderRadius: 6,
     borderWidth: 1,
     borderColor: "#315D79",
@@ -10983,6 +11028,7 @@ const s = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: "#294B64",
   },
+  radarSourceMenuItemMobile: { height: 40, paddingHorizontal: 10, gap: 8 },
   radarSourceMenuItemActive: { backgroundColor: "#173D58" },
   radarSourceMenuText: { color: "#F2FAFF", fontSize: 9, fontWeight: "900" },
   radarBest: { color: "#63C7FF", fontSize: 8, fontWeight: "900" },
@@ -10997,6 +11043,7 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  radarCloseMobile: { width: 34, height: 34 },
   radarRail: { gap: 5, paddingRight: 4, alignItems: "center" },
   radarRailMobile: { alignItems: "flex-start", paddingBottom: 2 },
   radarMobileColumn: { gap: 5 },
