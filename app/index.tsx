@@ -1198,16 +1198,14 @@ function DealerLiveVideo({
   table,
   enabled,
   connected,
-  fallbackLive = false,
 }: {
   table: TableData;
   enabled: boolean;
   connected: boolean;
-  fallbackLive?: boolean;
 }) {
   const tableId = table.apiId ?? `BAG${table.id}`;
   const url = table.streamUrl ?? dealerStreamUrls[tableId];
-  const shouldPlay = enabled || (fallbackLive && !table.dealerPhoto && !!url);
+  const shouldPlay = enabled;
   const videoRef = useRef<any>(null);
   const playerRef = useRef<any>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1478,7 +1476,6 @@ function TableCard({
               table={table}
               enabled={videoEnabled}
               connected={connected}
-              fallbackLive={platform === "MT"}
             />
           </View>
           <Text style={[s.dealerName, dg && s.dealerNameDg, ab && s.dealerNameAb, db && s.dealerNameDb]}>
@@ -2856,6 +2853,54 @@ function eventTables(payload: any): any[] | null {
   ];
   return c.find(Array.isArray) ?? null;
 }
+
+function syncMtLiveRoadPairs(current: TableData[]): TableData[] {
+  const byId = new Map(
+    current.map((table) => [
+      String(table.apiId ?? table.id).toUpperCase(),
+      table,
+    ]),
+  );
+
+  return current.map((table) => {
+    const liveId = String(table.apiId ?? table.id).toUpperCase();
+    if (!liveId.endsWith("_LIVE")) return table;
+
+    const masterId = liveId.replace(/_LIVE$/, "");
+    const master = byId.get(masterId);
+    if (!master) return table;
+
+    const next: TableData = {
+      ...table,
+
+      // Shared physical game/road state.
+      players: master.players,
+      shoe: master.shoe,
+      round: master.round,
+      banker: master.banker,
+      player: master.player,
+      tie: master.tie,
+      results: master.results,
+      countdown: master.countdown,
+      countdownUpdatedAt: master.countdownUpdatedAt,
+      lastResultKey: master.lastResultKey,
+
+      // IMPORTANT: dealer/name/photo/stream/table id remain LIVE-specific.
+      name: table.name,
+      dealerPhoto: table.dealerPhoto,
+      dealerId: table.dealerId,
+      dealerNation: table.dealerNation,
+      streamUrl: table.streamUrl,
+      apiId: table.apiId,
+      id: table.id,
+      roomId: table.roomId,
+      tableBadge: table.tableBadge,
+    };
+
+    return keepStableTableReference(table, next);
+  });
+}
+
 function reconcileCurrentMtTables(
   current: TableData[],
   sources: any[],
@@ -2910,7 +2955,9 @@ function reconcileCurrentMtTables(
       live: false,
     } as TableData;
   });
-  return sortMtTablesForLobby(applyTablesSameShoe(seeded, active));
+  return syncMtLiveRoadPairs(
+    sortMtTablesForLobby(applyTablesSameShoe(seeded, active)),
+  );
 }
 function extractMtUrlToken(value: string) {
   try {
@@ -5903,7 +5950,8 @@ export default function HomeScreen() {
           if (actual) settlePending(actual, p);
           updateLiveTables((c) => {
             const reset = resetRoadForNewShoePayload(c, p);
-            return applyDealerRealtime(applyLiveShowWin(reset, p), p);
+            const updated = applyDealerRealtime(applyLiveShowWin(reset, p), p);
+            return syncMtLiveRoadPairs(updated);
           });
           scheduleTablesRefresh(2500);
           return;
@@ -5922,7 +5970,9 @@ export default function HomeScreen() {
           // report round 0/1 before their new road snapshot is ready, so these
           // packets must never clear the currently painted road.
           updateLiveTables((c) =>
-            applyDealerRealtime(applyLiveWait(c, p, activeMtTableIds), p),
+            syncMtLiveRoadPairs(
+              applyDealerRealtime(applyLiveWait(c, p, activeMtTableIds), p),
+            ),
           );
           return;
         }
