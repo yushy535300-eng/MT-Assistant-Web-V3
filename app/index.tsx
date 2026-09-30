@@ -238,6 +238,8 @@ type TableData = {
   open?: boolean;
   rest?: number;
   dealerPhoto?: string;
+  dealerId?: string;
+  dealerNation?: string;
   streamUrl?: string;
   lastUpdated?: number;
   lastResultKey?: string;
@@ -1196,13 +1198,16 @@ function DealerLiveVideo({
   table,
   enabled,
   connected,
+  fallbackLive = false,
 }: {
   table: TableData;
   enabled: boolean;
   connected: boolean;
+  fallbackLive?: boolean;
 }) {
   const tableId = table.apiId ?? `BAG${table.id}`;
   const url = table.streamUrl ?? dealerStreamUrls[tableId];
+  const shouldPlay = enabled || (fallbackLive && !table.dealerPhoto && !!url);
   const videoRef = useRef<any>(null);
   const playerRef = useRef<any>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1214,7 +1219,7 @@ function DealerLiveVideo({
       retryRef.current = null;
     }
     setPlaying(false);
-    if (Platform.OS !== "web" || !enabled || !connected || !url) return;
+    if (Platform.OS !== "web" || !shouldPlay || !connected || !url) return;
     let disposed = false;
     const destroy = () => {
       const p = playerRef.current;
@@ -1292,7 +1297,7 @@ function DealerLiveVideo({
       retryRef.current = null;
       destroy();
     };
-  }, [tableId, url, enabled, connected]);
+  }, [tableId, url, shouldPlay, connected]);
 
   return (
     <View style={s.liveMediaFill}>
@@ -1322,7 +1327,7 @@ function DealerLiveVideo({
       ) : (
         <Text style={s.crown}>♛</Text>
       )}
-      {Platform.OS === "web" && enabled && connected && url
+      {Platform.OS === "web" && shouldPlay && connected && url
         ? createElement("video" as any, {
             ref: (node: any) => {
               videoRef.current = node;
@@ -1473,6 +1478,7 @@ function TableCard({
               table={table}
               enabled={videoEnabled}
               connected={connected}
+              fallbackLive={platform === "MT"}
             />
           </View>
           <Text style={[s.dealerName, dg && s.dealerNameDg, ab && s.dealerNameAb, db && s.dealerNameDb]}>
@@ -2766,37 +2772,67 @@ function AccessScreen({
 function applyDealerRealtime(current: TableData[], payload: any): TableData[] {
   const body = payload?.body ?? payload?.msg ?? payload?.data ?? payload ?? {};
   const tableId = String(
-    body?.table_id ?? body?.id ?? body?.room_id ?? "",
+    body?.table_id ?? body?.id ?? "",
   ).toUpperCase();
-  if (!current.some((table) => (table.apiId ?? table.id) === tableId))
+  if (!tableId || !current.some((table) => (table.apiId ?? table.id) === tableId))
     return current;
 
   const dealer = body?.dealer ?? body?.dealer_info ?? body?.dealerInfo ?? {};
-  const dealerName =
+  const rawName =
     dealer?.nick_name ??
     dealer?.nickname ??
     dealer?.name ??
     dealer?.username ??
+    dealer?.realname ??
     body?.dealer_name ??
     body?.dealerName;
-  const dealerPhoto =
+  const nameText = String(rawName ?? "").trim();
+  const dealerName =
+    nameText && !/^TEST$/i.test(nameText) && !/^[-—]+$/.test(nameText)
+      ? nameText
+      : "";
+  const rawPhoto =
     body?.dealer_image ??
     body?.dealer_image_url ??
     body?.dealerPhoto ??
     dealer?.avatar_url ??
     dealer?.image ??
     dealer?.avatar;
+  const photoText = String(rawPhoto ?? "").trim();
+  const dealerPhoto = !photoText
+    ? ""
+    : /^https?:\/\//i.test(photoText)
+      ? photoText
+      : photoText.startsWith("//")
+        ? `https:${photoText}`
+        : photoText.startsWith("/")
+          ? `https://ds.ofalive99.net${photoText}`
+          : photoText;
+  const dealerId = String(
+    dealer?.id ?? dealer?.dealer_id ?? body?.dealer_id ?? body?.dealerId ?? ""
+  ).trim();
+  const dealerNation = String(dealer?.nation ?? body?.dealer_nation ?? "").trim();
 
-  if (!dealerName && !dealerPhoto) return current;
+  if (!dealerName && !dealerPhoto && !dealerId && !dealerNation) return current;
 
   return current.map((table) => {
-    if ((table.apiId ?? `BAG${table.id}`) !== tableId) return table;
-    return {
+    if ((table.apiId ?? table.id) !== tableId) return table;
+    const dealerChanged = !!(
+      dealerId && table.dealerId && dealerId !== table.dealerId
+    );
+    const next = {
       ...table,
-      name: dealerName ? String(dealerName) : table.name,
-      dealerPhoto: dealerPhoto ? String(dealerPhoto) : table.dealerPhoto,
+      name: dealerName || (dealerChanged ? "—" : table.name),
+      dealerPhoto: dealerPhoto
+        ? dealerPhoto
+        : dealerChanged
+          ? undefined
+          : table.dealerPhoto,
+      dealerId: dealerId || table.dealerId,
+      dealerNation: dealerNation || table.dealerNation,
       lastUpdated: Date.now(),
     };
+    return keepStableTableReference(table, next);
   });
 }
 
@@ -5550,11 +5586,11 @@ export default function HomeScreen() {
     const startDealerRefresh = () => {
       if (dealerRefreshTimer) clearInterval(dealerRefreshTimer);
       // Safety-net metadata refresh only. Live table events still update immediately.
-      // Slow safety-net only. Realtime table events handle visible changes; this
-      // snapshot just catches membership/dealer drift without repainting all cards.
+      // MT dealer metadata is only present in /tables snapshots (not in normal wait/show_win events).
+      // Poll it every 5s, but reconcile with stable object references so unchanged cards do not repaint.
       dealerRefreshTimer = setInterval(() => {
         if (isCurrentSocket()) requestTables(true);
-      }, 60000);
+      }, 5000);
     };
     const subscribe = (force = false) => {
       if (

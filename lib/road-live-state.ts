@@ -17,6 +17,8 @@ export type LiveRoadTable = {
   results: RoadResult[];
   live?: boolean;
   dealerPhoto?: string;
+  dealerId?: string;
+  dealerNation?: string;
   lastUpdated?: number;
   lastResultKey?: string;
 };
@@ -76,6 +78,47 @@ function mergeSnapshot(local: RoadResult[], server: RoadResult[], sameShoe: bool
   return local;
 }
 
+
+function meaningfulDealerName(value: unknown): string {
+  const text = String(value ?? "").trim();
+  if (!text || /^[-—]+$/.test(text) || /^TEST$/i.test(text)) return "";
+  return text;
+}
+
+function normalizeDealerPhoto(value: unknown): string {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  if (/^https?:\/\//i.test(text)) return text;
+  if (text.startsWith("//")) return `https:${text}`;
+  if (text.startsWith("/")) return `https://ds.ofalive99.net${text}`;
+  return text;
+}
+
+function dealerMeta(source: any) {
+  const dealer = source?.dealer ?? source?.dealer_info ?? source?.dealerInfo ?? {};
+  const id = String(
+    dealer?.id ?? dealer?.dealer_id ?? source?.dealer_id ?? source?.dealerId ?? ""
+  ).trim();
+  const nation = String(dealer?.nation ?? source?.dealer_nation ?? "").trim();
+  const name =
+    meaningfulDealerName(dealer?.nick_name) ||
+    meaningfulDealerName(dealer?.nickname) ||
+    meaningfulDealerName(dealer?.name) ||
+    meaningfulDealerName(dealer?.username) ||
+    meaningfulDealerName(dealer?.realname) ||
+    meaningfulDealerName(source?.dealer_name) ||
+    meaningfulDealerName(source?.dealerName);
+  const photo = normalizeDealerPhoto(
+    source?.dealer_image ??
+      source?.dealer_image_url ??
+      source?.dealerPhoto ??
+      dealer?.avatar_url ??
+      dealer?.image ??
+      dealer?.avatar
+  );
+  return { id, nation, name, photo };
+}
+
 function sameRoadResults(a: RoadResult[], b: RoadResult[]) {
   if (a === b) return true;
   if (a.length !== b.length) return false;
@@ -105,26 +148,29 @@ export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): 
     : mergeSnapshot(table.results, serverResults, !shoeDiff, finiteRound);
   const count = stats(results);
   const apiId = getApiTableId(source) || table.apiId;
-  const nextName =
-    source?.dealer?.nick_name ??
-    source?.dealer?.nickname ??
-    source?.dealer?.name ??
-    source?.dealer?.username ??
-    source?.dealer_name ??
-    table.name;
+  const dealer = dealerMeta(source);
+  const dealerChanged = !!(
+    dealer.id &&
+    table.dealerId &&
+    dealer.id !== table.dealerId
+  );
+  const nextName = dealer.name || (dealerChanged ? "—" : table.name);
   const nextPlayers = String(source?.totalplayers ?? source?.total_players ?? table.players);
   const nextRoomId = String(source?.room_id ?? table.roomId ?? "");
   const nextBadge = String(source?.orderState ?? table.tableBadge ?? "");
   const nextRound = shoeDiff && !acceptShoeChange
     ? table.round
     : (Number.isFinite(sourceRound) ? sourceRound : table.round);
-  const nextPhoto =
-    source?.dealer_image ??
-    source?.dealer_image_url ??
-    source?.dealer?.avatar_url ??
-    source?.dealer?.image ??
-    source?.dealer?.avatar ??
-    table.dealerPhoto;
+  // A blank avatar on a newly assigned dealer must not keep showing the
+  // previous dealer. When MT has no avatar (currently some TEST tables), clear
+  // the stale image so the UI can fall back to that table's live video feed.
+  const nextPhoto = dealer.photo
+    ? dealer.photo
+    : dealerChanged
+      ? undefined
+      : table.dealerPhoto;
+  const nextDealerId = dealer.id || table.dealerId;
+  const nextDealerNation = dealer.nation || table.dealerNation;
 
   // Snapshot replies are frequent. Keep the exact same object reference when
   // nothing visible changed so React.memo does not repaint every table card.
@@ -141,6 +187,8 @@ export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): 
     count.player === table.player &&
     count.tie === table.tie &&
     nextPhoto === table.dealerPhoto &&
+    nextDealerId === table.dealerId &&
+    nextDealerNation === table.dealerNation &&
     sameRoadResults(results, table.results)
   ) {
     return table;
@@ -159,6 +207,8 @@ export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): 
     ...count,
     results,
     dealerPhoto: nextPhoto,
+    dealerId: nextDealerId,
+    dealerNation: nextDealerNation,
     lastUpdated: Date.now(),
   } as T;
 }
