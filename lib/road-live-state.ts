@@ -166,8 +166,10 @@ export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): 
 export function applyLiveTables<T extends LiveRoadTable>(current: T[], sources: any[]): T[] {
   const baccarat = sources.filter(isMtBaccaratTable);
   return current.map((table) => {
-    const expected = table.apiId ?? `BAG${table.id}`;
-    const source = baccarat.find((item) => getApiTableId(item) === expected || String(item?.table_name ?? "") === table.id);
+    const expected = String(table.apiId ?? `BAG${table.id}`).toUpperCase();
+    // Exact table_id is mandatory. MT now exposes BAV01 and BAV01_LIVE with the
+    // same table_name/room/game, so table_name fallback cross-wires dealer data.
+    const source = baccarat.find((item) => getApiTableId(item) === expected);
     return source ? mergeLiveTable(table, source) : table;
   });
 }

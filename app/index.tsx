@@ -271,23 +271,75 @@ type PendingBet = {
   reportPlatform?: ReportPlatformKey;
 } | null;
 
+// Current MT lobby layout (2026-09-30): the four TW LIVE variants are
+// separate visible cards and must sit immediately to the right of their base table.
+// B05~B10 then continue as normal two-column pairs.
 const mtLoadingTableIds = [
-  "BAG01",
-  "BAG02",
-  "BAG03",
-  "BAG03A",
-  "BAG05",
-  "BAG06",
-  "BAG07",
-  "BAG08",
-  "BAG09",
-  "BAG10",
-  "BAG11",
-  "BAG12",
-  "BAG13",
-  "BAG13A",
-  "BAG15",
+  "BAV01",
+  "BAV01_LIVE",
+  "BAV02",
+  "BAV02_LIVE",
+  "BAV03",
+  "BAV03_LIVE",
+  "BAV03A",
+  "BAV03A_LIVE",
+  "BAV05",
+  "BAV06",
+  "BAV07",
+  "BAV08",
+  "BAV09",
+  "BAV10",
 ];
+
+const MT_CURRENT_BASE_CODES = new Set([
+  "01", "02", "03", "03A", "05", "06", "07", "08", "09", "10",
+]);
+const MT_LIVE_PAIR_BASE_CODES = new Set(["01", "02", "03", "03A"]);
+const MT_BASE_ORDER = ["01", "02", "03", "03A", "05", "06", "07", "08", "09", "10"];
+
+function mtTableIdentity(apiId: unknown) {
+  const raw = String(apiId ?? "").toUpperCase();
+  const live = /_LIVE$/.test(raw);
+  const baseRaw = raw.replace(/_LIVE$/, "");
+  const match = baseRaw.match(/^(?:BAG|BAV)(.+)$/);
+  const code = match?.[1] ?? "";
+  return { raw, live, code };
+}
+
+function isCurrentMtDisplaySource(source: any) {
+  if (!isMtBaccaratTable(source)) return false;
+  const { live, code } = mtTableIdentity(getApiTableId(source));
+  if (!MT_CURRENT_BASE_CODES.has(code)) return false;
+  // The current lobby exposes LIVE variants only for B01/B02/B03/B03A.
+  if (live && !MT_LIVE_PAIR_BASE_CODES.has(code)) return false;
+  return true;
+}
+
+function mtDisplayRank(apiId: unknown) {
+  const { live, code } = mtTableIdentity(apiId);
+  const baseIndex = MT_BASE_ORDER.indexOf(code);
+  if (baseIndex < 0) return 9999;
+  if (baseIndex <= 3) return baseIndex * 2 + (live ? 1 : 0);
+  return 8 + (baseIndex - 4) + (live ? 0.5 : 0);
+}
+
+function sortMtTablesForLobby<T extends { apiId?: string; id: string }>(tables: T[]): T[] {
+  return [...tables].sort((a, b) => {
+    const ar = mtDisplayRank(a.apiId ?? a.id);
+    const br = mtDisplayRank(b.apiId ?? b.id);
+    if (ar !== br) return ar - br;
+    return String(a.apiId ?? a.id).localeCompare(String(b.apiId ?? b.id));
+  });
+}
+
+function mtVisibleTableLabel(source: any, apiId: string) {
+  const rawName = String(source?.table_name ?? "").trim();
+  const { live, code } = mtTableIdentity(apiId);
+  const fallback = code ? `B${code}` : apiId;
+  const base = rawName || fallback;
+  if (!live) return base.replace(/-L$/i, "");
+  return /-L$/i.test(base) ? base : `${base}-L`;
+}
 const dealerStreamUrls: Record<string, string> = {
   BAG01: "https://pull.bighit888.com/livestream/bag01-1.flv",
   BAG02: "https://pull.bighit888.com/livestream/bag02-1.flv",
@@ -346,7 +398,7 @@ function ensureMpegTs() {
 // Visual road templates shown only while the first authoritative /tables
 // snapshot is loading. They are never used as the live membership whitelist.
 const initialTables: TableData[] = mtLoadingTableIds.map((apiId) => ({
-  id: apiId,
+  id: mtVisibleTableLabel({}, apiId),
   apiId,
   game: "百家樂",
   name: "—",
@@ -2774,7 +2826,7 @@ function reconcileCurrentMtTables(
   retainedIds: readonly string[] = [],
 ): TableData[] {
   const seen = new Set<string>();
-  const active = sources.filter(isMtBaccaratTable).filter((source) => {
+  const active = sources.filter(isCurrentMtDisplaySource).filter((source) => {
     const id = getApiTableId(source);
     if (!id || seen.has(id)) return false;
     seen.add(id);
@@ -2797,14 +2849,15 @@ function reconcileCurrentMtTables(
           ),
       ),
   ];
-  const seeded = orderedIds.map((apiId) => {
+  const seeded = orderedIds.map((apiIdRaw) => {
+    const apiId = String(apiIdRaw);
     const source = activeById.get(apiId);
     const existing = current.find(
       (table) => (table.apiId ?? table.id) === apiId,
     );
     if (existing) return existing;
     return {
-      id: String(source?.table_name ?? apiId),
+      id: mtVisibleTableLabel(source, apiId),
       apiId,
       game: "百家樂",
       name: "—",
@@ -2821,7 +2874,7 @@ function reconcileCurrentMtTables(
       live: false,
     } as TableData;
   });
-  return applyTablesSameShoe(seeded, active);
+  return sortMtTablesForLobby(applyTablesSameShoe(seeded, active));
 }
 function extractMtUrlToken(value: string) {
   try {
@@ -2966,13 +3019,13 @@ function applyTablesSameShoe(
     );
     if (!prev) return table;
 
-    const source = sources.find((item) => {
-      const sourceId = getApiTableId(item);
-      const tableId = table.apiId ?? `BAG${table.id}`;
-      return (
-        sourceId === tableId || String(item?.table_name ?? "") === table.id
-      );
-    });
+    // Exact API id only. BAV01 and BAV01_LIVE intentionally share the same
+    // room/game road, but they are separate lobby cards with different dealer
+    // presentation. Falling back to table_name (both can be "B01") mixes them.
+    const tableId = String(table.apiId ?? `BAG${table.id}`).toUpperCase();
+    const source = sources.find(
+      (item) => getApiTableId(item) === tableId,
+    );
     const streamUrl = extractTableStreamUrl(source);
     const trend = source?.trend ?? {};
     const explicitShoe =
@@ -3820,7 +3873,7 @@ export default function HomeScreen() {
           ? // Only SA 「開桌」— never invent empty D01..N / 百家樂 1..N placeholders.
             saTables.filter(isSaOpenTable)
           : mtSnapshotReady
-            ? mtTables
+            ? sortMtTablesForLobby(mtTables)
             : initialTables;
   const tables: TableData[] = allActiveTables;
   // Float / 選桌: same open-only SA list.
@@ -5764,7 +5817,7 @@ export default function HomeScreen() {
         }
         const src = eventTables(p);
         if (src && name.endsWith("/tables")) {
-          const filtered = src.filter(isMtBaccaratTable);
+          const filtered = src.filter(isCurrentMtDisplaySource);
           const retainedIds = collectConfirmedMtTableIds(
             confirmedMtTableIdsRef.current,
             filtered,
@@ -5792,7 +5845,7 @@ export default function HomeScreen() {
           return;
         }
         if (src && name.endsWith("/tablesvg")) {
-          const filtered = src.filter(isMtBaccaratTable);
+          const filtered = src.filter(isCurrentMtDisplaySource);
           const retainedIds = collectConfirmedMtTableIds(
             confirmedMtTableIdsRef.current,
             filtered,
