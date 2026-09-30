@@ -317,6 +317,12 @@ function isCurrentMtDisplaySource(source: any) {
   return true;
 }
 
+
+function mtGameSourceTableId(apiId: unknown) {
+  const raw = String(apiId ?? "").trim().toUpperCase();
+  return raw.replace(/_LIVE$/, "");
+}
+
 function mtDisplayRank(apiId: unknown) {
   const { live, code } = mtTableIdentity(apiId);
   const baseIndex = MT_BASE_ORDER.indexOf(code);
@@ -4165,22 +4171,50 @@ export default function HomeScreen() {
       assistPool[0],
     [assistPool, assistTableId],
   );
+
+  // MT LIVE tables are a separate display/dealer identity, but they are not a
+  // separate baccarat game. Every game-derived feature must read the base table.
+  const assistGameTable = useMemo(() => {
+    if (activePlatform !== "MT" || !assistTable) return assistTable;
+    const displayId = String(assistTable.apiId ?? assistTable.id ?? assistTableId);
+    const sourceId = mtGameSourceTableId(displayId);
+    if (sourceId === displayId.toUpperCase()) return assistTable;
+    return (
+      assistPool.find(
+        (t) =>
+          String(t.apiId ?? t.id ?? "").toUpperCase() === sourceId,
+      ) ?? assistTable
+    );
+  }, [activePlatform, assistPool, assistTable, assistTableId]);
+
+  const assistGameSourceId =
+    activePlatform === "MT"
+      ? mtGameSourceTableId(assistTable?.apiId ?? assistTable?.id ?? assistTableId)
+      : assistTableId;
+
   const liveV38 = useMemo(() => {
     if (activePlatform !== "MT" && assistTable) {
       return parseDgV38Poker(assistTable as DgTableData) || undefined;
     }
     return (
-      v38ByTable[assistTableId] ||
-      (assistTable
-        ? tableIdKeys(assistTable)
+      v38ByTable[assistGameSourceId] ||
+      (assistGameTable
+        ? tableIdKeys(assistGameTable)
             .map((id) => v38ByTable[id])
             .find(Boolean)
         : undefined)
     );
-  }, [activePlatform, assistTable, assistTableId, v38ByTable]);
-  const latest = assistTable?.results.at(-1);
-  const recommendation = recommendSide(assistTable?.results ?? []);
-  const assistDecision = roadDecision(assistTable?.results ?? []);
+  }, [
+    activePlatform,
+    assistTable,
+    assistGameTable,
+    assistGameSourceId,
+    v38ByTable,
+  ]);
+
+  const latest = assistGameTable?.results.at(-1);
+  const recommendation = recommendSide(assistGameTable?.results ?? []);
+  const assistDecision = roadDecision(assistGameTable?.results ?? []);
   const assistConfidence = confidencePercent(
     assistDecision.scoreBanker,
     assistDecision.scorePlayer,
@@ -4189,21 +4223,21 @@ export default function HomeScreen() {
   const aiProviderOption =
     AI_PROVIDER_OPTIONS.find((x) => x.key === aiProvider) || AI_PROVIDER_OPTIONS[4];
   const aiProviderLabel = aiProviderOption.label;
-  const aiRoadFingerprint = `${assistTable?.apiId ?? assistTable?.id ?? ""}|${
-    assistTable?.round ?? 0
-  }|${(assistTable?.results ?? []).slice(-60).join("")}`;
+  const aiRoadFingerprint = `${assistGameTable?.apiId ?? assistGameTable?.id ?? ""}|${
+    assistGameTable?.round ?? 0
+  }|${(assistGameTable?.results ?? []).slice(-60).join("")}`;
   useEffect(() => {
-    if (!assistTable) {
+    if (!assistGameTable) {
       setAiResult(null);
       setAiError("");
       return;
     }
-    const local = localProviderDecision(aiProvider, assistTable.results ?? []);
+    const local = localProviderDecision(aiProvider, assistGameTable.results ?? []);
     setAiResult({
       provider: aiProvider,
       side: local.side,
       confidence: local.confidence,
-      summary: providerAnalysisText(aiProvider, assistTable),
+      summary: providerAnalysisText(aiProvider, assistGameTable),
     });
     setAiError("");
   }, [aiProvider, aiRoadFingerprint, activePlatform]);
@@ -4214,7 +4248,8 @@ export default function HomeScreen() {
   const effectiveConfidenceState = aiResult
     ? confidenceState(aiResult.confidence)
     : assistConfidenceState;
-  const effectiveAnalysisText = aiResult?.summary || providerAnalysisText(aiProvider, assistTable);
+  const effectiveAnalysisText =
+    aiResult?.summary || providerAnalysisText(aiProvider, assistGameTable);
 
   const resolveTableV38 = (table: TableData) =>
     tableIdKeys(table).map((id) => v38ByTable[id]).find(Boolean);
@@ -4842,12 +4877,24 @@ export default function HomeScreen() {
       if (pending.reportPlatform === "SA") return pending;
       const body = payload?.body ?? payload?.msg ?? payload?.data ?? {};
       const tableId = String(body?.table_id ?? "");
-      if (tableId && tableId !== pending.tableId) {
+      const pendingGameTableId =
+        pending.reportPlatform === "MT"
+          ? mtGameSourceTableId(pending.tableId)
+          : pending.tableId;
+      if (
+        tableId &&
+        tableId !== pending.tableId &&
+        tableId !== pendingGameTableId
+      ) {
         // SA aliases: D01 / SA901 / roomId — accept any key that matches pending.
         const keys = Array.isArray(body?.table_keys)
           ? body.table_keys.map((x: unknown) => String(x ?? "").trim()).filter(Boolean)
           : [];
-        if (!keys.includes(pending.tableId)) return pending;
+        if (
+          !keys.includes(pending.tableId) &&
+          !keys.includes(pendingGameTableId)
+        )
+          return pending;
       }
       const key = resultKeyFromPayload(payload);
       if (pending.resultKey && pending.resultKey === key) return pending;
@@ -7508,7 +7555,7 @@ export default function HomeScreen() {
           <View style={s.decisionBox}>
             <Text style={s.smallLabel}>牌型</Text>
             <Text style={s.detectText}>
-              {detectPattern(assistTable?.results ?? [])}
+              {detectPattern(assistGameTable?.results ?? [])}
             </Text>
           </View>
           <View style={[s.decisionBox, s.recommendDecisionBox]}>
@@ -7909,8 +7956,10 @@ export default function HomeScreen() {
                     assistTable?.trend ||
                     (assistTable?.players !== "—" ? assistTable?.players : "—") ||
                     "—"
-                  } · 第 ${assistTable?.round ?? 0} 局`
-                : `荷官 ${assistTable?.name || "—"} · 第 ${assistTable?.round ?? 0} 局`}
+                  } · 第 ${assistGameTable?.round ?? assistTable?.round ?? 0} 局`
+                : `荷官 ${assistTable?.name || "—"} · 第 ${
+                    assistGameTable?.round ?? assistTable?.round ?? 0
+                  } 局`}
             </Text>
           </Pressable>
           {roomDropdownOpen ? (
@@ -8213,10 +8262,10 @@ export default function HomeScreen() {
           <View style={s.v38Body}>
             <View style={s.v38MetaRow}>
               <Text style={s.v38Meta}>
-                Shoe {data?.shoe ?? assistTable?.shoe ?? "—"}
+                Shoe {data?.shoe ?? assistGameTable?.shoe ?? assistTable?.shoe ?? "—"}
               </Text>
               <Text style={s.v38Meta}>
-                Round {data?.round ?? assistTable?.round ?? 0}
+                Round {data?.round ?? assistGameTable?.round ?? assistTable?.round ?? 0}
               </Text>
             </View>
             <View style={s.v38Cards}>
