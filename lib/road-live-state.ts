@@ -76,6 +76,13 @@ function mergeSnapshot(local: RoadResult[], server: RoadResult[], sameShoe: bool
   return local;
 }
 
+function sameRoadResults(a: RoadResult[], b: RoadResult[]) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): T {
   const trend = source?.trend ?? {};
   const serverResults = parseBeadPlate(trend?.bead_plate2 ?? trend?.bead_plate ?? source?.bead_plate2);
@@ -97,34 +104,61 @@ export function mergeLiveTable<T extends LiveRoadTable>(table: T, source: any): 
     ? table.results
     : mergeSnapshot(table.results, serverResults, !shoeDiff, finiteRound);
   const count = stats(results);
-  const apiId = getApiTableId(source);
+  const apiId = getApiTableId(source) || table.apiId;
+  const nextName =
+    source?.dealer?.nick_name ??
+    source?.dealer?.nickname ??
+    source?.dealer?.name ??
+    source?.dealer?.username ??
+    source?.dealer_name ??
+    table.name;
+  const nextPlayers = String(source?.totalplayers ?? source?.total_players ?? table.players);
+  const nextRoomId = String(source?.room_id ?? table.roomId ?? "");
+  const nextBadge = String(source?.orderState ?? table.tableBadge ?? "");
+  const nextRound = shoeDiff && !acceptShoeChange
+    ? table.round
+    : (Number.isFinite(sourceRound) ? sourceRound : table.round);
+  const nextPhoto =
+    source?.dealer_image ??
+    source?.dealer_image_url ??
+    source?.dealer?.avatar_url ??
+    source?.dealer?.image ??
+    source?.dealer?.avatar ??
+    table.dealerPhoto;
+
+  // Snapshot replies are frequent. Keep the exact same object reference when
+  // nothing visible changed so React.memo does not repaint every table card.
+  if (
+    apiId === table.apiId &&
+    table.live === true &&
+    nextName === table.name &&
+    nextPlayers === table.players &&
+    nextRoomId === String(table.roomId ?? "") &&
+    nextBadge === String(table.tableBadge ?? "") &&
+    effectiveShoe === table.shoe &&
+    nextRound === table.round &&
+    count.banker === table.banker &&
+    count.player === table.player &&
+    count.tie === table.tie &&
+    nextPhoto === table.dealerPhoto &&
+    sameRoadResults(results, table.results)
+  ) {
+    return table;
+  }
+
   return {
     ...table,
-    apiId: apiId || table.apiId,
+    apiId,
     live: true,
-    name:
-      source?.dealer?.nick_name ??
-      source?.dealer?.nickname ??
-      source?.dealer?.name ??
-      source?.dealer?.username ??
-      source?.dealer_name ??
-      table.name,
-    players: String(source?.totalplayers ?? source?.total_players ?? table.players),
-    roomId: String(source?.room_id ?? table.roomId ?? ""),
-    tableBadge: String(source?.orderState ?? table.tableBadge ?? ""),
+    name: nextName,
+    players: nextPlayers,
+    roomId: nextRoomId,
+    tableBadge: nextBadge,
     shoe: effectiveShoe,
-    round: shoeDiff && !acceptShoeChange
-      ? table.round
-      : (Number.isFinite(sourceRound) ? sourceRound : table.round),
+    round: nextRound,
     ...count,
     results,
-    dealerPhoto:
-      source?.dealer_image ??
-      source?.dealer_image_url ??
-      source?.dealer?.avatar_url ??
-      source?.dealer?.image ??
-      source?.dealer?.avatar ??
-      table.dealerPhoto,
+    dealerPhoto: nextPhoto,
     lastUpdated: Date.now(),
   } as T;
 }

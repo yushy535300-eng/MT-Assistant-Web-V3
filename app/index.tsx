@@ -2926,6 +2926,28 @@ function extractTableStreamUrl(source: any): string {
   return found.find((x) => x.includes("pull.bighit888.com")) ?? found[0] ?? "";
 }
 
+function sameTableDataForRender(a: TableData, b: TableData) {
+  if (a === b) return true;
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) {
+    if (key === "lastUpdated") continue;
+    const av = (a as any)[key];
+    const bv = (b as any)[key];
+    if (key === "results") {
+      if (av === bv) continue;
+      if (!Array.isArray(av) || !Array.isArray(bv) || av.length !== bv.length) return false;
+      for (let i = 0; i < av.length; i += 1) if (av[i] !== bv[i]) return false;
+      continue;
+    }
+    if (av !== bv) return false;
+  }
+  return true;
+}
+
+function keepStableTableReference(prev: TableData | undefined, next: TableData) {
+  return prev && sameTableDataForRender(prev, next) ? prev : next;
+}
+
 /**
  * Keep exactly one shoe per table.
  * MT tables/tablesvg snapshots are the authoritative road for the current shoe.
@@ -3016,21 +3038,27 @@ function applyTablesSameShoe(
         : typeof rawNewSnapshot === "string" &&
           rawNewSnapshot.replace(/[^0-9]/g, "").length >= 1;
       if (hasNewSnapshot)
-        return countCurrentShoe({
-          ...tableWithStream,
-          results: [...tableWithStream.results],
-        });
+        return keepStableTableReference(
+          prev,
+          countCurrentShoe({
+            ...tableWithStream,
+            results: [...tableWithStream.results],
+          }),
+        );
       // MT international tables briefly publish a new shoe/round with an empty
       // road before the first real bead arrives. Keep the last painted road for
       // that transition packet so the card never flashes completely blank.
       // The first non-empty authoritative snapshot above switches to the new
       // shoe atomically.
-      return countCurrentShoe({
-        ...tableWithStream,
-        shoe: prev.shoe,
-        round: prev.round,
-        results: [...prev.results],
-      });
+      return keepStableTableReference(
+        prev,
+        countCurrentShoe({
+          ...tableWithStream,
+          shoe: prev.shoe,
+          round: prev.round,
+          results: [...prev.results],
+        }),
+      );
     }
 
     // Same shoe: never let a stale/short snapshot roll the visible road backward.
@@ -3047,15 +3075,21 @@ function applyTablesSameShoe(
       // Full/equal snapshot is safe. A shorter same-shoe snapshot is stale: keep
       // the current road while still accepting fresh metadata from the packet.
       if (tableWithStream.results.length >= prev.results.length)
-        return countCurrentShoe(tableWithStream);
-      return countCurrentShoe({
-        ...tableWithStream,
-        results: [...prev.results],
-      });
+        return keepStableTableReference(prev, countCurrentShoe(tableWithStream));
+      return keepStableTableReference(
+        prev,
+        countCurrentShoe({
+          ...tableWithStream,
+          results: [...prev.results],
+        }),
+      );
     }
 
     // If this packet has no road snapshot at all, do not erase the live road.
-    return countCurrentShoe({ ...tableWithStream, results: [...prev.results] });
+    return keepStableTableReference(
+      prev,
+      countCurrentShoe({ ...tableWithStream, results: [...prev.results] }),
+    );
   });
 }
 
@@ -5289,10 +5323,7 @@ export default function HomeScreen() {
     const startPokerCardSync = () => {
       const run = ++pokerCardSyncRun;
       if (pokerCardSyncTimer) clearTimeout(pokerCardSyncTimer);
-      const delays = [
-        120, 280, 520, 900, 1400, 2000, 2700, 3500, 4400, 5400, 6500, 7700,
-        9000, 10500, 12200, 14100, 16200, 18500,
-      ];
+      const delays = [250, 900, 2000, 4200];
       let index = 0;
       const next = () => {
         if (run !== pokerCardSyncRun || !isCurrentSocket() || !authenticated)
@@ -5451,38 +5482,26 @@ export default function HomeScreen() {
         ws.readyState !== WebSocket.OPEN
       )
         return;
-      // Re-run post-auth DATA initialization on the SAME socket. Never reconnect/re-authenticate.
-      requestTables(true);
-      setTimeout(() => {
-        if (isCurrentSocket() && authenticated) requestSvg();
-      }, 25);
-      setTimeout(() => {
-        if (isCurrentSocket() && authenticated) subscribe(true);
-      }, 50);
-      setTimeout(() => {
-        if (isCurrentSocket() && authenticated && !betReportInFlight)
-          requestBetReport();
-      }, 80);
-      setTimeout(() => {
-        if (isCurrentSocket() && authenticated) requestBalance();
-      }, 120);
-      setTimeout(() => {
-        if (isCurrentSocket() && authenticated && !betReportInFlight)
-          requestBetReport();
-      }, 900);
+      // Keep the existing authenticated DATA session alive without rebuilding the
+      // entire table list. Table membership is handled by the slower safety-net
+      // snapshot; live road/countdown/dealer changes arrive from table events.
+      subscribe();
+      if (!betReportInFlight) requestBetReport();
+      requestBalance();
     };
 
     const startDataSessionRefresh = () => {
       if (dataSessionRefreshTimer) clearInterval(dataSessionRefreshTimer);
-      dataSessionRefreshTimer = setInterval(refreshDataSession, 15000);
+      dataSessionRefreshTimer = setInterval(refreshDataSession, 30000);
     };
     const startDealerRefresh = () => {
       if (dealerRefreshTimer) clearInterval(dealerRefreshTimer);
       // Safety-net metadata refresh only. Live table events still update immediately.
-      // 10s keeps membership, dealer metadata and roads current without hammering /tables.
+      // Slow safety-net only. Realtime table events handle visible changes; this
+      // snapshot just catches membership/dealer drift without repainting all cards.
       dealerRefreshTimer = setInterval(() => {
         if (isCurrentSocket()) requestTables(true);
-      }, 10000);
+      }, 60000);
     };
     const subscribe = (force = false) => {
       if (
@@ -5797,7 +5816,7 @@ export default function HomeScreen() {
             const reset = resetRoadForNewShoePayload(c, p);
             return applyDealerRealtime(applyLiveShowWin(reset, p), p);
           });
-          scheduleTablesRefresh(1200);
+          scheduleTablesRefresh(2500);
           return;
         }
         if (
@@ -11310,7 +11329,6 @@ const s = StyleSheet.create({
     bottom: "auto" as any,
     borderRadius: 9,
   },
-  floatHeaderMobile: { height: 60, minHeight: 60, paddingHorizontal: 9, paddingVertical: 5 },
   selectorWrapMobile: { marginHorizontal: 5, marginTop: 4 },
   selectorMobile: { height: 28, paddingHorizontal: 7 },
   assistPageMobile: {

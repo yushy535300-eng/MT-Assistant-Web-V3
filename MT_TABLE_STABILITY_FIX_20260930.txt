@@ -1,0 +1,9 @@
+MT 多桌穩定更新修正（2026-09-30）
+
+1. /tables 與 /tablesvg 回覆若內容沒有實際變化，保留原 TableData 物件 reference，避免 React.memo 仍整批重畫桌卡。
+2. tablesvg 不改固定桌台成員邏輯；固定桌以 /tables 確認名單為準。
+3. post-auth data refresh 不再每 15 秒重抓完整 /tables + /tablesvg + force subscribe。
+4. 桌台 membership/dealer safety snapshot 改為每 60 秒一次。
+5. show_win 仍立即更新單桌牌路，完整 snapshot 延後 2.5 秒補正，不影響即時顯示。
+6. show_win 後 tablesvg 補抓由 18 次降為 4 次，避免多桌區一直整批 repaint。
+7. 今日輸贏 /bet/history 邏輯未改。
