@@ -2544,9 +2544,9 @@ function AccessScreen({
       });
       if (!resolved?.found) {
         const messages: any = {
-          not_whitelisted: "此 TZ 帳號尚未取得使用權限，請聯繫 LINE 協助",
-          disabled: "此 TZ 帳號授權已停用",
-          expired: "此 TZ 帳號授權已到期",
+          not_whitelisted: "此 TZ 帳號尚未取得使用權限。完成儲值後，通知我們即可立即開通。",
+          disabled: "此 TZ 帳號授權已停用。完成儲值後，通知我們即可立即開通。",
+          expired: "此 TZ 帳號授權已到期。完成儲值後，通知我們即可立即開通。",
           database_unavailable: "授權服務暫時無法使用",
         };
         setError(messages[resolved?.reason] || "登入驗證失敗");
@@ -2569,9 +2569,9 @@ function AccessScreen({
       if (!access.success) {
         const reason = (access as any).reason;
         const messages: any = {
-          not_whitelisted: "此 TZ 帳號尚未取得使用權限，請聯繫 LINE 協助",
-          disabled: "此 TZ 帳號授權已停用",
-          expired: "此 TZ 帳號授權已到期",
+          not_whitelisted: "此 TZ 帳號尚未取得使用權限。完成儲值後，通知我們即可立即開通。",
+          disabled: "此 TZ 帳號授權已停用。完成儲值後，通知我們即可立即開通。",
+          expired: "此 TZ 帳號授權已到期。完成儲值後，通知我們即可立即開通。",
           database_unavailable: "授權服務暫時無法使用",
         };
         setError(messages[reason] || "TZ 登入驗證失敗");
@@ -2714,7 +2714,14 @@ function AccessScreen({
               <Text style={s.registerBtnText}>註冊帳號</Text>
             </Pressable>
           </View>
-          {notice ? <Text style={s.kickNotice}>⚠ {notice}</Text> : null}
+          {notice ? (
+            <View style={s.kickNoticeBox}>
+              <Text style={s.kickNotice}>⚠ {notice}</Text>
+              <Text style={s.rechargeNotice}>
+                完成儲值後，通知我們即可立即開通。
+              </Text>
+            </View>
+          ) : null}
           <Text style={s.loginLabel}>TZ 帳號</Text>
           <TextInput
             value={username}
@@ -3790,7 +3797,7 @@ export default function HomeScreen() {
       setAccessKickNotice({
         title: "授權已失效",
         message,
-        detail: "系統將自動登出，如需繼續使用請重新取得授權。",
+        detail: "完成儲值後，通知我們即可立即開通。系統將自動登出。",
       });
 
       void stopDgRelayServer(staleSessionId);
@@ -11807,6 +11814,26 @@ const s = StyleSheet.create({
     marginTop: -8,
     marginBottom: 14,
   },
+
+  kickNoticeBox: {
+    width: "100%",
+    marginTop: 2,
+    marginBottom: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(61, 155, 255, 0.38)",
+    backgroundColor: "rgba(6, 20, 34, 0.84)",
+  },
+  rechargeNotice: {
+    marginTop: 5,
+    color: "#9FD3FF",
+    fontSize: 12.5,
+    lineHeight: 18,
+    fontWeight: "800",
+  },
+
   loginLabel: {
     color: "#B9C8D3",
     fontSize: 11,
