@@ -3710,6 +3710,13 @@ export default function HomeScreen() {
   const [accessGranted, setAccessGranted] = useState(false);
   const [accessSessionId, setAccessSessionId] = useState("");
   const [accessNotice, setAccessNotice] = useState("");
+  const [accessKickNotice, setAccessKickNotice] = useState<null | {
+    title: string;
+    message: string;
+    detail: string;
+  }>(null);
+  const accessRevokingRef = useRef(false);
+  const accessRevokeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const accessSessionCheck = trpc.trackerAccess.checkSession.useQuery(
     { sessionId: accessSessionId },
     {
@@ -3761,10 +3768,10 @@ export default function HomeScreen() {
   useEffect(() => {
     if (!accessGranted || !accessSessionId) return;
     if (accessSessionCheck.data && !accessSessionCheck.data.valid) {
+      if (accessRevokingRef.current) return;
+      accessRevokingRef.current = true;
+
       const staleSessionId = accessSessionId;
-      void stopDgRelayServer(staleSessionId);
-      setAccessGranted(false);
-      setAccessSessionId("");
       const reason = (accessSessionCheck.data as any)?.reason;
       const notices: any = {
         disabled: "此 TZ 帳號授權已被管理員停用。",
@@ -3774,7 +3781,19 @@ export default function HomeScreen() {
         session_expired: "連線已中斷，請重新登入。",
         session_invalid: "此帳號已於其他裝置登入，本裝置已自動登出。",
       };
-      setAccessNotice(notices[reason] || "此帳號授權已失效，請重新登入。");
+      const message = notices[reason] || "此帳號授權已失效，請重新登入。";
+
+      // Stop polling immediately, but keep the current app visible briefly so the
+      // user can actually see the floating revocation notice before login appears.
+      setAccessSessionId("");
+      setAccessNotice(message);
+      setAccessKickNotice({
+        title: "授權已失效",
+        message,
+        detail: "系統將自動登出，如需繼續使用請重新取得授權。",
+      });
+
+      void stopDgRelayServer(staleSessionId);
       try {
         socketRef.current?.close();
       } catch {}
@@ -3816,6 +3835,10 @@ export default function HomeScreen() {
       suppressDgRecoveryRef.current = false;
       roadConnectBusyRef.current = false;
       setFloatingOpen(false);
+      setV38Open(false);
+      setV38DetailOpen(false);
+      setTerminalParityOpen(false);
+      setRadarOpen(false);
       setMtOpen(false);
       currentBalanceRef.current = null;
       setCurrentBalance(null);
@@ -3825,6 +3848,14 @@ export default function HomeScreen() {
       setStopLossTriggered(false);
       setStopLossPrincipal("");
       setStopLossPercent(20);
+
+      if (accessRevokeTimerRef.current) clearTimeout(accessRevokeTimerRef.current);
+      accessRevokeTimerRef.current = setTimeout(() => {
+        setAccessKickNotice(null);
+        setAccessGranted(false);
+        accessRevokingRef.current = false;
+        accessRevokeTimerRef.current = null;
+      }, 2600);
     }
   }, [
     accessGranted,
@@ -3832,6 +3863,12 @@ export default function HomeScreen() {
     accessSessionCheck.data?.valid,
     (accessSessionCheck.data as any)?.reason,
   ]);
+
+  useEffect(() => {
+    return () => {
+      if (accessRevokeTimerRef.current) clearTimeout(accessRevokeTimerRef.current);
+    };
+  }, []);
 
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -8530,6 +8567,12 @@ export default function HomeScreen() {
         onAuthenticated={(sessionId, platformToken, platform) => {
           setAccessSessionId(sessionId);
           setAccessNotice("");
+          setAccessKickNotice(null);
+          accessRevokingRef.current = false;
+          if (accessRevokeTimerRef.current) {
+            clearTimeout(accessRevokeTimerRef.current);
+            accessRevokeTimerRef.current = null;
+          }
           setActivePlatform("MT");
           platformTokenRef.current = platformToken;
           setLoginPlatform(platform);
@@ -8941,6 +8984,32 @@ export default function HomeScreen() {
                 ))}
           </View>
         </ScrollView>
+
+        <Modal
+          visible={!!accessKickNotice}
+          transparent
+          animationType="fade"
+          onRequestClose={() => {}}
+        >
+          <View style={s.accessKickLayer}>
+            <View style={s.accessKickCard}>
+              <View style={s.accessKickIcon}>
+                <MaterialIcons name="gpp-bad" size={25} color="#FF6B6B" />
+              </View>
+              <View style={s.accessKickCopy}>
+                <Text style={s.accessKickTitle}>
+                  {accessKickNotice?.title || "授權已失效"}
+                </Text>
+                <Text style={s.accessKickMessage}>
+                  {accessKickNotice?.message || "此帳號授權已失效。"}
+                </Text>
+                <Text style={s.accessKickDetail}>
+                  {accessKickNotice?.detail || "系統將自動登出。"}
+                </Text>
+              </View>
+            </View>
+          </View>
+        </Modal>
 
         {toast ? (
           <View style={s.toast}>
@@ -12156,6 +12225,64 @@ const s = StyleSheet.create({
     maxWidth: 520,
   },
   nativeMtFallback: { flex: 1, alignItems: "center", justifyContent: "center" },
+  accessKickLayer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "flex-start",
+    paddingTop: 74,
+    paddingHorizontal: 14,
+    backgroundColor: "rgba(2, 10, 18, 0.10)",
+  },
+  accessKickCard: {
+    width: "100%",
+    maxWidth: 520,
+    minHeight: 86,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#B74750",
+    backgroundColor: "#0B1824",
+    paddingHorizontal: 15,
+    paddingVertical: 13,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    shadowColor: "#000",
+    shadowOpacity: 0.38,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 40,
+  },
+  accessKickIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#2A151B",
+    borderWidth: 1,
+    borderColor: "#7D3038",
+    flexShrink: 0,
+  },
+  accessKickCopy: { flex: 1, minWidth: 0 },
+  accessKickTitle: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "900",
+    marginBottom: 3,
+  },
+  accessKickMessage: {
+    color: "#FFB8BD",
+    fontSize: 12,
+    fontWeight: "800",
+    lineHeight: 17,
+  },
+  accessKickDetail: {
+    color: "#8FA6B7",
+    fontSize: 10,
+    fontWeight: "600",
+    marginTop: 3,
+    lineHeight: 15,
+  },
   toast: {
     position: "absolute",
     bottom: 78,
