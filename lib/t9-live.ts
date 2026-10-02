@@ -86,13 +86,58 @@ export async function connectT9Live(
     if (payload.message) callbacks.onEvent?.(payload.message);
   });
   source.onerror = () => {
-    if (closed || connected) return;
-    callbacks.onStatus?.("error", "T9 即時通道中斷");
+    if (closed) return;
+    // EventSource retries by itself. A transport hiccup is NOT a T9 logout.
+    // Keep the last valid tables on screen while SSE reconnects.
+    callbacks.onStatus?.(
+      connected ? "connecting" : "loading",
+      "T9 即時資料同步恢復中",
+    );
   };
+
+  // SSE is primary. Snapshot polling is a safety net so homepage/floating
+  // continue to receive the same relay state even if a proxy/CDN briefly
+  // interrupts EventSource.
+  let pollBusy = false;
+  const pollSnapshot = async () => {
+    if (closed || pollBusy) return;
+    pollBusy = true;
+    try {
+      const r = await fetch(
+        `/api/t9/snapshot?sessionId=${encodeURIComponent(sessionId)}`,
+        { headers: { Accept: "application/json" }, cache: "no-store" as any },
+      );
+      const data = await r.json().catch(() => null);
+      if (closed || !r.ok || !data?.ok) return;
+      const tables = Array.isArray(data.tables) ? data.tables : [];
+      if (tables.length) callbacks.onTables(tables);
+      const status = String(data.status || "");
+      if (status === "connected") {
+        connected = true;
+        callbacks.onStatus?.(
+          "connected",
+          String(data.message || `T9 已連線 · ${tables.length} 桌`),
+        );
+      } else if (!connected && (status === "connecting" || status === "loading")) {
+        callbacks.onStatus?.(
+          "connecting",
+          String(data.message || "T9 即時資料連線中..."),
+        );
+      }
+    } catch {
+      // Keep last known tables; one failed poll must never destroy T9 session.
+    } finally {
+      pollBusy = false;
+    }
+  };
+  void pollSnapshot();
+  const pollTimer = setInterval(pollSnapshot, 2000);
+
   return {
     close: () => {
       if (closed) return;
       closed = true;
+      clearInterval(pollTimer);
       try { source?.close(); } catch {}
       source = null;
     },

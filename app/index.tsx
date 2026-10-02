@@ -6766,7 +6766,7 @@ export default function HomeScreen() {
     ensurePersistentT9Session(false).catch((error: any) => {
       if (cancelled) return;
       setT9PersistentReady(false);
-      setT9Connected(false);
+      if (!t9HasConnectedRef.current) setT9Connected(false);
       setT9Status("連線中");
       appendEvent(`T9 背景工作階段待恢復：${error?.message || "unknown"}`);
     });
@@ -6811,8 +6811,17 @@ export default function HomeScreen() {
             return;
           }
           if (status === "error" || status === "closed") {
+            // Do not tear down a working persistent T9 login because the local
+            // SSE transport blinked. Snapshot polling keeps shared data alive.
             if (!t9HasConnectedRef.current) setT9Connected(false);
-            setT9Status(message || "連線中");
+            setT9Status("同步恢復中");
+          } else if (status === "connecting" || status === "loading") {
+            if (t9HasConnectedRef.current) {
+              setT9Connected(true);
+              setT9Status("已連線");
+            } else {
+              setT9Status(message || "連線中");
+            }
           } else {
             setT9Status(message || "連線中");
           }
