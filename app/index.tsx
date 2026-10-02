@@ -9368,6 +9368,13 @@ export default function HomeScreen() {
                 selectTextOnFocus
                 style={s.modalInput}
               />
+              <Text style={s.fieldLabel}>T9 牌路授權網址（唯讀）</Text>
+              <TextInput
+                value={readonlyConnectionUrl(t9GameUrl)}
+                editable={false}
+                selectTextOnFocus
+                style={s.modalInput}
+              />
               <Text style={s.fieldLabel}>最新連線紀錄</Text>
               <View style={s.logBox}>
                 <Text style={s.logText}>

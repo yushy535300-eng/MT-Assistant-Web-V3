@@ -413,10 +413,13 @@ class T9Relay {
     if (!connectId) throw new Error("t9_connect_id_missing");
     if (!memberId) throw new Error("t9_member_id_missing");
 
-    // T9's real baccarat socket path is not ConnectId alone. The browser
-    // connects with "<ConnectId>_<MemberId>" (confirmed from the captured
-    // production websocket URLs).
-    const socketConnectId = `${connectId}_${memberId}`;
+    // T9 may return ConnectId already suffixed with _MemberId. Do not append
+    // the same MemberId twice (e.g. xxx_2123033_2123033), otherwise the
+    // websocket endpoint returns HTTP 200 instead of 101 Switching Protocols.
+    const memberSuffix = `_${memberId}`;
+    const socketConnectId = connectId.endsWith(memberSuffix)
+      ? connectId
+      : `${connectId}${memberSuffix}`;
     const wsUrl =
       `${login.origin.replace(/^http/, "ws")}/api/baccarat/` +
       encodeURIComponent(socketConnectId);
