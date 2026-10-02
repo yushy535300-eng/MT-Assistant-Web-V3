@@ -42,6 +42,7 @@ export async function connectT9Live(
   gameUrl: string,
   sessionId: string,
   callbacks: T9Callbacks,
+  options?: { skipStart?: boolean },
 ): Promise<T9Controller> {
   if (typeof window === "undefined" || typeof EventSource === "undefined")
     throw new Error("T9 即時連線目前僅支援網站版");
@@ -50,17 +51,19 @@ export async function connectT9Live(
   let closed = false;
   let source: EventSource | null = null;
   let connected = false;
-  callbacks.onStatus?.("loading", "正在啟動 T9 即時資料");
-  const start = await fetch("/api/t9/start", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ sessionId, gameUrl }),
-  });
-  const data = await start.json().catch(() => null);
-  if (!start.ok || !data?.ok) {
-    const message = String(data?.error || `T9 relay 啟動失敗 (${start.status})`);
-    callbacks.onStatus?.("error", message);
-    throw new Error(message);
+  if (!options?.skipStart) {
+    callbacks.onStatus?.("loading", "正在啟動 T9 即時資料");
+    const start = await fetch("/api/t9/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ sessionId, gameUrl }),
+    });
+    const data = await start.json().catch(() => null);
+    if (!start.ok || !data?.ok) {
+      const message = String(data?.error || `T9 relay 啟動失敗 (${start.status})`);
+      callbacks.onStatus?.("error", message);
+      throw new Error(message);
+    }
   }
 
   source = new EventSource(`/api/t9/stream?sessionId=${encodeURIComponent(sessionId)}`);

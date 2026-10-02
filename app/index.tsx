@@ -3937,6 +3937,10 @@ export default function HomeScreen() {
   const t9HasConnectedRef = useRef(false);
   const [t9ConnectEpoch, setT9ConnectEpoch] = useState(0);
   const t9BridgeActiveRef = useRef(false);
+  const [t9PersistentIframeUrl, setT9PersistentIframeUrl] = useState("");
+  const t9PersistentIframeUrlRef = useRef("");
+  const t9PersistentInitRef = useRef<Promise<string> | null>(null);
+  const [t9PersistentReady, setT9PersistentReady] = useState(false);
   const [saConnected, setSaConnected] = useState(false);
   const [saStatus, setSaStatus] = useState("未連線");
   const [saGameUrl, setSaGameUrl] = useState("");
@@ -6175,15 +6179,59 @@ export default function HomeScreen() {
     return promise;
   };
 
+  const ensurePersistentT9Session = async (force = false) => {
+    if (Platform.OS !== "web") return ensureT9Authorization(force);
+    if (!force && t9PersistentIframeUrlRef.current) {
+      return t9PersistentIframeUrlRef.current;
+    }
+    if (t9PersistentInitRef.current) return t9PersistentInitRef.current;
+
+    const promise = (async () => {
+      // One TZ -> T9 authorization only. The iframe stays mounted from here on.
+      const url = await ensureT9Authorization(force);
+      if (extProxyActiveRef.current)
+        await leaveExternalSameOriginProxy({ restoreRelay: false });
+
+      const proxyUrl = await enterExternalSameOriginProxy(url, "MV");
+      if (!proxyUrl) throw new Error("T9 背景工作階段啟動失敗");
+
+      t9BridgeActiveRef.current = true;
+      t9PersistentIframeUrlRef.current = proxyUrl;
+      setT9PersistentIframeUrl(proxyUrl);
+      setT9PersistentReady(true);
+      appendEvent(
+        "T9 背景工作階段已建立 · 主頁/懸浮/遊戲共用同一登入",
+      );
+      return proxyUrl;
+    })().finally(() => {
+      if (t9PersistentInitRef.current === promise)
+        t9PersistentInitRef.current = null;
+    });
+
+    t9PersistentInitRef.current = promise;
+    return promise;
+  };
+
   const refreshMvLiveRooms = async () => {
     try {
-      const url = await ensureT9Authorization(true);
-      t9GameUrlRef.current = url;
-      setT9GameUrl(url);
+      // Manual reconnect only: tear down the old persistent T9 session once,
+      // then create one fresh session. Normal "進入T9 / 回牌路" never does this.
+      if (extProxyActiveRef.current)
+        await leaveExternalSameOriginProxy({ restoreRelay: false });
+      await stopT9RelayServer(accessSessionId);
+      t9BridgeActiveRef.current = false;
+      t9PersistentIframeUrlRef.current = "";
+      setT9PersistentIframeUrl("");
+      setT9PersistentReady(false);
+      t9GameUrlRef.current = "";
+      setT9GameUrl("");
+      const url = await ensurePersistentT9Session(true);
       setT9ConnectEpoch((v) => v + 1);
-      appendEvent("T9 即時資料重新授權中");
+      appendEvent("T9 已重新建立單一工作階段");
+      return url;
     } catch (error: any) {
-      appendEvent(`T9 自動連線失敗：${error?.message || "unknown"}`);
+      appendEvent(`T9 重新連線失敗：${error?.message || "unknown"}`);
+      throw error;
     }
   };
 
@@ -6706,49 +6754,75 @@ export default function HomeScreen() {
     };
   }, [accessGranted, accessSessionId, saGameUrl, saConnectEpoch]);
 
-  // T9 relay follows the fresh TZ/T9 customToken URL. The server exchanges
-  // that one-time token through T9 Lobby/login and mirrors decrypted baccarat
-  // table events back here over SSE.
+  // T9 persistent single-session:
+  // TZ login creates ONE hidden T9 iframe immediately. That iframe stays mounted
+  // while the user is on the dashboard, floating assistant, or T9 game screen.
+  // The server relay only mirrors this iframe's websocket into normalized tables.
   useEffect(() => {
-    if (!accessGranted) return;
-    if (t9BridgeActiveRef.current) return;
-    if (!t9GameUrl) {
-      if (!t9HasConnectedRef.current) setT9Connected(false);
-      return;
-    }
+    if (!accessGranted || !accessSessionId || !platformTokenRef.current) return;
+    if (Platform.OS !== "web") return;
+    let cancelled = false;
+
+    ensurePersistentT9Session(false).catch((error: any) => {
+      if (cancelled) return;
+      setT9PersistentReady(false);
+      setT9Connected(false);
+      setT9Status("連線中");
+      appendEvent(`T9 背景工作階段待恢復：${error?.message || "unknown"}`);
+    });
+
+    return () => {
+      cancelled = true;
+      // Do NOT leave the T9 proxy here. The iframe must survive platform/tab
+      // changes and only ends on logout or explicit manual reconnect.
+    };
+  }, [accessGranted, accessSessionId]);
+
+  useEffect(() => {
+    if (!accessGranted || !t9PersistentReady || !t9GameUrl) return;
+
     let cancelled = false;
     try {
       t9ControllerRef.current?.close();
     } catch {}
     t9ControllerRef.current = null;
+
     if (!t9HasConnectedRef.current) {
       setT9Connected(false);
       setT9Status("連線中");
     }
-    connectT9Live(t9GameUrl, accessSessionId, {
-      onTables: (next: T9TableData[]) => {
-        if (cancelled) return;
-        setMvLiveRooms((prev) => mergeVendorTables(prev, next as TableData[]));
+
+    // Proxy enter already created the relay shell and the hidden iframe owns
+    // the only vendor login. Attach SSE only; never call /api/t9/start here.
+    connectT9Live(
+      t9GameUrl,
+      accessSessionId,
+      {
+        onTables: (next: T9TableData[]) => {
+          if (cancelled) return;
+          setMvLiveRooms((prev) => mergeVendorTables(prev, next as TableData[]));
+        },
+        onStatus: (status, message) => {
+          if (cancelled) return;
+          if (status === "connected") {
+            t9HasConnectedRef.current = true;
+            setT9Connected(true);
+            setT9Status("已連線");
+            return;
+          }
+          if (status === "error" || status === "closed") {
+            if (!t9HasConnectedRef.current) setT9Connected(false);
+            setT9Status(message || "連線中");
+          } else {
+            setT9Status(message || "連線中");
+          }
+        },
+        onEvent: (message) => {
+          if (!cancelled) appendEvent(message);
+        },
       },
-      onStatus: (status, message) => {
-        if (cancelled) return;
-        if (status === "connected") {
-          t9HasConnectedRef.current = true;
-          setT9Connected(true);
-          setT9Status("已連線");
-          return;
-        }
-        if (status === "error" || status === "closed") {
-          if (!t9HasConnectedRef.current) setT9Connected(false);
-          setT9Status(message || "連線中");
-        } else {
-          setT9Status(message || "連線中");
-        }
-      },
-      onEvent: (message) => {
-        if (!cancelled) appendEvent(message);
-      },
-    })
+      { skipStart: true },
+    )
       .then((controller) => {
         if (cancelled) {
           controller.close();
@@ -6760,8 +6834,9 @@ export default function HomeScreen() {
         if (cancelled) return;
         setT9Connected(false);
         setT9Status("連線中");
-        appendEvent(`T9 背景連線待恢復：${error?.message || "unknown"}`);
+        appendEvent(`T9 SSE 待恢復：${error?.message || "unknown"}`);
       });
+
     return () => {
       cancelled = true;
       try {
@@ -6769,7 +6844,13 @@ export default function HomeScreen() {
       } catch {}
       t9ControllerRef.current = null;
     };
-  }, [accessGranted, accessSessionId, t9GameUrl, t9ConnectEpoch]);
+  }, [
+    accessGranted,
+    accessSessionId,
+    t9PersistentReady,
+    t9GameUrl,
+    t9ConnectEpoch,
+  ]);
 
 
   // 如果 DG 原生遊戲把背景 relay 踢掉：先用「同一個已取得的 DG token」
@@ -6922,6 +7003,12 @@ export default function HomeScreen() {
     const sessionToLogout = accessSessionId;
     void stopDgRelayServer(sessionToLogout);
     void stopSaRelayServer(sessionToLogout);
+    if (extProxyActiveRef.current)
+      void leaveExternalSameOriginProxy({ restoreRelay: false });
+    t9PersistentIframeUrlRef.current = "";
+    setT9PersistentIframeUrl("");
+    setT9PersistentReady(false);
+    t9BridgeActiveRef.current = false;
     void stopT9RelayServer(sessionToLogout);
     setAccessGranted(false);
     setAccessSessionId("");
@@ -7135,39 +7222,26 @@ export default function HomeScreen() {
           setMtOpen(false);
           return;
         }
-        // T9 single-session:
-        // official iframe performs the ONLY T9 Lobby/login. The same websocket
-        // is mirrored to homepage + floating assistant, so there is no account
-        // kick caused by a second background login.
-        const url = await getExternalLoginUrlFromPlatform(
-          loginPlatform,
-          platformToken,
-          "MV",
-        );
+        // T9 is already logged in in the persistent background iframe.
+        // Entering T9 ONLY reveals that same iframe. No new TZ/T9 login,
+        // no new customToken, no reload, no websocket handoff.
         gameViewPlatformRef.current = "MV";
         setGameViewPlatform("MV");
-        if (extProxyActiveRef.current)
-          await leaveExternalSameOriginProxy({ restoreRelay: false });
 
-        let nextUrl = url;
         if (Platform.OS === "web") {
-          const proxyUrl = await enterExternalSameOriginProxy(url, "MV");
-          if (!proxyUrl) throw new Error("T9 單工作階段代理啟動失敗");
-          nextUrl = proxyUrl;
-          t9BridgeActiveRef.current = true;
-          appendEvent(
-            "T9 單工作階段：遊戲、主頁牌路、懸浮共用同一條即時連線",
-          );
+          const persistentUrl = await ensurePersistentT9Session(false);
+          if (!persistentUrl) throw new Error("T9 背景工作階段尚未就緒");
+          gameViewUrlRef.current = persistentUrl;
+          setGameViewUrl(persistentUrl);
         } else {
-          await stopT9RelayServer(accessSessionId);
-          t9BridgeActiveRef.current = true;
+          const url = await ensureT9Authorization(false);
+          gameViewUrlRef.current = url;
+          setGameViewUrl(url);
         }
 
-        gameViewUrlRef.current = nextUrl;
-        setGameViewUrl(nextUrl);
         setHasEnteredGame(true);
         setMtOpen(true);
-        notify("已在程式內開啟 T9");
+        notify("已顯示目前 T9 工作階段");
         return;
       } else if (activePlatform === "SA") {
         // Perfect match with DG enter (do not change DG):
@@ -7272,23 +7346,12 @@ export default function HomeScreen() {
     const leaveJobs: Promise<void>[] = [];
     if (wasDg) leaveJobs.push(leaveDgSameSessionProxy());
     if (wasSa) leaveJobs.push(leaveSaForegroundBridge());
-    else if (wasMv && extProxyActiveRef.current) {
-      t9BridgeActiveRef.current = false;
-      leaveJobs.push(leaveExternalSameOriginProxy({ restoreRelay: false }));
+    // T9: 回牌路 = hide only. The persistent iframe remains mounted and the
+    // same T9 login/websocket keeps feeding homepage + floating assistant.
+    if (wasMv) {
+      appendEvent("T9 已隱藏遊戲畫面 · 原工作階段持續運作");
     }
-    void Promise.all(leaveJobs).then(() => {
-      if (!wasMv || !accessSessionId || !platformTokenRef.current) return;
-      void ensureT9Authorization(true)
-        .then((url) => {
-          t9GameUrlRef.current = url;
-          setT9GameUrl(url);
-          setT9ConnectEpoch((v) => v + 1);
-          appendEvent("T9 已離開遊戲 · 主頁即時牌路無縫恢復");
-        })
-        .catch((error: any) => {
-          appendEvent(`T9 主頁恢復待重試：${error?.message || "unknown"}`);
-        });
-    });
+    void Promise.all(leaveJobs);
     if (walletTransferBusyRef.current) return;
     const platformToken = platformTokenRef.current;
     if (!platformToken) return;
@@ -8680,6 +8743,10 @@ export default function HomeScreen() {
           setDgWasOpened(false);
           gameViewUrlRef.current = "";
           setGameViewUrl("");
+          t9PersistentIframeUrlRef.current = "";
+          setT9PersistentIframeUrl("");
+          setT9PersistentReady(false);
+          t9BridgeActiveRef.current = false;
           loginSweepDoneRef.current = false;
           setLoginSweepDone(false);
           walletTransferBusyRef.current = false;
@@ -9558,6 +9625,51 @@ export default function HomeScreen() {
             </View>
           </View>
         </Modal>
+        {Platform.OS === "web" && t9PersistentIframeUrl ? (
+          <View
+            pointerEvents={
+              mtOpen && gameViewPlatform === "MV" ? "auto" : "none"
+            }
+            style={
+              mtOpen && gameViewPlatform === "MV"
+                ? {
+                    position: "absolute",
+                    left: 0,
+                    right: 0,
+                    top: 58,
+                    bottom: 0,
+                    zIndex: 501,
+                    backgroundColor: "#000",
+                  }
+                : {
+                    position: "absolute",
+                    left: -10000,
+                    top: 0,
+                    width: 1280,
+                    height: 720,
+                    zIndex: -1,
+                    opacity: 0.01,
+                    pointerEvents: "none",
+                  }
+            }
+          >
+            <StableGameIframe
+              src={t9PersistentIframeUrl}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                border: "0",
+                background: "#000",
+                pointerEvents:
+                  mtOpen && gameViewPlatform === "MV" ? "auto" : "none",
+              }}
+              allow="clipboard-read; clipboard-write; fullscreen"
+            />
+          </View>
+        ) : null}
+
         {mtOpen ? (
           <View style={[s.mtOverlay, { pointerEvents: "box-none" } as any]}>
             <View style={[s.mtScreen, { pointerEvents: "box-none" } as any]}>
@@ -9622,7 +9734,9 @@ export default function HomeScreen() {
                 </View>
               </View>
               <View style={[s.iframeWrap, { pointerEvents: "auto" } as any]}>
-                {Platform.OS === "web" && gameViewUrl ? (
+                {Platform.OS === "web" &&
+                gameViewUrl &&
+                gameViewPlatform !== "MV" ? (
                   <StableGameIframe
                     src={gameViewUrl}
                     style={{
@@ -9637,7 +9751,7 @@ export default function HomeScreen() {
                     }}
                     allow="clipboard-read; clipboard-write; fullscreen"
                   />
-                ) : (
+                ) : gameViewPlatform === "MV" && Platform.OS === "web" ? null : (
                   <View style={s.nativeMtFallback}>
                     <Text style={s.helpText}>
                       目前原生模式請使用外部瀏覽器開啟目前平台。
