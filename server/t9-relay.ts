@@ -1,0 +1,422 @@
+import { createCipheriv, createDecipheriv } from "node:crypto";
+import type { Response } from "express";
+
+const KEY = Buffer.from("cF9Yt7R4DqLqPZmAj3kHU2g8WaCvN5dL", "utf8");
+const IV = Buffer.from("Jx9UrmvS3YkWpzE8", "utf8");
+const BACCARAT_GAME_TYPE = "80001";
+const T9_ORIGIN = "https://g.t9gaming.fun";
+
+type T9Status = "idle" | "loading" | "connecting" | "connected" | "error" | "closed";
+
+export type T9TableData = {
+  id: string;
+  apiId: string;
+  game: string;
+  name: string;
+  players: string;
+  countdown?: number;
+  countdownUpdatedAt?: number;
+  roomId?: string;
+  tableBadge?: string;
+  shoe: string;
+  round: number;
+  banker: number;
+  player: number;
+  tie: number;
+  results: Array<"莊" | "閒" | "和">;
+  trend: string;
+  live?: boolean;
+  dealerPhoto?: string;
+  streamUrl?: string;
+  lastUpdated?: number;
+  lastResultKey?: string;
+  poker?: string;
+  category?: string;
+};
+
+type Subscriber = Response;
+
+function decryptFrame(raw: unknown) {
+  const input = String(raw ?? "").trim();
+  if (!input) return "";
+  try {
+    const decipher = createDecipheriv("aes-256-cbc", KEY, IV);
+    decipher.setAutoPadding(true);
+    return Buffer.concat([
+      decipher.update(Buffer.from(input, "base64")),
+      decipher.final(),
+    ]).toString("utf8");
+  } catch {
+    // Some deployments may briefly emit plaintext diagnostics.
+    return input;
+  }
+}
+
+function encryptFrame(text: string) {
+  const cipher = createCipheriv("aes-256-cbc", KEY, IV);
+  cipher.setAutoPadding(true);
+  return Buffer.concat([cipher.update(text, "utf8"), cipher.final()]).toString("base64");
+}
+
+function t9RoadResult(value: unknown): "莊" | "閒" | "和" | null {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  // T9's own BaccaratRoadLogic: (history % 100) % 4; 1=banker, 2=player, 3=tie.
+  const code = ((Math.trunc(n) % 100) + 100) % 100 % 4;
+  if (code === 1) return "莊";
+  if (code === 2) return "閒";
+  if (code === 3) return "和";
+  return null;
+}
+
+function parseHistory(raw: unknown) {
+  if (!Array.isArray(raw)) return [] as Array<"莊" | "閒" | "和">;
+  return raw.map(t9RoadResult).filter((x): x is "莊" | "閒" | "和" => !!x);
+}
+
+function countResults(results: Array<"莊" | "閒" | "和">) {
+  let banker = 0, player = 0, tie = 0;
+  for (const result of results) {
+    if (result === "莊") banker++;
+    else if (result === "閒") player++;
+    else tie++;
+  }
+  return { banker, player, tie };
+}
+
+function normalizePhoto(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return undefined;
+  try {
+    return new URL(raw, T9_ORIGIN).toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function parseT9Card(value: unknown) {
+  const raw = String(value ?? "").trim().toUpperCase();
+  if (!raw || raw === "UNKNOWN") return null;
+  const match = raw.match(/^[SHDC](\d{1,2})$/);
+  if (!match) return null;
+  const n = Number(match[1]);
+  if (!Number.isFinite(n) || n < 1 || n > 13) return null;
+  if (n === 1) return "A";
+  if (n === 11) return "J";
+  if (n === 12) return "Q";
+  if (n === 13) return "K";
+  return String(n);
+}
+
+function pokerFromGameResult(gameResult: any, previous?: string) {
+  if (!gameResult || typeof gameResult !== "object") return previous;
+  const player = (Array.isArray(gameResult.PlayerCard) ? gameResult.PlayerCard : [])
+    .map(parseT9Card)
+    .filter(Boolean);
+  const banker = (Array.isArray(gameResult.BankerCard) ? gameResult.BankerCard : [])
+    .map(parseT9Card)
+    .filter(Boolean);
+  if (!player.length && !banker.length) return previous;
+  return JSON.stringify({ player: player.join("-"), banker: banker.join("-") });
+}
+
+function countdownFrom(raw: any, previous?: number) {
+  const status = Number(raw?.GameStatus);
+  if (status !== 100 && status !== 101) return status === 103 ? 0 : previous;
+  const rawEnd = raw?.EndBetTime;
+  let end = Number(rawEnd);
+  if (!Number.isFinite(end) || end <= 0) {
+    const parsed = Date.parse(String(rawEnd ?? '').replace(' ', 'T'));
+    end = Number.isFinite(parsed) ? parsed : NaN;
+  }
+  if (!Number.isFinite(end) || end <= 0) return previous;
+  return Math.max(0, Math.ceil((end - Date.now()) / 1000));
+}
+
+function normalizeTable(raw: any, previous?: T9TableData): T9TableData | null {
+  const tableId = String(raw?.TableId ?? raw?.TableID ?? previous?.apiId ?? "").trim();
+  if (!tableId) return null;
+  const results = Array.isArray(raw?.History)
+    ? parseHistory(raw.History)
+    : previous?.results ?? [];
+  const counts = countResults(results);
+  const tableName = String(raw?.TableName ?? previous?.tableBadge ?? `T9-${tableId}`).trim();
+  const dealerName = String(raw?.DealerName ?? previous?.name ?? "—").trim() || "—";
+  const round = Array.isArray(raw?.History)
+    ? results.length + 1
+    : previous?.round ?? Math.max(0, Number(raw?.RoundId) || 0);
+  // T9 does not expose a separate shoe id in the captured baccarat payload; use
+  // the table's rolling road session as a stable display value until shuffle clears History.
+  const shoe = String(raw?.ShoeId ?? raw?.ShoeID ?? previous?.shoe ?? "—");
+  const playersRaw = raw?.PlayerCount ?? raw?.OnlineCount ?? raw?.MemberCount;
+  const players = playersRaw != null ? String(playersRaw) : previous?.players ?? "—";
+  const poker = pokerFromGameResult(raw?.GameResult, previous?.poker);
+  const last = results.at(-1);
+  return {
+    id: tableName,
+    apiId: tableId,
+    game: "百家樂",
+    name: dealerName,
+    players,
+    countdown: countdownFrom(raw, previous?.countdown),
+    countdownUpdatedAt: raw?.EndBetTime != null ? Date.now() : previous?.countdownUpdatedAt,
+    roomId: tableName,
+    tableBadge: tableName,
+    shoe,
+    round,
+    banker: counts.banker,
+    player: counts.player,
+    tie: counts.tie,
+    results,
+    trend: String(raw?.GroupName ?? raw?.TableTypeName ?? previous?.trend ?? "T9 真人百家樂"),
+    live: Number(raw?.GameStatus) !== 105,
+    dealerPhoto: normalizePhoto(raw?.DealerPhotoUrl) ?? previous?.dealerPhoto,
+    streamUrl: normalizePhoto(raw?.VideoPath ?? raw?.VideoUrl) ?? previous?.streamUrl,
+    lastUpdated: Date.now(),
+    lastResultKey: last ? `${round}:${results.length}:${last}` : previous?.lastResultKey,
+    poker,
+    category: String(raw?.GroupId ?? raw?.GroupName ?? previous?.category ?? "T9"),
+  };
+}
+
+function sortTables(tables: T9TableData[]) {
+  return [...tables].sort((a, b) => {
+    const an = Number(String(a.tableBadge || a.id).match(/\d+/)?.[0] || Number.MAX_SAFE_INTEGER);
+    const bn = Number(String(b.tableBadge || b.id).match(/\d+/)?.[0] || Number.MAX_SAFE_INTEGER);
+    return an - bn || String(a.tableBadge || a.id).localeCompare(String(b.tableBadge || b.id));
+  });
+}
+
+function safeT9GameUrl(raw: string) {
+  const url = new URL(raw);
+  const host = url.hostname.toLowerCase();
+  if (url.protocol !== "https:" || !(host === "g.t9gaming.fun" || host.endsWith(".t9gaming.fun")))
+    throw new Error("invalid_t9_url");
+  const customToken = url.searchParams.get("customToken") || url.searchParams.get("token") || "";
+  if (!customToken) throw new Error("t9_custom_token_missing");
+  return { url, customToken };
+}
+
+function sse(res: Response, event: string, data: unknown) {
+  try {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  } catch {}
+}
+
+class T9Relay {
+  private status: T9Status = "idle";
+  private message = "T9 尚未連線";
+  private ws: any = null;
+  private tables = new Map<string, T9TableData>();
+  private subscribers = new Set<Subscriber>();
+  private closed = false;
+  private lastUsed = Date.now();
+  private gameUrl = "";
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private loginData: any = null;
+
+  constructor(public readonly sessionId: string) {}
+
+  getStatus() { return this.status; }
+  getLastUsed() { return this.lastUsed; }
+  touch() { this.lastUsed = Date.now(); }
+
+  private setStatus(status: T9Status, message: string) {
+    this.status = status;
+    this.message = message;
+    this.touch();
+    for (const res of this.subscribers) sse(res, "status", { status, message });
+  }
+
+  private emitTables() {
+    const snapshot = sortTables([...this.tables.values()]);
+    for (const res of this.subscribers) sse(res, "tables", snapshot);
+  }
+
+  private emitEvent(message: string) {
+    for (const res of this.subscribers) sse(res, "event", { message });
+  }
+
+  subscribe(res: Response) {
+    this.touch();
+    this.subscribers.add(res);
+    sse(res, "status", { status: this.status, message: this.message });
+    sse(res, "tables", sortTables([...this.tables.values()]));
+    return () => this.subscribers.delete(res);
+  }
+
+  private patchTable(raw: any) {
+    const id = String(raw?.TableId ?? raw?.TableID ?? "").trim();
+    if (!id) return;
+    const previous = this.tables.get(id);
+    const next = normalizeTable(raw, previous);
+    if (!next) return;
+    this.tables.set(id, next);
+  }
+
+  private handleMessage(payload: any) {
+    const opcode = String(payload?.Opcode ?? payload?.OpCode ?? "");
+    const data = payload?.Data ?? payload?.data ?? {};
+    if (opcode === "Login") {
+      const list = Array.isArray(data?.TableList) ? data.TableList : [];
+      for (const raw of list) this.patchTable(raw);
+      this.setStatus("connected", `T9 已連線 · ${this.tables.size} 桌`);
+      this.emitTables();
+      return;
+    }
+    if (Array.isArray(data?.TableList)) {
+      for (const raw of data.TableList) this.patchTable(raw);
+      this.emitTables();
+      return;
+    }
+    if (data?.TableId != null || data?.TableID != null) {
+      this.patchTable(data);
+      this.emitTables();
+      return;
+    }
+    // Some opcodes wrap the table payload one level deeper.
+    if (data?.TableInfo?.TableId != null) {
+      this.patchTable(data.TableInfo);
+      this.emitTables();
+    }
+  }
+
+  private async lobbyLogin(gameUrl: string) {
+    const { url, customToken } = safeT9GameUrl(gameUrl);
+    const merchant = url.searchParams.get("merchant") || "_T9";
+    const language = (url.searchParams.get("language") || "tw").toLowerCase() === "tw" ? "TW" : "TW";
+    const response = await fetch(`${url.origin}/api/Lobby/login`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/plain, */*",
+        origin: url.origin,
+        referer: url.toString(),
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/135 Safari/537.36",
+      },
+      body: JSON.stringify({
+        Language: language,
+        Token: customToken,
+        Merchant: merchant,
+        SerialNumber: "",
+        Device: "2",
+        ForceMode: 0,
+      }),
+      redirect: "follow",
+    });
+    const text = await response.text();
+    let parsed: any = null;
+    try { parsed = JSON.parse(text); } catch {}
+    const data = parsed?.Data ?? parsed?.data;
+    if (!response.ok || !data?.Token || !data?.ConnectId)
+      throw new Error(String(parsed?.Message ?? parsed?.message ?? `T9 lobby login failed (${response.status})`));
+    return { origin: url.origin, data };
+  }
+
+  async start(gameUrl: string) {
+    this.touch();
+    this.gameUrl = gameUrl;
+    this.closed = false;
+    if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) return;
+    this.setStatus("loading", "正在取得 T9 即時授權");
+    const login = await this.lobbyLogin(gameUrl);
+    this.loginData = login.data;
+    const connectId = String(login.data.ConnectId || "").trim();
+    const wsUrl = `${login.origin.replace(/^http/, "ws")}/api/baccarat/${encodeURIComponent(connectId)}`;
+    this.setStatus("connecting", "T9 百家樂即時資料連線中...");
+    const WS: any = (globalThis as any).WebSocket;
+    if (!WS) throw new Error("server_websocket_unavailable");
+    const ws = new WS(wsUrl);
+    this.ws = ws;
+    ws.onopen = () => {
+      if (this.closed || this.ws !== ws) return;
+      const loginPacket = {
+        OpCode: "Login",
+        Data: {
+          AgentId: String(login.data.AgentId ?? ""),
+          MemberName: String(login.data.MemberName ?? ""),
+          AccountType: String(login.data.AccountType ?? login.data.WalletType ?? "1"),
+          Password: "",
+          GameType: BACCARAT_GAME_TYPE,
+          GetBroadCast: "1",
+        },
+        Token: String(login.data.Token),
+      };
+      ws.send(encryptFrame(JSON.stringify(loginPacket)));
+      this.emitEvent("T9 WebSocket 已建立，正在同步百家樂桌");
+    };
+    ws.onmessage = (event: any) => {
+      if (this.closed || this.ws !== ws) return;
+      this.touch();
+      let raw = event?.data;
+      if (raw instanceof ArrayBuffer) raw = Buffer.from(raw).toString("utf8");
+      else if (ArrayBuffer.isView(raw)) raw = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("utf8");
+      const text = decryptFrame(raw);
+      try { this.handleMessage(JSON.parse(text)); } catch {}
+    };
+    ws.onerror = () => {
+      if (this.closed || this.ws !== ws) return;
+      this.setStatus("error", "T9 即時通道發生錯誤");
+    };
+    ws.onclose = () => {
+      if (this.ws === ws) this.ws = null;
+      if (this.closed) return;
+      this.setStatus("connecting", "T9 即時通道重新連線中...");
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        void this.start(this.gameUrl).catch((e) => {
+          this.setStatus("error", String(e?.message || "T9 reconnect failed"));
+        });
+      }, 2200);
+    };
+  }
+
+  close() {
+    this.closed = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const ws = this.ws;
+    this.ws = null;
+    try { ws?.close(); } catch {}
+    this.setStatus("closed", "T9 已停止連線");
+  }
+}
+
+const relays = new Map<string, T9Relay>();
+
+export async function startT9Relay(sessionId: string, gameUrl: string) {
+  let relay = relays.get(sessionId);
+  const reused = !!relay;
+  if (!relay) {
+    relay = new T9Relay(sessionId);
+    relays.set(sessionId, relay);
+  }
+  try {
+    await relay.start(gameUrl);
+    return { relay, reused };
+  } catch (error) {
+    if (!reused) relays.delete(sessionId);
+    throw error;
+  }
+}
+
+export function getT9Relay(sessionId: string) { return relays.get(sessionId) || null; }
+export function stopT9Relay(sessionId: string) {
+  const relay = relays.get(sessionId);
+  if (!relay) return;
+  relay.close();
+  relays.delete(sessionId);
+}
+export function sweepIdleT9Relays(maxIdleMs = 180000) {
+  let stopped = 0;
+  const now = Date.now();
+  for (const [id, relay] of relays) {
+    if (now - relay.getLastUsed() <= maxIdleMs) continue;
+    relay.close();
+    relays.delete(id);
+    stopped++;
+  }
+  return { stopped, active: relays.size };
+}

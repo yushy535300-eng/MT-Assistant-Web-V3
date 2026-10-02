@@ -46,6 +46,7 @@ import {
 } from "@/lib/road-render";
 import { connectDgLive, type DgTableData } from "@/lib/dg-live";
 import { connectSaLive, type SaTableData, type SaWinReportResult } from "@/lib/sa-live";
+import { connectT9Live, type T9TableData } from "@/lib/t9-live";
 import {
   saWinReportTableMatches,
   saWinReportToSettleBody,
@@ -1800,13 +1801,13 @@ function providerDisplayName(
 ) {
   const code = String(provider || "").trim().toUpperCase();
   if (platformKey === "SA") return "SA";
-  if (platformKey === "MV") return "美女直播";
+  if (platformKey === "MV") return "T9";
   if (code === "DGLI") return "DG";
   if (code === "MTLI") return "MT";
   return code || "平台";
 }
 
-/** MT/DG: token. SA: username+token (or token). 美女直播: userid+time+sign (LIVE77) or uid+userid. */
+/** MT/DG: token. SA: username+token (or token). T9: customToken from TZ T9 launch URL. */
 function gameLoginCredentialOk(
   url: URL,
   platformKey?: PlatformKey,
@@ -1822,9 +1823,8 @@ function gameLoginCredentialOk(
   const time = !!q.get("time");
   const host = url.hostname.toLowerCase();
 
-  if (platformKey === "MV" || /score777/i.test(host))
-    // TZ LIVE77 → /live/home/registerAndLogin?userid=&time=&sign=
-    return (userid && sign) || (userid && time) || (uid && userid) || userid || uid;
+  if (platformKey === "MV" || /t9gaming/i.test(host))
+    return !!q.get("customToken") || token;
   if (platformKey === "SA" || /labplatform|sagaming|saplay/i.test(host))
     return (username && token) || token || sessionId || username;
   if (platformKey === "MT" || platformKey === "DG") return token;
@@ -2152,21 +2152,21 @@ const GAME_WALLET_CODE: Record<PlatformKey, string> = {
   DG: "DGLI",
   // SALI follows MTLI/DGLI live naming; wallet/games list can override.
   SA: "SALI",
-  // User-captured TZ code: POST /api/v2/game/LIVE77/login → registerAndLogin URL.
-  MV: "LIVE77",
+  // User-captured TZ code: POST /api/v2/game/T9/login → g.t9gaming.fun customToken URL.
+  MV: "T9",
 };
 
 const GAME_WALLET_LABEL: Record<PlatformKey, string> = {
   MT: "MT",
   DG: "DG",
   SA: "SA",
-  MV: "美女直播",
+  MV: "T9",
 };
 
 /** Demo / fallback only. Real enter uses TZ `/api/v2/game/{code}/login`. */
 const EXTERNAL_PLATFORM_URL: Record<"SA" | "MV", string> = {
   SA: "https://ws2.labplatformplus.com/rm/featured",
-  MV: "https://tz02.score777.net/",
+  MV: "https://g.t9gaming.fun/",
 };
 
 /** Homepage live rooms for 美女直播 — streamer cards (name / photo / status). */
@@ -2247,22 +2247,11 @@ function mvRoomToTable(room: MvRoomDto): TableData {
   };
 }
 
-const MV_LIVE_ROOMS: TableData[] = MV_LIVE_ROOM_FALLBACK.map(mvRoomToTable);
+const MV_LIVE_ROOMS: TableData[] = [];
 
 const EXTERNAL_GAME_CODE_CANDIDATES: Record<"SA" | "MV", string[]> = {
   SA: ["SALI", "SA", "SA01", "SAGAME", "SAG"],
-  // LIVE77 first (user-captured TZ login). Keep older guesses as fallbacks.
-  MV: [
-    "LIVE77",
-    "GIRL",
-    "GIRLS",
-    "SEXY",
-    "MVLI",
-    "SALIVE",
-    "TZGIRL",
-    "LIVE",
-    "MZLI",
-  ],
+  MV: ["T9"],
 };
 
 function platformDisplayName(key: PlatformKey) {
@@ -2321,12 +2310,8 @@ function walletRowLooksLikeGame(
       code === "SAG" ||
       /sa真人|沙龍|salon|sagaming|labplatform|^sa$/i.test(hay)
     );
-  if (key === "MV" || wanted === "LIVE77")
-    return (
-      code === "LIVE77" ||
-      !!EXTERNAL_GAME_CODE_CANDIDATES.MV.includes(code) ||
-      /美女|直播|girl|score777|tz.?girl|sexy|live77|^mv$/i.test(hay)
-    );
+  if (key === "MV" || wanted === "T9")
+    return code === "T9" || /(^|\s)T9($|\s)|T9真人/i.test(hay);
   return false;
 }
 
@@ -3008,6 +2993,17 @@ async function stopSaRelayServer(sessionId: string) {
   if (!sessionId) return;
   try {
     await fetch("/api/sa/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+      keepalive: true,
+    });
+  } catch {}
+}
+async function stopT9RelayServer(sessionId: string) {
+  if (!sessionId) return;
+  try {
+    await fetch("/api/t9/stop", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId }),
@@ -3932,6 +3928,14 @@ export default function HomeScreen() {
   const dgForegroundRecoveryAttemptRef = useRef(0);
   const [dgTables, setDgTables] = useState<TableData[]>([]);
   const [mvLiveRooms, setMvLiveRooms] = useState<TableData[]>(MV_LIVE_ROOMS);
+  const [t9Connected, setT9Connected] = useState(false);
+  const [t9Status, setT9Status] = useState("未連線");
+  const [t9GameUrl, setT9GameUrl] = useState("");
+  const t9GameUrlRef = useRef("");
+  const t9AuthPromiseRef = useRef<Promise<string> | null>(null);
+  const t9ControllerRef = useRef<{ close: () => void } | null>(null);
+  const t9HasConnectedRef = useRef(false);
+  const [t9ConnectEpoch, setT9ConnectEpoch] = useState(0);
   const [saConnected, setSaConnected] = useState(false);
   const [saStatus, setSaStatus] = useState("未連線");
   const [saGameUrl, setSaGameUrl] = useState("");
@@ -4027,7 +4031,7 @@ export default function HomeScreen() {
       : activePlatform === "SA"
         ? saConnected || saTables.length > 0
         : activePlatform === "MV"
-          ? false
+          ? t9Connected || mvLiveRooms.length > 0
           : connected;
   const [events, setEvents] = useState<string[]>([]);
   const [toast, setToast] = useState("");
@@ -6145,22 +6149,40 @@ export default function HomeScreen() {
     return promise;
   };
 
+  const ensureT9Authorization = async (force = false) => {
+    const platformToken = platformTokenRef.current;
+    if (!platformToken) throw new Error("登入授權已失效");
+    if (!force && t9GameUrlRef.current) return t9GameUrlRef.current;
+    if (t9AuthPromiseRef.current) return t9AuthPromiseRef.current;
+    const promise = getExternalLoginUrlFromPlatform(
+      loginPlatform,
+      platformToken,
+      "MV",
+    )
+      .then((url) => {
+        if (platformTokenRef.current !== platformToken)
+          throw new Error("登入工作階段已變更");
+        t9GameUrlRef.current = url;
+        setT9GameUrl(url);
+        if (!t9HasConnectedRef.current) setT9Status("連線中");
+        return url;
+      })
+      .finally(() => {
+        if (t9AuthPromiseRef.current === promise) t9AuthPromiseRef.current = null;
+      });
+    t9AuthPromiseRef.current = promise;
+    return promise;
+  };
+
   const refreshMvLiveRooms = async () => {
     try {
-      const r = await fetch("/api/mv/rooms");
-      const data = await r.json();
-      if (!data?.ok || !Array.isArray(data.rooms)) return;
-      const next = (data.rooms as MvRoomDto[])
-        .filter((room) => room?.name || room?.avatar)
-        .map(mvRoomToTable);
-      if (next.length) setMvLiveRooms(next);
-      appendEvent(
-        next.length
-          ? `美女直播目錄已更新（${next.length} 間）`
-          : "美女直播目錄更新失敗，沿用既有列表",
-      );
-    } catch {
-      appendEvent("美女直播目錄更新失敗，沿用既有列表");
+      const url = await ensureT9Authorization(true);
+      t9GameUrlRef.current = url;
+      setT9GameUrl(url);
+      setT9ConnectEpoch((v) => v + 1);
+      appendEvent("T9 即時資料重新授權中");
+    } catch (error: any) {
+      appendEvent(`T9 自動連線失敗：${error?.message || "unknown"}`);
     }
   };
 
@@ -6212,17 +6234,28 @@ export default function HomeScreen() {
         saHasConnectedRef.current = false;
         setSaGameUrl("");
       }
-      // 美女直播：重新拉取主播目錄（無 WS，目錄即連線狀態）
-      void refreshMvLiveRooms();
+      try {
+        t9ControllerRef.current?.close();
+      } catch {}
+      t9ControllerRef.current = null;
+      await stopT9RelayServer(accessSessionId);
+      setT9Connected(false);
+      setT9Status("連線中");
+      t9GameUrlRef.current = "";
+      t9AuthPromiseRef.current = null;
+      t9HasConnectedRef.current = false;
+      setT9GameUrl("");
     } else {
       if (!connected) setConnected(false);
       if (!dgForeground && !dgConnected) setDgStatus("連線中");
       if (!saForeground && !saConnected) setSaStatus("連線中");
+      if (!t9Connected) setT9Status("連線中");
     }
     const needMt = force || !lockedMtUrlRef.current || !connected;
     const needDg = !dgForeground && (force || !dgGameUrl || !dgConnected);
     const needSa = !saForeground && (force || !saGameUrl || !saConnected);
-    const [mtResult, dgResult, saResult] = await Promise.allSettled([
+    const needT9 = force || !t9GameUrl || !t9Connected;
+    const [mtResult, dgResult, saResult, t9Result] = await Promise.allSettled([
       needMt
         ? getMtLoginUrlFromPlatform(loginPlatform, platformToken)
         : Promise.resolve(lockedMtUrlRef.current),
@@ -6232,6 +6265,9 @@ export default function HomeScreen() {
       needSa
         ? ensureSaAuthorization(force)
         : Promise.resolve(saGameUrlRef.current || saGameUrl),
+      needT9
+        ? ensureT9Authorization(force)
+        : Promise.resolve(t9GameUrlRef.current || t9GameUrl),
     ]);
     if (platformTokenRef.current !== platformToken) {
       roadConnectBusyRef.current = false;
@@ -6269,6 +6305,18 @@ export default function HomeScreen() {
       setSaStatus("連線中");
       appendEvent(
         `SA 自動連線失敗：${String((saResult.reason as any)?.message || saResult.reason || "unknown")}`,
+      );
+    }
+    if (t9Result.status === "fulfilled" && t9Result.value) {
+      t9GameUrlRef.current = t9Result.value;
+      setT9GameUrl(t9Result.value);
+      setT9Status("連線中");
+      if (force) setT9ConnectEpoch((v) => v + 1);
+    } else if (t9Result.status === "rejected") {
+      setT9Connected(false);
+      setT9Status("連線中");
+      appendEvent(
+        `T9 自動連線失敗：${String((t9Result.reason as any)?.message || t9Result.reason || "unknown")}`,
       );
     }
     roadConnectBusyRef.current = false;
@@ -6657,6 +6705,70 @@ export default function HomeScreen() {
     };
   }, [accessGranted, accessSessionId, saGameUrl, saConnectEpoch]);
 
+  // T9 relay follows the fresh TZ/T9 customToken URL. The server exchanges
+  // that one-time token through T9 Lobby/login and mirrors decrypted baccarat
+  // table events back here over SSE.
+  useEffect(() => {
+    if (!accessGranted) return;
+    if (!t9GameUrl) {
+      if (!t9HasConnectedRef.current) setT9Connected(false);
+      return;
+    }
+    let cancelled = false;
+    try {
+      t9ControllerRef.current?.close();
+    } catch {}
+    t9ControllerRef.current = null;
+    if (!t9HasConnectedRef.current) {
+      setT9Connected(false);
+      setT9Status("連線中");
+    }
+    connectT9Live(t9GameUrl, accessSessionId, {
+      onTables: (next: T9TableData[]) => {
+        if (cancelled) return;
+        setMvLiveRooms((prev) => mergeVendorTables(prev, next as TableData[]));
+      },
+      onStatus: (status, message) => {
+        if (cancelled) return;
+        if (status === "connected") {
+          t9HasConnectedRef.current = true;
+          setT9Connected(true);
+          setT9Status("已連線");
+          return;
+        }
+        if (status === "error" || status === "closed") {
+          if (!t9HasConnectedRef.current) setT9Connected(false);
+          setT9Status(message || "連線中");
+        } else {
+          setT9Status(message || "連線中");
+        }
+      },
+      onEvent: (message) => {
+        if (!cancelled) appendEvent(message);
+      },
+    })
+      .then((controller) => {
+        if (cancelled) {
+          controller.close();
+          return;
+        }
+        t9ControllerRef.current = controller;
+      })
+      .catch((error: any) => {
+        if (cancelled) return;
+        setT9Connected(false);
+        setT9Status("連線中");
+        appendEvent(`T9 背景連線待恢復：${error?.message || "unknown"}`);
+      });
+    return () => {
+      cancelled = true;
+      try {
+        t9ControllerRef.current?.close();
+      } catch {}
+      t9ControllerRef.current = null;
+    };
+  }, [accessGranted, accessSessionId, t9GameUrl, t9ConnectEpoch]);
+
 
   // 如果 DG 原生遊戲把背景 relay 踢掉：先用「同一個已取得的 DG token」
   // 重掛一次背景 relay，不再呼叫 DGLI/login 取得第二組 token。這樣可避免
@@ -6729,9 +6841,13 @@ export default function HomeScreen() {
   // Reuse the existing four-formula / parity tools with DG/SA live poker fields.
   // This only updates when the actual dealt cards change, not on every countdown packet.
   useEffect(() => {
-    if (activePlatform !== "DG" && activePlatform !== "SA") return;
+    if (activePlatform !== "DG" && activePlatform !== "SA" && activePlatform !== "MV") return;
     const pokerTables =
-      activePlatform === "DG" ? dgTables : (saTables as DgTableData[]);
+      activePlatform === "DG"
+        ? dgTables
+        : activePlatform === "SA"
+          ? (saTables as DgTableData[])
+          : (mvLiveRooms as DgTableData[]);
     if (!pokerTables.length) return;
     let changed = false;
     const nextMap = { ...v38ByTableRef.current };
@@ -6774,7 +6890,7 @@ export default function HomeScreen() {
       v38ByTableRef.current = nextMap;
       setV38ByTable(nextMap);
     }
-  }, [activePlatform, dgTables, saTables]);
+  }, [activePlatform, dgTables, saTables, mvLiveRooms]);
 
   useEffect(() => {
     const exists = assistPool.some((t) => tableMatchesAssistId(t, assistTableId));
@@ -6804,6 +6920,7 @@ export default function HomeScreen() {
     const sessionToLogout = accessSessionId;
     void stopDgRelayServer(sessionToLogout);
     void stopSaRelayServer(sessionToLogout);
+    void stopT9RelayServer(sessionToLogout);
     setAccessGranted(false);
     setAccessSessionId("");
     setAccessNotice("");
@@ -6886,7 +7003,9 @@ export default function HomeScreen() {
       return;
     }
     if (activePlatform === "MV") {
-      notify("美女直播只開直播間，無牌路連線");
+      if (t9Connected || mvLiveRooms.length > 0)
+        appendEvent("T9 懸浮輔助已同步即時資料");
+      else notify("T9 尚未連線");
       return;
     }
     if (activePlatform === "SA") {
@@ -6907,26 +7026,7 @@ export default function HomeScreen() {
     } else notify("尚未連線");
   };
 
-  useEffect(() => {
-    if (activePlatform !== "MV") return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const r = await fetch("/api/mv/rooms");
-        const data = await r.json();
-        if (cancelled || !data?.ok || !Array.isArray(data.rooms)) return;
-        const next = (data.rooms as MvRoomDto[])
-          .filter((room) => room?.name || room?.avatar)
-          .map(mvRoomToTable);
-        if (next.length) setMvLiveRooms(next);
-      } catch {
-        // Keep seeded catalog.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [activePlatform]);
+
 
   const openCurrentPlatform = async (table?: TableData) => {
     if (table) setAssistTableId(table.apiId ?? table.id);
@@ -6946,8 +7046,8 @@ export default function HomeScreen() {
       return;
     }
     setPlatformLaunching(true);
-    const liveOnly = activePlatform === "MV";
-    enteringGameWalletRef.current = !liveOnly;
+    const liveOnly = false;
+    enteringGameWalletRef.current = true;
     // Do not mark game open until enter-time 轉點 finishes — button stays「轉點中...」.
     try {
       if (!liveOnly) {
@@ -7021,26 +7121,9 @@ export default function HomeScreen() {
         dgLiveHoldRef.current = false;
         setDgConnectEpoch((v) => v + 1);
       } else if (activePlatform === "MV") {
-        // Always open inside the app iframe — never window.open / 新分頁.
-        // Only LIVE rooms enter; offline / 老爺 stay on homepage with 敬請期待.
-        if (table && !table.live) {
-          const comingSoon =
-            table.category === "comingSoon" ||
-            table.name === "老爺" ||
-            /敬請期待|人家還沒好/.test(String(table.trend || ""));
-          notify(
-            comingSoon
-              ? "老爺人家還沒好，請敬請期待"
-              : "主播尚未開播，敬請期待",
-            3500,
-          );
-          return;
-        }
-        // TZ LIVE77 registerAndLogin is one-time: proxy must NOT prefetch it
-        // (see resolveLaunchUrl). Prefer proxy so cookies stick; else direct.
         if (isDemoPlatformToken(platformToken)) {
           notify(
-            "演示模式無法開啟美女直播：請用真實 TZ 帳號登入後再進 LIVE77",
+            "演示模式無法進入 T9：請用真實 TZ 帳號登入後取得 T9 授權",
             5000,
           );
           gameViewUrlRef.current = "";
@@ -7050,6 +7133,9 @@ export default function HomeScreen() {
           setMtOpen(false);
           return;
         }
+        // Use a fresh one-time T9 customToken for the foreground iframe. The
+        // background relay keeps its own earlier T9 authorization so road/AI
+        // data continues while the real T9 page is being played.
         const url = await getExternalLoginUrlFromPlatform(
           loginPlatform,
           platformToken,
@@ -7064,13 +7150,10 @@ export default function HomeScreen() {
           try {
             const proxyUrl = await enterExternalSameOriginProxy(url, "MV");
             if (proxyUrl) {
-              // Keep registerAndLogin as iframe src so TZ one-time auth runs
-              // in the browser (proxy no longer prefetches/consumes it).
               nextUrl = proxyUrl;
               via = "proxy";
             }
           } catch {
-            via = "direct";
             nextUrl = url;
           }
         }
@@ -7078,24 +7161,10 @@ export default function HomeScreen() {
         setGameViewUrl(nextUrl);
         setHasEnteredGame(true);
         setMtOpen(true);
-        // After auth page loads, hop to the clicked room on the same proxy.
-        const roomUid = String(
-          table?.roomId ||
-            table?.streamUrl?.match(/[?&]uid=([^&]+)/i)?.[1] ||
-            "",
-        ).trim();
-        if (via === "proxy" && roomUid && /^\d+$/.test(roomUid)) {
-          setTimeout(() => {
-            if (gameViewPlatformRef.current !== "MV") return;
-            const roomPath = `/live/home/indexView?uid=${encodeURIComponent(roomUid)}`;
-            gameViewUrlRef.current = roomPath;
-            setGameViewUrl(roomPath);
-          }, 1600);
-        }
         notify(
           via === "proxy"
-            ? "已在程式內開啟美女直播"
-            : "已在程式內開啟美女直播（直連 TZ 授權網址）",
+            ? "已在程式內開啟 T9"
+            : "已在程式內開啟 T9（直連授權網址）",
         );
         return;
       } else if (activePlatform === "SA") {
@@ -7204,8 +7273,6 @@ export default function HomeScreen() {
     else if (wasMv && extProxyActiveRef.current)
       leaveJobs.push(leaveExternalSameOriginProxy());
     void Promise.all(leaveJobs);
-    // 美女直播不轉點。
-    if (wasMv) return;
     if (walletTransferBusyRef.current) return;
     const platformToken = platformTokenRef.current;
     if (!platformToken) return;
@@ -8517,23 +8584,19 @@ export default function HomeScreen() {
 
   const transferBlocking =
     accessGranted &&
-    activePlatform !== "MV" &&
     (!loginSweepDone || (walletTransferBusy && !platformLaunching));
   // Enter-click path: show flowing「轉點中...」while the pre-enter sweep runs,
   // then openCurrentPlatform continues into the game (no second click).
   const enterSweepBusy =
     platformLaunching &&
-    walletTransferBusy &&
-    activePlatform !== "MV";
+    walletTransferBusy;
   const showTransferDots = transferBlocking || enterSweepBusy;
   const enterBlocked = platformLaunching || transferBlocking;
   const enterPlatformLabel = showTransferDots
     ? `轉點中${transferDots}`
     : platformLaunching
       ? "進入中…"
-      : activePlatform === "MV"
-        ? "開啟美女直播"
-        : `進入${platformDisplayName(activePlatform)}平台`;
+      : `進入${platformDisplayName(activePlatform)}平台`;
 
   // Flowing「...」for login/回牌路 gate and for the enter-time sweep.
   useEffect(() => {
@@ -8555,10 +8618,7 @@ export default function HomeScreen() {
     if (!accessGranted) return;
     if (transferBlocking || platformLaunching) return;
     if (!pendingAutoEnterRef.current) return;
-    if (activePlatform === "MV") {
-      pendingAutoEnterRef.current = false;
-      return;
-    }
+
     if (mtOpenRef.current) {
       pendingAutoEnterRef.current = false;
       return;
@@ -8789,9 +8849,7 @@ export default function HomeScreen() {
                           : "連線中"}
                   </Text>
                   <Text style={s.overStatMeta}>
-                    {activePlatform === "MV"
-                      ? "美女直播 · 無牌路"
-                      : `${platformDisplayName(activePlatform)} · ${availableTableCount} 桌`}
+                    {`${platformDisplayName(activePlatform)} · ${availableTableCount} 桌`}
                   </Text>
                 </View>
                 <View style={s.platformSwitch}>
@@ -8913,11 +8971,11 @@ export default function HomeScreen() {
           </View>
           <View style={s.listHead}>
             <Text style={s.listTitle}>
-              {activePlatform === "MV" ? "直播牌卡" : "所有房型"}
+              {"所有房型"}
             </Text>
             <Text style={s.listHint}>
               {activePlatform === "MV"
-                ? "美女直播 · 程式內 iframe 開啟 · Cloudflare 擋代理時改直連仍留在站內 · 不轉點 · 無懸浮"
+                ? `T9 · 真人百家樂 · 即時牌路 · 荷官同步 · ${mvLiveRooms.length} 桌`
                 : activePlatform === "SA"
                   ? `SA · 開桌 · ${tables.length} 桌｜同步 ${saTables.filter(isSaOpenTable).length} · 顯示 D01/C01`
                   : `${platformDisplayName(activePlatform)} · 歷史牌局 · 即時更新 · 荷官同步`}
@@ -8944,51 +9002,46 @@ export default function HomeScreen() {
                 </Text>
               </View>
             ) : null}
-            {activePlatform === "MV"
-              ? tables.map((t) => (
-                  <View
-                    key={t.apiId}
-                    style={
-                      desktop ? s.liveCardWrapDesktop : s.liveCardWrapMobile
-                    }
-                  >
-                    <MemoLiveStreamCard
-                      table={t}
-                      desktop={desktop}
-                      busy={enterBlocked}
-                      onEnter={(table) => void openCurrentPlatform(table)}
-                    />
-                  </View>
-                ))
-              : tables.map((t) => (
-                  <View
-                    key={t.apiId}
-                    style={
-                      desktop
-                        ? activePlatform === "SA"
-                          ? s.cardWrapVendorDesktop
-                          : s.cardWrapDesktop
-                        : s.cardWrap
-                    }
-                  >
-                    <View
-                      style={
-                        desktop && activePlatform === "SA"
-                          ? s.vendorCardScaleDesktop
-                          : undefined
-                      }
-                    >
-                      <MemoTableCard
-                        table={t}
-                        desktop={desktop}
-                        onAction={stableTableAction}
-                        connected={activeConnected}
-                        platform={activePlatform}
-                        scaled={desktop && activePlatform === "SA"}
-                      />
-                    </View>
-                  </View>
-                ))}
+            {tables.length === 0 && activePlatform === "MV" ? (
+              <View style={s.vendorEmptyState}>
+                <MaterialIcons name="sports-esports" size={22} color="#7EE0D2" />
+                <Text style={s.vendorEmptyTitle}>
+                  {t9Connected ? "目前沒有 T9 開桌" : "T9 連線中"}
+                </Text>
+                <Text style={s.vendorEmptyText}>
+                  正在經 TZ／T9 授權同步真人百家樂桌台、牌路與荷官資訊。
+                </Text>
+              </View>
+            ) : null}
+            {tables.map((t) => (
+              <View
+                key={t.apiId ?? t.id}
+                style={
+                  desktop
+                    ? activePlatform === "SA"
+                      ? s.cardWrapVendorDesktop
+                      : s.cardWrapDesktop
+                    : s.cardWrap
+                }
+              >
+                <View
+                  style={
+                    desktop && activePlatform === "SA"
+                      ? s.vendorCardScaleDesktop
+                      : undefined
+                  }
+                >
+                  <MemoTableCard
+                    table={t}
+                    desktop={desktop}
+                    onAction={stableTableAction}
+                    connected={activeConnected}
+                    platform={activePlatform}
+                    scaled={desktop && activePlatform === "SA"}
+                  />
+                </View>
+              </View>
+            ))}
           </View>
         </ScrollView>
 
@@ -9220,7 +9273,7 @@ export default function HomeScreen() {
                 </Pressable>
               </View>
               <Text style={s.modalNote}>
-                MT、DG、SA 進入牌路主頁後會自動連線並顯示即時牌路與懸浮輔助。SA／DG／美女直播進入時皆在站內 iframe 遊玩（代理失敗則直連授權網址，仍不開新分頁）。美女直播不轉點、無懸浮輔助。重新連線會同時重連 MT／DG／SA，並刷新美女直播主播目錄。
+                MT、DG、SA、T9 進入牌路主頁後會自動連線並顯示即時牌路與懸浮輔助。SA／DG／T9 皆在站內 iframe 遊玩；T9 牌路、牌面、荷官與桌台資料由即時通道同步。重新連線會同時重連 MT／DG／SA／T9。
               </Text>
               <View style={s.connectionStatusRow}>
                 <View style={s.connectionStatusCard}>
@@ -9269,7 +9322,7 @@ export default function HomeScreen() {
                   </Text>
                 </View>
                 <View style={s.connectionStatusCard}>
-                  <Text style={s.fieldLabel}>美女直播</Text>
+                  <Text style={s.fieldLabel}>T9</Text>
                   <Text
                     style={[
                       s.connectionStatusText,
@@ -9279,9 +9332,9 @@ export default function HomeScreen() {
                       },
                     ]}
                   >
-                    {mvLiveRooms.length > 0
-                      ? `目錄 ${mvLiveRooms.length}`
-                      : "載入中"}
+                    {t9Connected || mvLiveRooms.length > 0
+                      ? `已連線 · ${mvLiveRooms.length} 桌`
+                      : t9Status || "連線中"}
                   </Text>
                 </View>
               </View>
@@ -9538,7 +9591,7 @@ export default function HomeScreen() {
                   >
                     <MaterialIcons name="arrow-back" size={desktop ? 16 : 14} color="#fff" />
                     <Text style={[s.headerBtnText, !desktop && s.headerBtnTextMobile]}>
-                      {gameViewPlatform === "MV" ? "返回" : "回牌路"}
+                      回牌路
                     </Text>
                   </Pressable>
                 </View>
@@ -9574,7 +9627,7 @@ export default function HomeScreen() {
           pointerEvents="box-none"
           style={[StyleSheet.absoluteFillObject, { zIndex: 10000 }]}
         >
-        {activePlatform === "MV" || gameViewPlatform === "MV" ? null : (
+        {false ? null : (
           <>
             {MultiTableRadar({ insideMt: mtOpen })}
             {FloatingAssistant({ insideMt: mtOpen })}

@@ -47,7 +47,7 @@ const PLATFORM_HOST_ALLOW: Record<ExtPlatform, string[]> = {
     "connect2explorer.com",
     "cloudfront.net",
   ],
-  MV: ["score777.net", "score777.com"],
+  MV: ["t9gaming.fun", "score777.net", "score777.com"],
 };
 
 const proxySessions = new Map<string, ProxySession>();
@@ -130,7 +130,7 @@ function pathPrefixesFor(url: URL, platform: ExtPlatform) {
   const defaults =
     platform === "SA"
       ? ["/rm", "/app.aspx"]
-      : ["/live", "/cdn-cgi"];
+      : ["/VideoBaccarat", "/api", "/resource", "/cdn-cgi"];
   const set = new Set<string>(defaults);
   if (first && first !== "/") set.add(first);
   if (url.pathname.toLowerCase().endsWith(".aspx")) set.add(url.pathname);

@@ -12,6 +12,7 @@ import { adminPage } from "../admin-page";
 import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
 import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken, sweepIdleDgRelays } from "../dg-relay";
 import { startSaRelay, getSaRelay, stopSaRelay, sweepIdleSaRelays, ensureSaRelayShell } from "../sa-relay";
+import { startT9Relay, getT9Relay, stopT9Relay, sweepIdleT9Relays } from "../t9-relay";
 import { registerDgGameProxy } from "../dg-game-proxy";
 import { registerExternalGameProxy } from "../external-game-proxy";
 import { extractSaAuth } from "../sa-protocol";
@@ -156,6 +157,11 @@ async function startServer() {
     sweepIdleSaRelays(180000);
   }, 60000);
   saSweepTimer.unref?.();
+
+  const t9SweepTimer = setInterval(() => {
+    sweepIdleT9Relays(180000);
+  }, 60000);
+  t9SweepTimer.unref?.();
 
   const adminSessions = new Set<string>();
   const getAdminToken = (req: any) => {
@@ -345,6 +351,61 @@ async function startServer() {
     if (!hasActiveTrackerSession(sessionId) && !getDgRelay(sessionId))
       return res.status(401).json({ ok: false });
     stopDgRelay(sessionId);
+    return res.json({ ok: true });
+  });
+
+  // T9 baccarat relay. TZ returns a one-time customToken launch URL; the
+  // server exchanges it through T9 Lobby/login, then owns the encrypted
+  // baccarat WebSocket and mirrors normalized tables to the browser via SSE.
+  app.post("/api/t9/start", async (req, res) => {
+    const sessionId = String(req.body?.sessionId || "");
+    const gameUrl = String(req.body?.gameUrl || "");
+    if (!hasActiveTrackerSession(sessionId))
+      return res.status(401).json({ ok: false, error: "session_invalid" });
+    let parsed: URL;
+    try { parsed = new URL(gameUrl); } catch {
+      return res.status(400).json({ ok: false, error: "invalid_game_url" });
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (parsed.protocol !== "https:" || !(host === "g.t9gaming.fun" || host.endsWith(".t9gaming.fun")))
+      return res.status(400).json({ ok: false, error: "invalid_game_url" });
+    try {
+      const result = await startT9Relay(sessionId, gameUrl);
+      return res.json({ ok: true, reused: result.reused, status: result.relay.getStatus() });
+    } catch (e: any) {
+      console.error("[T9 relay] start failed", e);
+      return res.status(502).json({ ok: false, error: e?.message || "t9_start_failed" });
+    }
+  });
+  app.get("/api/t9/stream", (req, res) => {
+    const sessionId = String(req.query.sessionId || "");
+    if (!hasActiveTrackerSession(sessionId)) return res.status(401).end();
+    const relay = getT9Relay(sessionId);
+    if (!relay) return res.status(404).end();
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    (res as any).flushHeaders?.();
+    const unsubscribe = relay.subscribe(res);
+    const keepalive = setInterval(() => { try { res.write(": keepalive\n\n"); } catch {} }, 15000);
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      clearInterval(keepalive);
+      try { unsubscribe(); } catch {}
+    };
+    req.once("close", cleanup);
+    res.once("close", cleanup);
+    res.once("finish", cleanup);
+  });
+  app.post("/api/t9/stop", (req, res) => {
+    const sessionId = String(req.body?.sessionId || "");
+    if (!hasActiveTrackerSession(sessionId) && !getT9Relay(sessionId))
+      return res.status(401).json({ ok: false });
+    stopT9Relay(sessionId);
     return res.json({ ok: true });
   });
 
