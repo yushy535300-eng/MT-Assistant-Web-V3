@@ -1081,17 +1081,19 @@ export function registerExternalGameProxy(options: RegisterOptions) {
       "Set-Cookie",
       `${COOKIE_NAME}=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=14400${proxyCookieSecureAttr(req)}`,
     );
-    // SA: always load via /api/ext/host/<hostname>/... so EVERY HTML response
-    // hits proxyHttp + inject (DG mounts /ddnewpc; SA hosts vary and bare
-    // pathname can fall through to our SPA without the mirror hook).
+    // SA and T9 must always load through /api/ext/host/<hostname>/...
+    // Never return a bare vendor pathname for T9. T9 normally launches at "/",
+    // and a bare "/" would load our own app root inside the iframe (showing the
+    // MATRIX login page instead of g.t9gaming.fun).
+    //
     // Embed __mt_ext_sid so iframe auth works even when the proxy cookie misses.
-    const iframeUrl =
-      platform === "SA"
-        ? (() => {
-            const path = `${HOST_PREFIX}/${finalUrl.hostname}${finalUrl.pathname || "/"}${finalUrl.search}`;
-            return `${path}${finalUrl.search ? "&" : "?"}__mt_ext_sid=${encodeURIComponent(sessionId)}`;
-          })()
-        : finalUrl.pathname + finalUrl.search;
+    const iframeUrl = (() => {
+      const path =
+        `${HOST_PREFIX}/${finalUrl.hostname}${finalUrl.pathname || "/"}` +
+        finalUrl.search;
+      return `${path}${finalUrl.search ? "&" : "?"}` +
+        `__mt_ext_sid=${encodeURIComponent(sessionId)}`;
+    })();
     return res.json({
       ok: true,
       url: iframeUrl,
