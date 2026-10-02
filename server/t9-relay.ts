@@ -1,10 +1,13 @@
 import { createCipheriv, createDecipheriv } from "node:crypto";
+import { createRequire } from "node:module";
 import type { Response } from "express";
 
 const KEY = Buffer.from("cF9Yt7R4DqLqPZmAj3kHU2g8WaCvN5dL", "utf8");
 const IV = Buffer.from("Jx9UrmvS3YkWpzE8", "utf8");
 const BACCARAT_GAME_TYPE = "80001";
 const T9_ORIGIN = "https://g.t9gaming.fun";
+const require = createRequire(import.meta.url);
+const NodeWebSocket: any = require("ws");
 
 type T9Status = "idle" | "loading" | "connecting" | "connected" | "error" | "closed";
 
@@ -349,12 +352,25 @@ class T9Relay {
       encodeURIComponent(socketConnectId);
 
     this.setStatus("connecting", "T9 百家樂即時資料連線中...");
-    this.emitEvent("T9 即時授權完成，正在建立百家樂 WebSocket");
-    const WS: any = (globalThis as any).WebSocket;
-    if (!WS) throw new Error("server_websocket_unavailable");
-    const ws = new WS(wsUrl);
+    this.emitEvent(`T9 WebSocket connecting · ${socketConnectId}`);
+
+    // Use the Node `ws` client instead of globalThis.WebSocket so the server-side
+    // handshake matches the successful Chrome request captured from T9.
+    const ws = new NodeWebSocket(wsUrl, {
+      origin: login.origin,
+      handshakeTimeout: 12000,
+      perMessageDeflate: true,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9",
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+      },
+    });
     this.ws = ws;
-    ws.onopen = () => {
+
+    ws.on("open", () => {
       if (this.closed || this.ws !== ws) return;
       const loginPacket = {
         OpCode: "Login",
@@ -369,29 +385,53 @@ class T9Relay {
         Token: String(login.data.Token),
       };
       ws.send(encryptFrame(JSON.stringify(loginPacket)));
-      this.emitEvent("T9 WebSocket 已建立，正在同步百家樂桌");
-    };
-    ws.onmessage = (event: any) => {
+      this.emitEvent("T9 WebSocket 101 已建立，正在同步百家樂桌");
+    });
+
+    ws.on("message", (raw: any) => {
       if (this.closed || this.ws !== ws) return;
       this.touch();
-      let raw = event?.data;
-      if (raw instanceof ArrayBuffer) raw = Buffer.from(raw).toString("utf8");
-      else if (ArrayBuffer.isView(raw)) raw = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("utf8");
-      const text = decryptFrame(raw);
-      try { this.handleMessage(JSON.parse(text)); } catch {}
-    };
-    ws.onerror = () => {
+      let payload = raw;
+      if (Buffer.isBuffer(payload)) payload = payload.toString("utf8");
+      else if (payload instanceof ArrayBuffer) payload = Buffer.from(payload).toString("utf8");
+      else if (ArrayBuffer.isView(payload))
+        payload = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength).toString("utf8");
+      const decoded = decryptFrame(payload);
+      try {
+        this.handleMessage(JSON.parse(decoded));
+      } catch {
+        // Do not turn one malformed frame into a disconnected relay.
+      }
+    });
+
+    ws.on("unexpected-response", (_req: any, res: any) => {
       if (this.closed || this.ws !== ws) return;
-      this.setStatus("error", "T9 WebSocket 連線失敗，將重新建立即時通道");
-      this.emitEvent("T9 WebSocket error");
-      // Some runtimes do not emit close immediately after error. Close it
-      // explicitly so the next reconnect cannot get stuck reusing a bad OPEN socket.
+      const status = Number(res?.statusCode || 0);
+      const statusText = String(res?.statusMessage || "").trim();
+      this.emitEvent(`T9 WebSocket handshake ${status || "?"} ${statusText}`.trim());
+      this.setStatus(
+        "error",
+        `T9 WebSocket 握手失敗${status ? ` (${status})` : ""}`,
+      );
       try { ws.close(); } catch {}
-    };
-    ws.onclose = () => {
+    });
+
+    ws.on("error", (error: any) => {
+      if (this.closed || this.ws !== ws) return;
+      const detail = String(error?.message || error?.code || "unknown error");
+      this.setStatus("error", `T9 WebSocket 連線失敗：${detail}`);
+      this.emitEvent(`T9 WebSocket error · ${detail}`);
+      try { ws.close(); } catch {}
+    });
+
+    ws.on("close", (code: number, reasonBuffer: Buffer) => {
       if (this.ws === ws) this.ws = null;
       if (this.closed) return;
-      this.setStatus("connecting", "T9 即時通道重新連線中...");
+      const reason = Buffer.isBuffer(reasonBuffer)
+        ? reasonBuffer.toString("utf8")
+        : String(reasonBuffer || "");
+      this.emitEvent(`T9 WebSocket closed · ${code}${reason ? ` · ${reason}` : ""}`);
+      this.setStatus("connecting", `T9 即時通道重新連線中 (${code})...`);
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
       this.reconnectTimer = setTimeout(() => {
         this.reconnectTimer = null;
@@ -399,7 +439,7 @@ class T9Relay {
           this.setStatus("error", String(e?.message || "T9 reconnect failed"));
         });
       }, 2200);
-    };
+    });
   }
 
   close() {
