@@ -219,6 +219,13 @@ class T9Relay {
   constructor(public readonly sessionId: string) {}
 
   getStatus() { return this.status; }
+  isReusable() {
+    return (
+      !this.closed &&
+      this.status !== "error" &&
+      this.status !== "closed"
+    );
+  }
   getLastUsed() { return this.lastUsed; }
   touch() { this.lastUsed = Date.now(); }
 
@@ -323,8 +330,26 @@ class T9Relay {
     const login = await this.lobbyLogin(gameUrl);
     this.loginData = login.data;
     const connectId = String(login.data.ConnectId || "").trim();
-    const wsUrl = `${login.origin.replace(/^http/, "ws")}/api/baccarat/${encodeURIComponent(connectId)}`;
+    const memberId = String(
+      login.data.MemberId ??
+        login.data.MemberID ??
+        login.data.MemberInfo?.MemberId ??
+        login.data.MemberInfo?.MemberID ??
+        "",
+    ).trim();
+    if (!connectId) throw new Error("t9_connect_id_missing");
+    if (!memberId) throw new Error("t9_member_id_missing");
+
+    // T9's real baccarat socket path is not ConnectId alone. The browser
+    // connects with "<ConnectId>_<MemberId>" (confirmed from the captured
+    // production websocket URLs).
+    const socketConnectId = `${connectId}_${memberId}`;
+    const wsUrl =
+      `${login.origin.replace(/^http/, "ws")}/api/baccarat/` +
+      encodeURIComponent(socketConnectId);
+
     this.setStatus("connecting", "T9 百家樂即時資料連線中...");
+    this.emitEvent("T9 即時授權完成，正在建立百家樂 WebSocket");
     const WS: any = (globalThis as any).WebSocket;
     if (!WS) throw new Error("server_websocket_unavailable");
     const ws = new WS(wsUrl);
@@ -357,7 +382,11 @@ class T9Relay {
     };
     ws.onerror = () => {
       if (this.closed || this.ws !== ws) return;
-      this.setStatus("error", "T9 即時通道發生錯誤");
+      this.setStatus("error", "T9 WebSocket 連線失敗，將重新建立即時通道");
+      this.emitEvent("T9 WebSocket error");
+      // Some runtimes do not emit close immediately after error. Close it
+      // explicitly so the next reconnect cannot get stuck reusing a bad OPEN socket.
+      try { ws.close(); } catch {}
     };
     ws.onclose = () => {
       if (this.ws === ws) this.ws = null;
@@ -388,16 +417,28 @@ const relays = new Map<string, T9Relay>();
 
 export async function startT9Relay(sessionId: string, gameUrl: string) {
   let relay = relays.get(sessionId);
-  const reused = !!relay;
+  let reused = !!relay;
+
+  // A failed relay must never survive a manual "重新連線". Otherwise /api/t9/start
+  // keeps returning reused:true,status:error and the user is permanently stuck.
+  if (relay && !relay.isReusable()) {
+    try { relay.close(); } catch {}
+    relays.delete(sessionId);
+    relay = null;
+    reused = false;
+  }
+
   if (!relay) {
     relay = new T9Relay(sessionId);
     relays.set(sessionId, relay);
   }
+
   try {
     await relay.start(gameUrl);
     return { relay, reused };
   } catch (error) {
-    if (!reused) relays.delete(sessionId);
+    try { relay.close(); } catch {}
+    relays.delete(sessionId);
     throw error;
   }
 }
