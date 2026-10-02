@@ -8841,7 +8841,9 @@ export default function HomeScreen() {
                     {activeConnected
                       ? "已連線"
                       : activePlatform === "MV"
-                        ? "僅直播"
+                        ? t9Status === "未連線"
+                          ? "連線中"
+                          : t9Status
                         : activePlatform === "SA"
                           ? saStatus === "未連線"
                             ? "連線中"

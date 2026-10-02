@@ -217,7 +217,10 @@ class T9Relay {
   private lastUsed = Date.now();
   private gameUrl = "";
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private syncTimer: ReturnType<typeof setInterval> | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
   private loginData: any = null;
+  private initialized = false;
 
   constructor(public readonly sessionId: string) {}
 
@@ -265,12 +268,79 @@ class T9Relay {
     this.tables.set(id, next);
   }
 
+  private sendPacket(opCode: string, data: any = {}) {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== NodeWebSocket.OPEN || !this.loginData) return false;
+    const packet = {
+      OpCode: opCode,
+      Data: data,
+      Token: String(this.loginData.Token ?? ""),
+    };
+    try {
+      ws.send(encryptFrame(JSON.stringify(packet)));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private sendSyncTime() {
+    return this.sendPacket("SyncTime", { GameType: BACCARAT_GAME_TYPE });
+  }
+
+  private sendSyncBalance() {
+    return this.sendPacket("SyncBalance", {
+      GameType: BACCARAT_GAME_TYPE,
+      AgentId: String(this.loginData?.AgentId ?? ""),
+      MemberName: String(this.loginData?.MemberName ?? ""),
+    });
+  }
+
+  private startHeartbeat() {
+    if (this.syncTimer) clearInterval(this.syncTimer);
+    if (this.pingTimer) clearInterval(this.pingTimer);
+
+    // Captured T9 browser traffic sends SyncTime immediately after Login and
+    // again around every 30 seconds. Keep that same application-level cadence.
+    this.syncTimer = setInterval(() => {
+      if (this.closed) return;
+      this.sendSyncTime();
+    }, 30000);
+
+    // Also keep the underlying websocket transport alive. This does not alter
+    // T9 application messages; it only prevents idle intermediary timeouts.
+    this.pingTimer = setInterval(() => {
+      const ws = this.ws;
+      if (!ws || ws.readyState !== NodeWebSocket.OPEN) return;
+      try { ws.ping(); } catch {}
+    }, 20000);
+  }
+
+  private stopHeartbeat() {
+    if (this.syncTimer) clearInterval(this.syncTimer);
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.syncTimer = null;
+    this.pingTimer = null;
+  }
+
   private handleMessage(payload: any) {
     const opcode = String(payload?.Opcode ?? payload?.OpCode ?? "");
     const data = payload?.Data ?? payload?.data ?? {};
     if (opcode === "Login") {
       const list = Array.isArray(data?.TableList) ? data.TableList : [];
       for (const raw of list) this.patchTable(raw);
+
+      // Browser sequence captured from T9:
+      // Login -> Login response -> SyncTime -> SyncTableStatus/Info
+      // and SyncBalance during initialization.
+      if (!this.initialized) {
+        this.initialized = true;
+        this.sendSyncTime();
+        this.sendSyncBalance();
+        this.startHeartbeat();
+        this.emitEvent("T9 Login 完成 · 已送出 SyncTime / SyncBalance");
+      }
+
       this.setStatus("connected", `T9 已連線 · ${this.tables.size} 桌`);
       this.emitTables();
       return;
@@ -351,6 +421,8 @@ class T9Relay {
       `${login.origin.replace(/^http/, "ws")}/api/baccarat/` +
       encodeURIComponent(socketConnectId);
 
+    this.stopHeartbeat();
+    this.initialized = false;
     this.setStatus("connecting", "T9 百家樂即時資料連線中...");
     this.emitEvent(`T9 WebSocket connecting · ${socketConnectId}`);
 
@@ -426,6 +498,8 @@ class T9Relay {
 
     ws.on("close", (code: number, reasonBuffer: Buffer) => {
       if (this.ws === ws) this.ws = null;
+      this.stopHeartbeat();
+      this.initialized = false;
       if (this.closed) return;
       const reason = Buffer.isBuffer(reasonBuffer)
         ? reasonBuffer.toString("utf8")
@@ -444,6 +518,8 @@ class T9Relay {
 
   close() {
     this.closed = true;
+    this.stopHeartbeat();
+    this.initialized = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     const ws = this.ws;
