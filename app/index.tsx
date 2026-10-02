@@ -1556,7 +1556,7 @@ function MatrixMark({
             { fontSize: Math.max(10, size * 0.34) },
           ]}
         >
-          {brand}
+          {brand === "MV" ? "T9" : brand}
         </Text>
         <View
           style={[
@@ -7143,29 +7143,17 @@ export default function HomeScreen() {
         );
         gameViewPlatformRef.current = "MV";
         setGameViewPlatform("MV");
+        // T9 must keep its own origin for Lobby/login, resources and vendor WS.
+        // Load the fresh TZ-issued T9 URL directly inside our game iframe.
+        // The background T9 relay remains independent and continues feeding
+        // MATRIX tables/roads/AI, so we do not need to rewrite the T9 page.
         if (extProxyActiveRef.current) await leaveExternalSameOriginProxy();
-        let nextUrl = url;
-        let via: "proxy" | "direct" = "direct";
-        if (Platform.OS === "web") {
-          try {
-            const proxyUrl = await enterExternalSameOriginProxy(url, "MV");
-            if (proxyUrl) {
-              nextUrl = proxyUrl;
-              via = "proxy";
-            }
-          } catch {
-            nextUrl = url;
-          }
-        }
+        const nextUrl = url;
         gameViewUrlRef.current = nextUrl;
         setGameViewUrl(nextUrl);
         setHasEnteredGame(true);
         setMtOpen(true);
-        notify(
-          via === "proxy"
-            ? "已在程式內開啟 T9"
-            : "已在程式內開啟 T9（直連授權網址）",
-        );
+        notify("已在程式內開啟 T9");
         return;
       } else if (activePlatform === "SA") {
         // Perfect match with DG enter (do not change DG):
