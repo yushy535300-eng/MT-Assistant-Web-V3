@@ -442,10 +442,10 @@ function injectProxyHook(html: string, session: ProxySession) {
     : "";
   const hook =
     `<script>(function(){\n` +
-    `const __sid=${sid},__origin=${origin},__allow=${allow},__hostPrefix=${hostPrefix},__wsPath=${wsPath};\n` +
+    `const __sid=${sid},__origin=${origin},__allow=${allow},__hostPrefix=${hostPrefix},__wsPath=${wsPath},__isT9=${session.platform === "MV" ? "true" : "false"};\n` +
     `if(window.__MT_EXT_PROXY__)return;window.__MT_EXT_PROXY__=true;\n` +
     `const allowHost=(h)=>{try{const host=String(h||\"\").toLowerCase();return __allow.some(s=>host===s||host.endsWith(\".\"+s));}catch{return false;}};\n` +
-    `const mapHttp=(value)=>{try{const raw=String(value||\"\");if(!raw)return value;const abs=raw.startsWith(\"//\")?location.protocol+raw:raw;if(!(raw.startsWith(\"http://\")||raw.startsWith(\"https://\")||raw.startsWith(\"//\")))return value;const u=new URL(abs,location.href);if(u.origin===__origin||allowHost(u.hostname)){const host=u.origin===__origin?(function(){try{return new URL(__origin).hostname;}catch{return u.hostname;}})():u.hostname;return __hostPrefix+\"/\"+host+(u.pathname||\"/\")+u.search+u.hash;}return value;}catch{return value;}};\n` +
+    `const mapHttp=(value)=>{try{const raw=String(value||\"\");if(!raw)return value;if(__isT9&&raw.startsWith(\"/\")&&!raw.startsWith(__hostPrefix)&&!raw.startsWith(\"/api/ext/\")){const host=new URL(__origin).hostname;return __hostPrefix+\"/\"+host+raw;}const abs=raw.startsWith(\"//\")?location.protocol+raw:raw;if(!(raw.startsWith(\"http://\")||raw.startsWith(\"https://\")||raw.startsWith(\"//\")))return value;const u=new URL(abs,location.href);if(u.origin===__origin||allowHost(u.hostname)){const host=u.origin===__origin?(function(){try{return new URL(__origin).hostname;}catch{return u.hostname;}})():u.hostname;return __hostPrefix+\"/\"+host+(u.pathname||\"/\")+u.search+u.hash;}return value;}catch{return value;}};\n` +
     `const mapWs=(value)=>{try{const raw=String(value||\"\");const u=new URL(raw,location.href);if(u.protocol!==\"ws:\"&&u.protocol!==\"wss:\")return value;if(u.origin.replace(/^http/,\"ws\")===__origin.replace(/^http/,\"ws\")||allowHost(u.hostname))return __wsPath+\"?target=\"+encodeURIComponent(u.toString())+\"&__mt_ext_sid=\"+encodeURIComponent(__sid);return value;}catch{return value;}};\n` +
     saMirrorHook +
     stayHook +
