@@ -125,7 +125,14 @@ function pokerFromGameResult(gameResult: any, previous?: string) {
 
 function countdownFrom(raw: any, previous?: number) {
   const status = Number(raw?.GameStatus);
-  if (status !== 100 && status !== 101) return status === 103 ? 0 : previous;
+  // Captured T9 baccarat statuses:
+  // 100 StartGame / 101 ConfirmBet are betting states.
+  // 103 EndBet and all dealing/result/shuffle states are not count-down states.
+  const betting = status === 100 || status === 101;
+  if (!betting) {
+    if ([102,103,104,105,106,107,108,109,110,112].includes(status)) return 0;
+    return previous;
+  }
   const rawEnd = raw?.EndBetTime;
   let end = Number(rawEnd);
   if (!Number.isFinite(end) || end <= 0) {
@@ -190,6 +197,13 @@ function sortTables(tables: T9TableData[]) {
   });
 }
 
+function makeT9SerialNumber() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out = "";
+  for (let i = 0; i < 10; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+
 function safeT9GameUrl(raw: string) {
   const url = new URL(raw);
   const host = url.hostname.toLowerCase();
@@ -218,7 +232,6 @@ class T9Relay {
   private gameUrl = "";
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private syncTimer: ReturnType<typeof setInterval> | null = null;
-  private pingTimer: ReturnType<typeof setInterval> | null = null;
   private loginData: any = null;
   private initialized = false;
 
@@ -298,29 +311,19 @@ class T9Relay {
 
   private startHeartbeat() {
     if (this.syncTimer) clearInterval(this.syncTimer);
-    if (this.pingTimer) clearInterval(this.pingTimer);
 
-    // Captured T9 browser traffic sends SyncTime immediately after Login and
-    // again around every 30 seconds. Keep that same application-level cadence.
+    // Match captured T9 browser behaviour: application-level SyncTime about
+    // every 30 seconds. Do not add Node websocket control pings that the
+    // browser itself does not send.
     this.syncTimer = setInterval(() => {
       if (this.closed) return;
       this.sendSyncTime();
     }, 30000);
-
-    // Also keep the underlying websocket transport alive. This does not alter
-    // T9 application messages; it only prevents idle intermediary timeouts.
-    this.pingTimer = setInterval(() => {
-      const ws = this.ws;
-      if (!ws || ws.readyState !== NodeWebSocket.OPEN) return;
-      try { ws.ping(); } catch {}
-    }, 20000);
   }
 
   private stopHeartbeat() {
     if (this.syncTimer) clearInterval(this.syncTimer);
-    if (this.pingTimer) clearInterval(this.pingTimer);
     this.syncTimer = null;
-    this.pingTimer = null;
   }
 
   private handleMessage(payload: any) {
@@ -336,9 +339,13 @@ class T9Relay {
       if (!this.initialized) {
         this.initialized = true;
         this.sendSyncTime();
-        this.sendSyncBalance();
+        // Captured browser traffic sends SyncTime immediately after Login;
+        // SyncBalance follows during initialization. Keep that ordering.
+        setTimeout(() => {
+          if (!this.closed && this.initialized) this.sendSyncBalance();
+        }, 250);
         this.startHeartbeat();
-        this.emitEvent("T9 Login 完成 · 已送出 SyncTime / SyncBalance");
+        this.emitEvent("T9 Login 完成 · 已送出 SyncTime");
       }
 
       this.setStatus("connected", `T9 已連線 · ${this.tables.size} 桌`);
@@ -379,8 +386,8 @@ class T9Relay {
         Language: language,
         Token: customToken,
         Merchant: merchant,
-        SerialNumber: "",
-        Device: "2",
+        SerialNumber: makeT9SerialNumber(),
+        Device: 2,
         ForceMode: 0,
       }),
       redirect: "follow",
@@ -403,26 +410,15 @@ class T9Relay {
     const login = await this.lobbyLogin(gameUrl);
     this.loginData = login.data;
     const connectId = String(login.data.ConnectId || "").trim();
-    const memberId = String(
-      login.data.MemberId ??
-        login.data.MemberID ??
-        login.data.MemberInfo?.MemberId ??
-        login.data.MemberInfo?.MemberID ??
-        "",
-    ).trim();
     if (!connectId) throw new Error("t9_connect_id_missing");
-    if (!memberId) throw new Error("t9_member_id_missing");
 
-    // T9 may return ConnectId already suffixed with _MemberId. Do not append
-    // the same MemberId twice (e.g. xxx_2123033_2123033), otherwise the
-    // websocket endpoint returns HTTP 200 instead of 101 Switching Protocols.
-    const memberSuffix = `_${memberId}`;
-    const socketConnectId = connectId.endsWith(memberSuffix)
-      ? connectId
-      : `${connectId}${memberSuffix}`;
+    // T9 Lobby/login already returns the complete socket path suffix, including
+    // its leading slash and member suffix (e.g. /abc..._2123033). Use it exactly
+    // as returned. Encoding the leading slash as %2F causes HTTP 200 instead of
+    // 101 Switching Protocols.
+    const socketConnectId = connectId.startsWith("/") ? connectId : `/${connectId}`;
     const wsUrl =
-      `${login.origin.replace(/^http/, "ws")}/api/baccarat/` +
-      encodeURIComponent(socketConnectId);
+      `${login.origin.replace(/^http/, "ws")}/api/baccarat` + socketConnectId;
 
     this.stopHeartbeat();
     this.initialized = false;
@@ -486,7 +482,9 @@ class T9Relay {
       this.emitEvent(`T9 WebSocket handshake ${status || "?"} ${statusText}`.trim());
       this.setStatus(
         "error",
-        `T9 WebSocket 握手失敗${status ? ` (${status})` : ""}`,
+        status === 200
+          ? "T9 WebSocket 路徑未升級 (200)，請重新授權"
+          : `T9 WebSocket 握手失敗${status ? ` (${status})` : ""}`,
       );
       try { ws.close(); } catch {}
     });
