@@ -12,7 +12,7 @@ import { adminPage } from "../admin-page";
 import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
 import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken, sweepIdleDgRelays } from "../dg-relay";
 import { startSaRelay, getSaRelay, stopSaRelay, sweepIdleSaRelays, ensureSaRelayShell } from "../sa-relay";
-import { startT9Relay, getT9Relay, stopT9Relay, sweepIdleT9Relays } from "../t9-relay";
+import { startT9Relay, getT9Relay, stopT9Relay, sweepIdleT9Relays, ensureT9RelayShell } from "../t9-relay";
 import { registerDgGameProxy } from "../dg-game-proxy";
 import { registerExternalGameProxy } from "../external-game-proxy";
 import { extractSaAuth } from "../sa-protocol";
@@ -57,6 +57,22 @@ async function startServer() {
       }
       const relay = getSaRelay(sessionId);
       if (relay) await relay.leaveBridgeMode();
+    },
+    onT9UpstreamPacket: (sessionId, packet) => {
+      getT9Relay(sessionId)?.ingestApplicationPacket(packet);
+    },
+    onT9ProxyBridge: async (sessionId, phase, gameUrl) => {
+      if (phase === "enter") {
+        const url = String(gameUrl || "");
+        if (!url) {
+          getT9Relay(sessionId)?.enterBridgeMode();
+          return;
+        }
+        ensureT9RelayShell(sessionId, url).enterBridgeMode(url);
+        return;
+      }
+      const relay = getT9Relay(sessionId);
+      if (relay) await relay.leaveBridgeMode({ restore: false });
     },
   });
 

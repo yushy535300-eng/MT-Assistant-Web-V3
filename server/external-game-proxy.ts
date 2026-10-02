@@ -29,6 +29,12 @@ type RegisterOptions = {
     phase: "enter" | "leave",
     gameUrl?: string,
   ) => void | Promise<void>;
+  onT9UpstreamPacket?: (sessionId: string, packet: Buffer) => void;
+  onT9ProxyBridge?: (
+    sessionId: string,
+    phase: "enter" | "leave",
+    gameUrl?: string,
+  ) => void | Promise<void>;
 };
 
 const COOKIE_NAME = "mt_ext_proxy_sid";
@@ -553,6 +559,62 @@ function createWsFrameSniffer(onBinary: (payload: Buffer) => void) {
   };
 }
 
+
+/** Assemble text/binary WS frames and expose complete application payloads. */
+function createWsMessageSniffer(
+  onMessage: (payload: Buffer, opcode: number) => void,
+) {
+  let buf = Buffer.alloc(0);
+  let fragments: Buffer[] = [];
+  let fragmentOpcode = 0;
+  return (chunk: Buffer) => {
+    buf = buf.length ? Buffer.concat([buf, chunk]) : Buffer.from(chunk);
+    while (buf.length >= 2) {
+      const b0 = buf[0]!;
+      const b1 = buf[1]!;
+      const fin = (b0 & 0x80) !== 0;
+      const opcode = b0 & 0x0f;
+      const masked = (b1 & 0x80) !== 0;
+      let len = b1 & 0x7f;
+      let offset = 2;
+      if (len === 126) {
+        if (buf.length < 4) return;
+        len = buf.readUInt16BE(2); offset = 4;
+      } else if (len === 127) {
+        if (buf.length < 10) return;
+        const big = buf.readBigUInt64BE(2);
+        if (big > BigInt(16 * 1024 * 1024)) {
+          buf = Buffer.alloc(0); fragments = []; fragmentOpcode = 0; return;
+        }
+        len = Number(big); offset = 10;
+      }
+      const maskLen = masked ? 4 : 0;
+      if (buf.length < offset + maskLen + len) return;
+      let payload = Buffer.from(buf.subarray(offset + maskLen, offset + maskLen + len));
+      if (masked) {
+        const mask = buf.subarray(offset, offset + 4);
+        for (let i = 0; i < payload.length; i++) payload[i]! ^= mask[i % 4]!;
+      }
+      buf = buf.subarray(offset + maskLen + len);
+      if (opcode === 0) {
+        fragments.push(payload);
+        if (fin) {
+          const full = Buffer.concat(fragments);
+          const op = fragmentOpcode;
+          fragments = []; fragmentOpcode = 0;
+          if ((op === 1 || op === 2) && full.length) onMessage(full, op);
+        }
+        continue;
+      }
+      if (!fin && (opcode === 1 || opcode === 2)) {
+        fragmentOpcode = opcode; fragments = [payload]; continue;
+      }
+      if (fin && (opcode === 1 || opcode === 2) && payload.length)
+        onMessage(payload, opcode);
+    }
+  };
+}
+
 /** When sa-globalxns app.aspx returns empty, hop the iframe to the real SPA. */
 function saEmptyDocumentBootstrap(session: ProxySession, from: URL) {
   let lobby: URL;
@@ -856,12 +918,26 @@ function handleWsUpgrade(
               })
             : null;
 
-        if (sniffSa) {
-          // Manual duplex so we can tap server→client binary frames for SA roads.
+        let sniffT9Logged = false;
+        const sniffT9 =
+          session.platform === "MV" && !!options.onT9UpstreamPacket
+            ? createWsMessageSniffer((packet) => {
+                try {
+                  if (!sniffT9Logged) {
+                    sniffT9Logged = true;
+                    console.log(
+                      `[ext proxy] T9 sniff first frame ${packet.length}b｜session=${session.sessionId.slice(0, 8)}`,
+                    );
+                  }
+                  options.onT9UpstreamPacket?.(session.sessionId, packet);
+                } catch {}
+              })
+            : null;
+
+        if (sniffSa || sniffT9) {
           upSocket.on("data", (chunk: Buffer) => {
-            try {
-              sniffSa(chunk);
-            } catch {}
+            try { sniffSa?.(chunk); } catch {}
+            try { sniffT9?.(chunk); } catch {}
             if (!client.destroyed) client.write(chunk);
           });
           client.on("data", (chunk: Buffer) => {
@@ -1067,13 +1143,20 @@ export function registerExternalGameProxy(options: RegisterOptions) {
     });
     if (platform === "SA") {
       try {
-        // Stop background SA WS and adopt this launch token before the iframe
-        // loads — same single-session pattern as DG (avoids ERR26 double login).
         await options.onSaProxyBridge?.(sessionId, "enter", finalUrl.toString());
         await new Promise((resolve) => setTimeout(resolve, 250));
       } catch (error: any) {
         console.warn(
           `[ext proxy] SA bridge enter failed｜${error?.message || error}`,
+        );
+      }
+    } else if (platform === "MV") {
+      try {
+        await options.onT9ProxyBridge?.(sessionId, "enter", finalUrl.toString());
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      } catch (error: any) {
+        console.warn(
+          `[ext proxy] T9 bridge enter failed｜${error?.message || error}`,
         );
       }
     }
@@ -1114,6 +1197,18 @@ export function registerExternalGameProxy(options: RegisterOptions) {
       } catch (error: any) {
         console.warn(
           `[ext proxy] SA bridge leave failed｜${error?.message || error}`,
+        );
+      }
+    } else if (existing?.platform === "MV") {
+      try {
+        await options.onT9ProxyBridge?.(
+          sessionId,
+          "leave",
+          restoreRelay ? existing.launchUrl : undefined,
+        );
+      } catch (error: any) {
+        console.warn(
+          `[ext proxy] T9 bridge leave failed｜${error?.message || error}`,
         );
       }
     }

@@ -3936,6 +3936,7 @@ export default function HomeScreen() {
   const t9ControllerRef = useRef<{ close: () => void } | null>(null);
   const t9HasConnectedRef = useRef(false);
   const [t9ConnectEpoch, setT9ConnectEpoch] = useState(0);
+  const t9BridgeActiveRef = useRef(false);
   const [saConnected, setSaConnected] = useState(false);
   const [saStatus, setSaStatus] = useState("未連線");
   const [saGameUrl, setSaGameUrl] = useState("");
@@ -6710,6 +6711,7 @@ export default function HomeScreen() {
   // table events back here over SSE.
   useEffect(() => {
     if (!accessGranted) return;
+    if (t9BridgeActiveRef.current) return;
     if (!t9GameUrl) {
       if (!t9HasConnectedRef.current) setT9Connected(false);
       return;
@@ -7133,9 +7135,10 @@ export default function HomeScreen() {
           setMtOpen(false);
           return;
         }
-        // Use a fresh one-time T9 customToken for the foreground iframe. The
-        // background relay keeps its own earlier T9 authorization so road/AI
-        // data continues while the real T9 page is being played.
+        // T9 single-session:
+        // official iframe performs the ONLY T9 Lobby/login. The same websocket
+        // is mirrored to homepage + floating assistant, so there is no account
+        // kick caused by a second background login.
         const url = await getExternalLoginUrlFromPlatform(
           loginPlatform,
           platformToken,
@@ -7143,12 +7146,23 @@ export default function HomeScreen() {
         );
         gameViewPlatformRef.current = "MV";
         setGameViewPlatform("MV");
-        // T9 must keep its own origin for Lobby/login, resources and vendor WS.
-        // Load the fresh TZ-issued T9 URL directly inside our game iframe.
-        // The background T9 relay remains independent and continues feeding
-        // MATRIX tables/roads/AI, so we do not need to rewrite the T9 page.
-        if (extProxyActiveRef.current) await leaveExternalSameOriginProxy();
-        const nextUrl = url;
+        if (extProxyActiveRef.current)
+          await leaveExternalSameOriginProxy({ restoreRelay: false });
+
+        let nextUrl = url;
+        if (Platform.OS === "web") {
+          const proxyUrl = await enterExternalSameOriginProxy(url, "MV");
+          if (!proxyUrl) throw new Error("T9 單工作階段代理啟動失敗");
+          nextUrl = proxyUrl;
+          t9BridgeActiveRef.current = true;
+          appendEvent(
+            "T9 單工作階段：遊戲、主頁牌路、懸浮共用同一條即時連線",
+          );
+        } else {
+          await stopT9RelayServer(accessSessionId);
+          t9BridgeActiveRef.current = true;
+        }
+
         gameViewUrlRef.current = nextUrl;
         setGameViewUrl(nextUrl);
         setHasEnteredGame(true);
@@ -7258,9 +7272,23 @@ export default function HomeScreen() {
     const leaveJobs: Promise<void>[] = [];
     if (wasDg) leaveJobs.push(leaveDgSameSessionProxy());
     if (wasSa) leaveJobs.push(leaveSaForegroundBridge());
-    else if (wasMv && extProxyActiveRef.current)
-      leaveJobs.push(leaveExternalSameOriginProxy());
-    void Promise.all(leaveJobs);
+    else if (wasMv && extProxyActiveRef.current) {
+      t9BridgeActiveRef.current = false;
+      leaveJobs.push(leaveExternalSameOriginProxy({ restoreRelay: false }));
+    }
+    void Promise.all(leaveJobs).then(() => {
+      if (!wasMv || !accessSessionId || !platformTokenRef.current) return;
+      void ensureT9Authorization(true)
+        .then((url) => {
+          t9GameUrlRef.current = url;
+          setT9GameUrl(url);
+          setT9ConnectEpoch((v) => v + 1);
+          appendEvent("T9 已離開遊戲 · 主頁即時牌路無縫恢復");
+        })
+        .catch((error: any) => {
+          appendEvent(`T9 主頁恢復待重試：${error?.message || "unknown"}`);
+        });
+    });
     if (walletTransferBusyRef.current) return;
     const platformToken = platformTokenRef.current;
     if (!platformToken) return;

@@ -234,6 +234,8 @@ class T9Relay {
   private syncTimer: ReturnType<typeof setInterval> | null = null;
   private loginData: any = null;
   private initialized = false;
+  private bridge = false;
+  private mirrorIngestLogged = false;
 
   constructor(public readonly sessionId: string) {}
 
@@ -338,14 +340,17 @@ class T9Relay {
       // and SyncBalance during initialization.
       if (!this.initialized) {
         this.initialized = true;
-        this.sendSyncTime();
-        // Captured browser traffic sends SyncTime immediately after Login;
-        // SyncBalance follows during initialization. Keep that ordering.
-        setTimeout(() => {
-          if (!this.closed && this.initialized) this.sendSyncBalance();
-        }, 250);
-        this.startHeartbeat();
-        this.emitEvent("T9 Login 完成 · 已送出 SyncTime");
+        if (!this.bridge) {
+          this.sendSyncTime();
+          setTimeout(() => {
+            if (!this.closed && this.initialized && !this.bridge)
+              this.sendSyncBalance();
+          }, 250);
+          this.startHeartbeat();
+          this.emitEvent("T9 Login 完成 · 已送出 SyncTime");
+        } else {
+          this.emitEvent("T9 單工作階段已接管 · 主頁與懸浮共用遊戲即時資料");
+        }
       }
 
       this.setStatus("connected", `T9 已連線 · ${this.tables.size} 桌`);
@@ -366,6 +371,70 @@ class T9Relay {
     if (data?.TableInfo?.TableId != null) {
       this.patchTable(data.TableInfo);
       this.emitTables();
+    }
+  }
+
+  isForegroundBridgeActive() {
+    return this.bridge;
+  }
+
+  adoptLaunchUrl(gameUrl: string) {
+    if (gameUrl) this.gameUrl = gameUrl;
+    this.touch();
+  }
+
+  /** Feed one encrypted T9 application payload mirrored from the game iframe. */
+  ingestApplicationPacket(raw: Buffer | string) {
+    this.touch();
+    let value: any = raw;
+    if (Buffer.isBuffer(value)) value = value.toString("utf8");
+    else value = String(value ?? "");
+    const decoded = decryptFrame(value);
+    try {
+      const payload = JSON.parse(decoded);
+      if (this.bridge && this.status !== "connected")
+        this.setStatus("connected", `T9 遊戲內即時資料已接通 · ${this.tables.size} 桌`);
+      if (this.bridge && !this.mirrorIngestLogged) {
+        this.mirrorIngestLogged = true;
+        this.emitEvent("T9 遊戲內 WebSocket 已鏡像 · 主頁/懸浮不再另行登入");
+      }
+      this.handleMessage(payload);
+    } catch {}
+  }
+
+  enterBridgeMode(gameUrl?: string) {
+    if (gameUrl) this.adoptLaunchUrl(gameUrl);
+    this.bridge = true;
+    this.closed = false;
+    this.mirrorIngestLogged = false;
+    this.stopHeartbeat();
+    this.initialized = false;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const ws = this.ws;
+    this.ws = null;
+    try { ws?.close(); } catch {}
+    if (this.tables.size)
+      this.setStatus("connected", `T9 單工作階段切換中 · ${this.tables.size} 桌`);
+    else
+      this.setStatus("connecting", "等待 T9 遊戲內即時資料...");
+    this.emitEvent("T9 背景登入已停止 · 前景遊戲成為唯一 T9 工作階段");
+  }
+
+  async leaveBridgeMode(opts?: { restore?: boolean }) {
+    if (!this.bridge) return;
+    this.bridge = false;
+    this.mirrorIngestLogged = false;
+    this.initialized = false;
+    this.stopHeartbeat();
+    if (opts?.restore === false) {
+      if (this.tables.size)
+        this.setStatus("connected", `T9 快取保留 · ${this.tables.size} 桌`);
+      return;
+    }
+    if (this.gameUrl) {
+      this.setStatus("connecting", "T9 主頁即時資料恢復中...");
+      await this.start(this.gameUrl);
     }
   }
 
@@ -405,6 +474,7 @@ class T9Relay {
     this.touch();
     this.gameUrl = gameUrl;
     this.closed = false;
+    if (this.bridge) return;
     if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) return;
     this.setStatus("loading", "正在取得 T9 即時授權");
     const login = await this.lobbyLogin(gameUrl);
@@ -519,6 +589,7 @@ class T9Relay {
 
   close() {
     this.closed = true;
+    this.bridge = false;
     this.stopHeartbeat();
     this.initialized = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -531,6 +602,22 @@ class T9Relay {
 }
 
 const relays = new Map<string, T9Relay>();
+
+export function ensureT9RelayShell(sessionId: string, gameUrl: string) {
+  const existing = relays.get(sessionId);
+  if (existing && existing.getStatus() !== "closed") {
+    existing.adoptLaunchUrl(gameUrl);
+    return existing;
+  }
+  if (existing) {
+    try { existing.close(); } catch {}
+    relays.delete(sessionId);
+  }
+  const relay = new T9Relay(sessionId);
+  relay.adoptLaunchUrl(gameUrl);
+  relays.set(sessionId, relay);
+  return relay;
+}
 
 export async function startT9Relay(sessionId: string, gameUrl: string) {
   let relay = relays.get(sessionId);
