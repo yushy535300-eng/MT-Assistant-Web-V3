@@ -393,16 +393,6 @@ async function startServer() {
       return res.status(502).json({ ok: false, error: e?.message || "t9_start_failed" });
     }
   });
-  app.get("/api/t9/snapshot", (req, res) => {
-    const sessionId = String(req.query.sessionId || "");
-    if (!hasActiveTrackerSession(sessionId))
-      return res.status(401).json({ ok: false, error: "session_invalid" });
-    const relay = getT9Relay(sessionId);
-    if (!relay)
-      return res.status(404).json({ ok: false, error: "relay_missing" });
-    return res.json({ ok: true, ...relay.getSnapshot(), now: Date.now() });
-  });
-
   app.get("/api/t9/stream", (req, res) => {
     const sessionId = String(req.query.sessionId || "");
     if (!hasActiveTrackerSession(sessionId)) return res.status(401).end();

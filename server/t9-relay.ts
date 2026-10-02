@@ -229,7 +229,6 @@ class T9Relay {
   private subscribers = new Set<Subscriber>();
   private closed = false;
   private lastUsed = Date.now();
-  private lastFrameAt = 0;
   private gameUrl = "";
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private syncTimer: ReturnType<typeof setInterval> | null = null;
@@ -250,33 +249,6 @@ class T9Relay {
   }
   getLastUsed() { return this.lastUsed; }
   touch() { this.lastUsed = Date.now(); }
-  getSnapshot() {
-    return {
-      status: this.status,
-      message: this.message,
-      bridge: this.bridge,
-      tables: this.buildTables(),
-      lastFrameAt: this.lastFrameAt,
-      subscribers: this.subscribers.size,
-      socketOpen:
-        !!this.ws &&
-        (this.ws.readyState === NodeWebSocket.OPEN ||
-          this.ws.readyState === NodeWebSocket.CONNECTING),
-    };
-  }
-  canSweep(now: number, maxIdleMs: number) {
-    // A persistent T9 iframe/bridge owns the single login. Never let the idle
-    // sweeper kill its relay shell while the game/session is still alive.
-    if (this.bridge) return false;
-    if (this.subscribers.size > 0) return false;
-    if (
-      this.ws &&
-      (this.ws.readyState === NodeWebSocket.OPEN ||
-        this.ws.readyState === NodeWebSocket.CONNECTING)
-    )
-      return false;
-    return now - this.lastUsed > maxIdleMs;
-  }
 
   private setStatus(status: T9Status, message: string) {
     this.status = status;
@@ -414,7 +386,6 @@ class T9Relay {
   /** Feed one encrypted T9 application payload mirrored from the game iframe. */
   ingestApplicationPacket(raw: Buffer | string) {
     this.touch();
-    this.lastFrameAt = Date.now();
     let value: any = raw;
     if (Buffer.isBuffer(value)) value = value.toString("utf8");
     else value = String(value ?? "");
@@ -561,7 +532,6 @@ class T9Relay {
     ws.on("message", (raw: any) => {
       if (this.closed || this.ws !== ws) return;
       this.touch();
-      this.lastFrameAt = Date.now();
       let payload = raw;
       if (Buffer.isBuffer(payload)) payload = payload.toString("utf8");
       else if (payload instanceof ArrayBuffer) payload = Buffer.from(payload).toString("utf8");
@@ -688,7 +658,7 @@ export function sweepIdleT9Relays(maxIdleMs = 180000) {
   let stopped = 0;
   const now = Date.now();
   for (const [id, relay] of relays) {
-    if (!relay.canSweep(now, maxIdleMs)) continue;
+    if (now - relay.getLastUsed() <= maxIdleMs) continue;
     relay.close();
     relays.delete(id);
     stopped++;
