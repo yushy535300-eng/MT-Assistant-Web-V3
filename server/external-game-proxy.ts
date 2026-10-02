@@ -329,35 +329,64 @@ function copyUpstreamHeaders(req: Request, origin: string) {
     "if-modified-since",
     "content-type",
     "user-agent",
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "sec-fetch-dest",
+    "sec-fetch-mode",
+    "sec-fetch-site",
+    "priority",
   ];
   for (const key of pass) {
     const v = req.headers[key];
     if (typeof v === "string" && v) headers.set(key, v);
   }
-  // Forward vendor cookies that were rewritten onto our origin (drop our
-  // proxy session cookie). Without this, LIVE77 registerAndLogin Set-Cookie
-  // never reaches score777 on the next /live/home request → guest login wall.
-  const rawCookie = typeof req.headers.cookie === "string" ? req.headers.cookie : "";
+
+  const rawCookie =
+    typeof req.headers.cookie === "string" ? req.headers.cookie : "";
   if (rawCookie) {
     const forwarded = rawCookie
       .split(";")
       .map((part) => part.trim())
-      .filter((part) => part && !part.toLowerCase().startsWith(`${COOKIE_NAME}=`));
+      .filter(
+        (part) =>
+          part &&
+          !part.toLowerCase().startsWith(`${COOKIE_NAME.toLowerCase()}=`),
+      );
     if (forwarded.length) headers.set("cookie", forwarded.join("; "));
   }
+
   headers.set("origin", origin);
+
   const referer =
     typeof req.headers.referer === "string" ? req.headers.referer : "";
   if (referer) {
     try {
       const local = new URL(referer);
-      headers.set("referer", origin + local.pathname + local.search);
+      let vendorPath = local.pathname;
+
+      // A proxied iframe referer looks like:
+      // /api/ext/host/g.t9gaming.fun/VideoBaccarat/index.html?... .
+      // T9 expects the original:
+      // https://g.t9gaming.fun/VideoBaccarat/index.html?... .
+      const hostPrefix = `${HOST_PREFIX}/`;
+      if (vendorPath.startsWith(hostPrefix)) {
+        const afterPrefix = vendorPath.slice(hostPrefix.length);
+        const slash = afterPrefix.indexOf("/");
+        vendorPath = slash >= 0 ? afterPrefix.slice(slash) : "/";
+      } else if (vendorPath.startsWith(`${PROXY_PREFIX}/`)) {
+        // Never expose MATRIX proxy paths to the vendor as Referer.
+        vendorPath = "/";
+      }
+
+      headers.set("referer", origin + vendorPath + local.search);
     } catch {
       headers.set("referer", origin + "/");
     }
   } else {
     headers.set("referer", origin + "/");
   }
+
   return headers;
 }
 
@@ -696,7 +725,29 @@ async function proxyHttp(
         init.duplex = "half";
       }
     }
+    if (
+      session.platform === "MV" &&
+      target.hostname.toLowerCase() === "g.t9gaming.fun" &&
+      target.pathname === "/api/Lobby/login"
+    ) {
+      console.log(
+        `[ext proxy] T9 Lobby/login → origin=${String((init.headers as Headers).get("origin") || "")}` +
+          ` referer=${String((init.headers as Headers).get("referer") || "")}` +
+          ` content-type=${String((init.headers as Headers).get("content-type") || "")}`,
+      );
+    }
+
     const upstream = await fetch(target, init as any);
+
+    if (
+      session.platform === "MV" &&
+      target.hostname.toLowerCase() === "g.t9gaming.fun" &&
+      target.pathname === "/api/Lobby/login"
+    ) {
+      console.log(
+        `[ext proxy] T9 Lobby/login ← ${upstream.status} ${upstream.statusText}`,
+      );
+    }
     const location = upstream.headers.get("location");
     if (location && upstream.status >= 300 && upstream.status < 400) {
       const next = new URL(location, target);
