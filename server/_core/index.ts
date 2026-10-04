@@ -22,6 +22,7 @@ import {
   parseMvLobbyHtml,
 } from "../mv-live-rooms";
 import { restoreTrackerSessions, saveTrackerSession } from "../sessions";
+import { readCmsSettings, saveCmsSettings } from "../cms-store";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -194,7 +195,7 @@ async function startServer() {
   };
   const adminRedirect = (res: any, msg = "") =>
     res.redirect(303, "/admin" + (msg ? "?msg=" + encodeURIComponent(msg) : ""));
-  app.get("/admin", async (req, res) => {
+  app.get(["/admin","/ADMIN"], async (req, res) => {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
     const token = getAdminToken(req);
     const logged = !!token && adminSessions.has(token);
@@ -208,7 +209,11 @@ async function startServer() {
       dbError = e?.message || "讀取失敗";
       console.error("[MT Admin] whitelist load failed:", e);
     }
-    res.type("html").send(adminPage(true, "", items, String(req.query.msg || ""), dbError));
+    let cms:any = null;
+    let cmsError = "";
+    try { cms = await readCmsSettings(); }
+    catch (e:any) { cmsError = e?.message || "官網設定讀取失敗"; }
+    res.type("html").send(adminPage(true, "", items, String(req.query.msg || ""), dbError, cms, cmsError));
   });
   app.post("/api/admin/login", (req, res) => {
     const expected = String(process.env.ADMIN_PASSWORD ?? "").trim(),
@@ -225,6 +230,19 @@ async function startServer() {
     );
     adminRedirect(res);
   });
+  app.get("/api/admin/cms", requireAdmin, async (_req, res) => {
+    try { res.json(await readCmsSettings()); }
+    catch (e:any) { res.status(500).json({ error: e?.message || "官網設定讀取失敗" }); }
+  });
+  app.put("/api/admin/cms", requireAdmin, async (req, res) => {
+    try {
+      await saveCmsSettings(req.body);
+      res.json({ ok: true });
+    } catch (e:any) {
+      res.status(400).json({ error: e?.message || "官網設定儲存失敗" });
+    }
+  });
+
   app.post("/api/admin/logout-form", (req, res) => {
     const t = getAdminToken(req);
     if (t) adminSessions.delete(t);
