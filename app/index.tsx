@@ -106,11 +106,15 @@ function StableGameIframe({
   style,
   allow,
   muted,
+  visible,
+  mobile,
 }: {
   src: string;
   style: Record<string, unknown>;
   allow: string;
   muted?: boolean;
+  visible?: boolean;
+  mobile?: boolean;
 }) {
   const frameRef = useRef<any>(null);
   const appliedSrcRef = useRef("");
@@ -138,6 +142,28 @@ function StableGameIframe({
     const timer = setTimeout(send, 250);
     return () => clearTimeout(timer);
   }, [muted, src]);
+  useEffect(() => {
+    if (!visible) return;
+    const node = frameRef.current;
+    if (!node) return;
+    const kick = () => {
+      try {
+        node.contentWindow?.postMessage(
+          { type: "MT_T9_VIEWPORT", mobile: !!mobile },
+          "*",
+        );
+        node.contentWindow?.dispatchEvent(new Event("resize"));
+        node.contentWindow?.dispatchEvent(new Event("orientationchange"));
+      } catch {}
+    };
+    kick();
+    const t1 = setTimeout(kick, 80);
+    const t2 = setTimeout(kick, 350);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [visible, mobile, src]);
   return createElement("iframe" as any, {
     ref: frameRef,
     style,
@@ -9770,8 +9796,11 @@ export default function HomeScreen() {
                     position: "absolute",
                     left: -10000,
                     top: 0,
-                    width: 1280,
-                    height: 720,
+                    // Keep T9 mounted at the real device width even while hidden.
+                    // Otherwise a phone logs in against a 1280px iframe and T9 locks
+                    // itself into the desktop layout before the user opens it.
+                    width: desktop ? 1280 : Math.max(320, width),
+                    height: desktop ? 720 : Math.max(520, height - 58),
                     zIndex: -1,
                     opacity: 0.01,
                     pointerEvents: "none",
@@ -9781,6 +9810,8 @@ export default function HomeScreen() {
             <StableGameIframe
               src={t9PersistentIframeUrl}
               muted={!(mtOpen && gameViewPlatform === "MV")}
+              visible={mtOpen && gameViewPlatform === "MV"}
+              mobile={!desktop}
               style={{
                 position: "absolute",
                 inset: 0,
