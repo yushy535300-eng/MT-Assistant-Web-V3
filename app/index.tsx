@@ -105,10 +105,12 @@ function StableGameIframe({
   src,
   style,
   allow,
+  muted,
 }: {
   src: string;
   style: Record<string, unknown>;
   allow: string;
+  muted?: boolean;
 }) {
   const frameRef = useRef<any>(null);
   const appliedSrcRef = useRef("");
@@ -120,6 +122,22 @@ function StableGameIframe({
       node.src = src;
     } catch {}
   }, [src]);
+  useEffect(() => {
+    if (typeof muted !== "boolean") return;
+    const node = frameRef.current;
+    if (!node) return;
+    const send = () => {
+      try {
+        node.contentWindow?.postMessage(
+          { type: "MT_T9_AUDIO", muted },
+          "*",
+        );
+      } catch {}
+    };
+    send();
+    const timer = setTimeout(send, 250);
+    return () => clearTimeout(timer);
+  }, [muted, src]);
   return createElement("iframe" as any, {
     ref: frameRef,
     style,
@@ -9762,6 +9780,7 @@ export default function HomeScreen() {
           >
             <StableGameIframe
               src={t9PersistentIframeUrl}
+              muted={!(mtOpen && gameViewPlatform === "MV")}
               style={{
                 position: "absolute",
                 inset: 0,

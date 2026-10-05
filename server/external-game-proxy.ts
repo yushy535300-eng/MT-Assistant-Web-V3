@@ -475,6 +475,18 @@ function injectProxyHook(html: string, session: ProxySession) {
       `try{const _rep=history.replaceState.bind(history);history.replaceState=function(s,t,u){return _rep(s,t,u==null?u:__stay(u));};}catch{}\n` +
       `document.addEventListener(\"click\",function(ev){try{const a=ev.target&&ev.target.closest?ev.target.closest(\"a[href]\"):null;if(!a)return;const href=a.getAttribute(\"href\");if(!href||href.startsWith(\"#\")||href.startsWith(\"javascript:\"))return;const next=__stay(href);if(next&&next!==href){ev.preventDefault();location.assign(next);}}catch{}},true);\n`
     : "";
+  const t9UxHook = session.platform === "MV"
+    ? `let __mtT9Muted=true;const __mtT9AudioContexts=[];\n` +
+      `const __mtT9ApplyMute=()=>{try{document.querySelectorAll("audio,video").forEach(m=>{try{m.muted=__mtT9Muted;if(__mtT9Muted)m.volume=0;else if(m.volume===0)m.volume=1;}catch{}});__mtT9AudioContexts.forEach(c=>{try{if(__mtT9Muted&&c.state!=="suspended")void c.suspend();else if(!__mtT9Muted&&c.state==="suspended")void c.resume();}catch{}});}catch{}};\n` +
+      `try{const NativeAC=window.AudioContext||window.webkitAudioContext;if(NativeAC){const Wrapped=function(){const c=new NativeAC(...arguments);__mtT9AudioContexts.push(c);if(__mtT9Muted)setTimeout(()=>{try{void c.suspend();}catch{}},0);return c;};Wrapped.prototype=NativeAC.prototype;Object.setPrototypeOf(Wrapped,NativeAC);if(window.AudioContext)window.AudioContext=Wrapped;if(window.webkitAudioContext)window.webkitAudioContext=Wrapped;}}catch{}\n` +
+      `window.addEventListener("message",ev=>{try{const d=ev.data||{};if(d.type!=="MT_T9_AUDIO")return;__mtT9Muted=!!d.muted;__mtT9ApplyMute();}catch{}});\n` +
+      `const __mtT9Text=e=>String((e&&e.textContent)||"").replace(/\s+/g," ").trim();\n` +
+      `const __mtT9Visible=e=>{try{const r=e.getBoundingClientRect();const cs=getComputedStyle(e);return r.width>0&&r.height>0&&cs.display!=="none"&&cs.visibility!=="hidden";}catch{return false;}};\n` +
+      `const __mtT9ClickText=(needle)=>{try{const nodes=[...document.querySelectorAll("button,[role=button],a,label,div,span")];const e=nodes.find(x=>__mtT9Visible(x)&&__mtT9Text(x)===needle);if(e){e.click();return true;}}catch{}return false;};\n` +
+      `let __mtT9NoticeDone=false;const __mtT9DismissNotice=()=>{if(__mtT9NoticeDone)return;try{const page=String(document.body&&document.body.innerText||"");if(!page.includes("確定詳閱注意事項")&&!page.includes("今日不再顯示"))return;__mtT9ClickText("今日不再顯示");setTimeout(()=>{if(__mtT9ClickText("確定詳閱注意事項"))__mtT9NoticeDone=true;},30);}catch{}};\n` +
+      `const __mtT9Observer=new MutationObserver(()=>{__mtT9ApplyMute();__mtT9DismissNotice();});try{__mtT9Observer.observe(document.documentElement,{childList:true,subtree:true});}catch{}\n` +
+      `document.addEventListener("DOMContentLoaded",()=>{__mtT9ApplyMute();setTimeout(__mtT9DismissNotice,50);setTimeout(__mtT9DismissNotice,500);setTimeout(__mtT9DismissNotice,1500);});\n`
+    : "";
   const hook =
     `<script>(function(){\n` +
     `const __sid=${sid},__origin=${origin},__allow=${allow},__hostPrefix=${hostPrefix},__wsPath=${wsPath},__isT9=${session.platform === "MV" ? "true" : "false"};\n` +
@@ -485,6 +497,7 @@ function injectProxyHook(html: string, session: ProxySession) {
     saMirrorHook +
     stayHook +
     wsHook +
+    t9UxHook +
     `const nativeFetch=window.fetch;if(nativeFetch){window.fetch=function(input,init){if(typeof input===\"string\"||input instanceof URL)return nativeFetch.call(this,mapHttp(String(input)),init);return nativeFetch.call(this,input,init);};}\n` +
     `const xhrOpen=window.XMLHttpRequest&&XMLHttpRequest.prototype.open;if(xhrOpen){XMLHttpRequest.prototype.open=function(method,url){const args=Array.from(arguments);args[1]=mapHttp(url);return xhrOpen.apply(this,args);};}\n` +
     `const patchUrlProp=(proto,prop)=>{try{const d=Object.getOwnPropertyDescriptor(proto,prop);if(!d||!d.set)return;Object.defineProperty(proto,prop,{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){d.set.call(this,mapHttp(v));}});}catch{}};\n` +
