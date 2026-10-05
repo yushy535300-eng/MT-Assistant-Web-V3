@@ -733,15 +733,85 @@ function detectPattern(results: Result[]) {
   return getPatternInfo(results).label;
 }
 
-// Convert the existing road score gap into a 0–100 signal-strength percentage.
-// This does not change roadDecision(); it only gives the existing decision a display confidence.
+// Confidence is deliberately independent from the banker/player recommendation.
+// Recommendation direction stays untouched; this layer only measures how clear and
+// stable the CURRENT REAL ROAD is for the already-selected side.
 function confidencePercent(scoreBanker: number, scorePlayer: number) {
   const gap = Math.abs(scoreBanker - scorePlayer);
   return Math.max(0, Math.min(100, Math.round((gap / 6) * 100)));
 }
+
+function roadBasedConfidence(
+  results: Result[],
+  recommendedSide: "莊" | "閒",
+  originalConfidence = 60,
+) {
+  const seq = roadSides(results);
+  if (seq.length < 3) return 40;
+
+  const recent = seq.slice(-10);
+  const recent6 = seq.slice(-6);
+  const last = seq[seq.length - 1] as "莊" | "閒";
+  let streak = 1;
+  for (let i = seq.length - 2; i >= 0 && seq[i] === last; i--) streak += 1;
+
+  let changes = 0;
+  for (let i = 1; i < recent6.length; i++) if (recent6[i] !== recent6[i - 1]) changes += 1;
+  const altRate = recent6.length > 1 ? changes / (recent6.length - 1) : 0.5;
+  const info = getPatternInfo(results);
+
+  // Start neutral. Only road clarity/stability can push it high or low.
+  let score = 52;
+
+  if (info.type === "連龍") score += 15;
+  else if (info.type === "單跳") score += 14;
+  else if (info.type === "雙跳") score += 13;
+  else if (info.type === "一房兩廳") score += 10;
+  else if (info.type === "一般連") score += 6;
+  else score -= 8;
+
+  // Clear continuation OR clear alternating rhythm is more trustworthy than a mixed tail.
+  if (altRate >= 0.82 || altRate <= 0.18) score += 9;
+  else if (altRate >= 0.35 && altRate <= 0.65) score -= 7;
+
+  if (streak >= 5) score += 9;
+  else if (streak >= 3) score += 5;
+
+  // Check whether the three derived roads are mutually coherent. This never changes side.
+  const prefs = [
+    derivedTailPreference(results, 1),
+    derivedTailPreference(results, 2),
+    derivedTailPreference(results, 3),
+  ].filter((x): x is "莊" | "閒" => x === "莊" || x === "閒");
+  if (prefs.length >= 2) {
+    const bankerVotes = prefs.filter((x) => x === "莊").length;
+    const playerVotes = prefs.length - bankerVotes;
+    const majority = bankerVotes === playerVotes ? null : bankerVotes > playerVotes ? "莊" : "閒";
+    if (bankerVotes === prefs.length || playerVotes === prefs.length) score += 8;
+    else if (majority) score += 3;
+    else score -= 4;
+    if (majority === recommendedSide) score += 5;
+    else if (majority) score -= 4;
+  }
+
+  // Compare with the existing road decision only as SUPPORT for confidence; never overwrite recommendation.
+  const roadSide = roadDecision(results).side;
+  score += roadSide === recommendedSide ? 6 : -5;
+
+  // Preserve a small amount of each AI's original conviction without letting it dominate road structure.
+  score += Math.round((Math.max(35, Math.min(95, originalConfidence)) - 60) * 0.22);
+
+  // Very short / mixed recent history should not accidentally become high confidence.
+  const b = recent.filter((x) => x === "莊").length;
+  const p = recent.length - b;
+  if (recent.length >= 8 && Math.abs(b - p) <= 1 && altRate > 0.2 && altRate < 0.8) score -= 5;
+
+  return Math.max(35, Math.min(95, Math.round(score)));
+}
+
 function confidenceState(percent: number) {
-  if (percent >= 80) return { label: "高可信", color: "#43E07A" };
-  if (percent >= 50) return { label: "中可信", color: "#FFD447" };
+  if (percent >= 75) return { label: "高可信", color: "#43E07A" };
+  if (percent >= 55) return { label: "中可信", color: "#FFD447" };
   return { label: "低可信", color: "#FF5B63" };
 }
 
@@ -864,12 +934,16 @@ function localProviderDecision(provider: AiProvider, results: Result[]) {
     for (let i = road.length - 1; i >= 0 && road[i] === last; i -= 1) streak += 1;
   }
   const pick = (score: number, tie: "莊" | "閒") => Math.abs(score) < 0.5 ? tie : score > 0 ? "莊" as const : "閒" as const;
+  const finalize = (side: "莊" | "閒", rawConfidence: number) => ({
+    side,
+    confidence: roadBasedConfidence(results, side, rawConfidence),
+  });
   if (provider === "road") {
-    return { side: base.side, confidence: confidencePercent(base.scoreBanker, base.scorePlayer) };
+    return finalize(base.side, confidencePercent(base.scoreBanker, base.scorePlayer));
   }
   if (provider === "chatgpt") {
     const score = weighted(12) * 0.34 + (streak >= 2 ? value(last) * Math.min(2, streak * 0.5) : 0) + (alternation(10) >= 0.78 ? -value(last) * 0.75 : 0);
-    return { side: pick(score, fallback), confidence: Math.max(45, Math.min(92, 58 + Math.round(Math.abs(score) * 4))) };
+    return finalize(pick(score, fallback), Math.max(45, Math.min(92, 58 + Math.round(Math.abs(score) * 4))));
   }
   if (provider === "gemini") {
     let score = (1 - alternation(6)) * distribution(14) * 0.2;
@@ -877,13 +951,13 @@ function localProviderDecision(provider: AiProvider, results: Result[]) {
     if (streak === 2 || streak === 3) score += value(last) * 0.9;
     if (streak >= 5) score -= value(last) * 0.55;
     const tie = last && alternation(6) >= 0.67 ? opposite(last) : fallback;
-    return { side: pick(score, tie), confidence: Math.max(44, Math.min(90, 56 + Math.round(Math.abs(score) * 5))) };
+    return finalize(pick(score, tie), Math.max(44, Math.min(90, 56 + Math.round(Math.abs(score) * 5))));
   }
   if (provider === "grok") {
     let score = weighted(5) * 0.7 + weighted(3) * 0.38;
     if (streak >= 2) score += value(last) * Math.min(1.45, streak * 0.42);
     if (last && alternation(5) >= 0.8) score -= value(last) * 0.55;
-    return { side: pick(score, weighted(4) >= 0 ? "莊" : "閒"), confidence: Math.max(46, Math.min(93, 60 + Math.round(Math.abs(score) * 3))) };
+    return finalize(pick(score, weighted(4) >= 0 ? "莊" : "閒"), Math.max(46, Math.min(93, 60 + Math.round(Math.abs(score) * 3))));
   }
   if (provider === "meta") {
     const longDist = distribution(18), shortDist = distribution(8);
@@ -891,7 +965,7 @@ function localProviderDecision(provider: AiProvider, results: Result[]) {
     if (Math.abs(longDist) <= 2) score += shortDist * 0.12;
     if (streak >= 4) score -= value(last) * 1.25;
     const tie = Math.abs(distribution(12)) >= 2 ? (distribution(12) > 0 ? "閒" : "莊") : opposite(last);
-    return { side: pick(score, tie), confidence: Math.max(43, Math.min(88, 55 + Math.round(Math.abs(score) * 4))) };
+    return finalize(pick(score, tie), Math.max(43, Math.min(88, 55 + Math.round(Math.abs(score) * 4))));
   }
   const parts = (["chatgpt", "gemini", "grok", "meta"] as AiProvider[]).map((x) => localProviderDecision(x, results));
   const banker = parts.filter((x) => x.side === "莊");
@@ -900,7 +974,8 @@ function localProviderDecision(provider: AiProvider, results: Result[]) {
   const pWeight = player.reduce((s, x) => s + x.confidence, 0);
   const side = banker.length === player.length ? (bWeight >= pWeight ? "莊" : "閒") : (banker.length > player.length ? "莊" : "閒");
   const winners = parts.filter((x) => x.side === side);
-  return { side, confidence: Math.round(winners.reduce((s, x) => s + x.confidence, 0) / Math.max(1, winners.length)) };
+  const rawConfidence = Math.round(winners.reduce((s, x) => s + x.confidence, 0) / Math.max(1, winners.length));
+  return finalize(side, rawConfidence);
 }
 
 function strategyAmount(
@@ -4268,9 +4343,10 @@ export default function HomeScreen() {
   const latest = assistGameTable?.results.at(-1);
   const recommendation = recommendSide(assistGameTable?.results ?? []);
   const assistDecision = roadDecision(assistGameTable?.results ?? []);
-  const assistConfidence = confidencePercent(
-    assistDecision.scoreBanker,
-    assistDecision.scorePlayer,
+  const assistConfidence = roadBasedConfidence(
+    assistGameTable?.results ?? [],
+    assistDecision.side,
+    confidencePercent(assistDecision.scoreBanker, assistDecision.scorePlayer),
   );
   const assistConfidenceState = confidenceState(assistConfidence);
   const aiProviderOption =
@@ -4319,7 +4395,9 @@ export default function HomeScreen() {
         const results = table.results ?? [];
         const roadReady = roadSides(results).length >= 3;
         const road = roadDecision(results);
-        const roadConfidence = roadReady ? confidencePercent(road.scoreBanker, road.scorePlayer) : 0;
+        const roadConfidence = roadReady
+          ? roadBasedConfidence(results, road.side, confidencePercent(road.scoreBanker, road.scorePlayer))
+          : 0;
         let side: "莊" | "閒" = road.side;
         let confidence = roadConfidence;
         let ready = roadReady;
@@ -6283,11 +6361,22 @@ export default function HomeScreen() {
         saHasConnectedRef.current = false;
         setSaGameUrl("");
       }
+      // T9 reconnect behaves like the other platforms from the user's view,
+      // but internally it must retire the old single session before rebuilding.
       try {
         t9ControllerRef.current?.close();
       } catch {}
       t9ControllerRef.current = null;
+      if (extProxyActiveRef.current) {
+        try {
+          await leaveExternalSameOriginProxy({ restoreRelay: false });
+        } catch {}
+      }
       await stopT9RelayServer(accessSessionId);
+      t9BridgeActiveRef.current = false;
+      t9PersistentIframeUrlRef.current = "";
+      setT9PersistentIframeUrl("");
+      setT9PersistentReady(false);
       setT9Connected(false);
       setT9Status("連線中");
       t9GameUrlRef.current = "";
@@ -6303,7 +6392,8 @@ export default function HomeScreen() {
     const needMt = force || !lockedMtUrlRef.current || !connected;
     const needDg = !dgForeground && (force || !dgGameUrl || !dgConnected);
     const needSa = !saForeground && (force || !saGameUrl || !saConnected);
-    const needT9 = force || !t9GameUrl || !t9Connected;
+    const needT9 =
+      Platform.OS !== "web" && (force || !t9GameUrl || !t9Connected);
     const [mtResult, dgResult, saResult, t9Result] = await Promise.allSettled([
       needMt
         ? getMtLoginUrlFromPlatform(loginPlatform, platformToken)
@@ -6356,7 +6446,21 @@ export default function HomeScreen() {
         `SA 自動連線失敗：${String((saResult.reason as any)?.message || saResult.reason || "unknown")}`,
       );
     }
-    if (t9Result.status === "fulfilled" && t9Result.value) {
+    if (Platform.OS === "web" && force) {
+      try {
+        const url = await ensurePersistentT9Session(true);
+        t9GameUrlRef.current = t9GameUrlRef.current || url;
+        setT9Status("連線中");
+        setT9ConnectEpoch((v) => v + 1);
+        appendEvent("T9 重新連線完成｜單一工作階段已重建");
+      } catch (error: any) {
+        setT9Connected(false);
+        setT9Status("連線中");
+        appendEvent(
+          `T9 重新連線失敗：${String(error?.message || error || "unknown")}`,
+        );
+      }
+    } else if (t9Result.status === "fulfilled" && t9Result.value) {
       t9GameUrlRef.current = t9Result.value;
       setT9GameUrl(t9Result.value);
       setT9Status("連線中");
@@ -6367,6 +6471,9 @@ export default function HomeScreen() {
       appendEvent(
         `T9 自動連線失敗：${String((t9Result.reason as any)?.message || t9Result.reason || "unknown")}`,
       );
+    }
+    if (force) {
+      appendEvent("重新連線完成｜MT／DG／SA／T9 已全部執行重連");
     }
     roadConnectBusyRef.current = false;
   };
@@ -10970,7 +11077,7 @@ const s = StyleSheet.create({
     justifyContent: "space-between",
     gap: 4,
   },
-  headerAiBtnMobile: { height: 44, minHeight: 44, width: 130, borderRadius: 8, paddingHorizontal: 9 },
+  headerAiBtnMobile: { height: 44, minHeight: 44, width: 96, borderRadius: 8, paddingHorizontal: 7 },
   headerAiBtnLeft: { flexDirection: "row", alignItems: "center", gap: 5, minWidth: 0, flexShrink: 1 },
   headerAiText: { color: "#EAF6FF", fontSize: 8.5, fontWeight: "900", flexShrink: 1 },
   headerAiTextMobile: { fontSize: 10 },

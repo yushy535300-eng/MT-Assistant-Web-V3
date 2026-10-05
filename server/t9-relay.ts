@@ -143,6 +143,80 @@ function countdownFrom(raw: any, previous?: number) {
   return Math.max(0, Math.ceil((end - Date.now()) / 1000));
 }
 
+
+const T9_TABLE_NAME_ALIASES: Record<string, string> = {
+  // Confirmed from the current T9 live lobby: this dealer/table is BG_138,
+  // while one metadata field can report WG13.
+  WG13: "BG_138",
+};
+
+function pickText(...values: any[]) {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text && text !== "—" && text.toLowerCase() !== "null")
+      return text;
+  }
+  return "";
+}
+
+function canonicalT9TableName(raw: any, previous?: T9TableData) {
+  const candidates = [
+    raw?.BaccaratTableName,
+    raw?.BaccaratTableCode,
+    raw?.GameTableName,
+    raw?.GameTableCode,
+    raw?.RoomName,
+    raw?.RoomCode,
+    raw?.TableCode,
+    raw?.DisplayTableName,
+    raw?.TableName,
+    previous?.tableBadge,
+    previous?.roomId,
+  ]
+    .map((v) => String(v ?? "").trim())
+    .filter(Boolean);
+
+  // Prefer the actual baccarat table code (BG_###) whenever the payload has it.
+  const bg = candidates.find((v) => /^BG[_-]?\d+$/i.test(v));
+  let name = bg || candidates[0] || "";
+  const alias = T9_TABLE_NAME_ALIASES[name.toUpperCase()];
+  if (alias) name = alias;
+  return name;
+}
+
+function t9DealerName(raw: any, previous?: T9TableData) {
+  return pickText(
+    raw?.DealerName,
+    raw?.Dealer?.DealerName,
+    raw?.Dealer?.Name,
+    raw?.DealerInfo?.DealerName,
+    raw?.DealerInfo?.Name,
+    raw?.DealerData?.DealerName,
+    raw?.DealerData?.Name,
+    previous?.name,
+  ) || "—";
+}
+
+function t9DealerPhoto(raw: any, previous?: T9TableData) {
+  const value = pickText(
+    raw?.DealerPhotoUrl,
+    raw?.DealerPhotoURL,
+    raw?.DealerPhoto,
+    raw?.Dealer?.DealerPhotoUrl,
+    raw?.Dealer?.PhotoUrl,
+    raw?.Dealer?.PhotoURL,
+    raw?.Dealer?.Photo,
+    raw?.DealerInfo?.DealerPhotoUrl,
+    raw?.DealerInfo?.PhotoUrl,
+    raw?.DealerInfo?.PhotoURL,
+    raw?.DealerInfo?.Photo,
+    raw?.DealerData?.DealerPhotoUrl,
+    raw?.DealerData?.PhotoUrl,
+    raw?.DealerData?.Photo,
+  );
+  return normalizePhoto(value) ?? previous?.dealerPhoto;
+}
+
 function normalizeTable(raw: any, previous?: T9TableData): T9TableData | null {
   const tableId = String(raw?.TableId ?? raw?.TableID ?? previous?.apiId ?? "").trim();
   if (!tableId) return null;
@@ -150,8 +224,9 @@ function normalizeTable(raw: any, previous?: T9TableData): T9TableData | null {
     ? parseHistory(raw.History)
     : previous?.results ?? [];
   const counts = countResults(results);
-  const tableName = String(raw?.TableName ?? previous?.tableBadge ?? `T9-${tableId}`).trim();
-  const dealerName = String(raw?.DealerName ?? previous?.name ?? "—").trim() || "—";
+  const tableName =
+    canonicalT9TableName(raw, previous) || `T9-${tableId}`;
+  const dealerName = t9DealerName(raw, previous);
   const round = Array.isArray(raw?.History)
     ? results.length + 1
     : previous?.round ?? Math.max(0, Number(raw?.RoundId) || 0);
@@ -180,7 +255,7 @@ function normalizeTable(raw: any, previous?: T9TableData): T9TableData | null {
     results,
     trend: String(raw?.GroupName ?? raw?.TableTypeName ?? previous?.trend ?? "T9 真人百家樂"),
     live: Number(raw?.GameStatus) !== 105,
-    dealerPhoto: normalizePhoto(raw?.DealerPhotoUrl) ?? previous?.dealerPhoto,
+    dealerPhoto: t9DealerPhoto(raw, previous),
     streamUrl: normalizePhoto(raw?.VideoPath ?? raw?.VideoUrl) ?? previous?.streamUrl,
     lastUpdated: Date.now(),
     lastResultKey: last ? `${round}:${results.length}:${last}` : previous?.lastResultKey,
@@ -369,7 +444,17 @@ class T9Relay {
     }
     // Some opcodes wrap the table payload one level deeper.
     if (data?.TableInfo?.TableId != null) {
-      this.patchTable(data.TableInfo);
+      this.patchTable({
+        ...data.TableInfo,
+        DealerName:
+          data.TableInfo?.DealerName ??
+          data?.DealerName ??
+          data?.DealerInfo?.DealerName,
+        DealerPhotoUrl:
+          data.TableInfo?.DealerPhotoUrl ??
+          data?.DealerPhotoUrl ??
+          data?.DealerInfo?.DealerPhotoUrl,
+      });
       this.emitTables();
     }
   }
