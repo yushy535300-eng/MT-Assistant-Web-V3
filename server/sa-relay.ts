@@ -960,7 +960,7 @@ class SaRelay {
       if (!need.length) return;
       this.requestInitForHosts(need);
       this.log(`重請求牌路 init｜need=${need.length}/${this.hostIds.length}｜open=${this.map.size}`);
-    }, 12_000);
+    }, 20_000);
     this.initRetryTimer.unref?.();
   }
 

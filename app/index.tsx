@@ -6369,6 +6369,7 @@ export default function HomeScreen() {
       saBridgeActiveRef.current ||
       (mtOpenRef.current && gameViewPlatformRef.current === "SA");
     roadConnectBusyRef.current = true;
+    try {
     if (!dgForeground) suppressDgRecoveryRef.current = false;
     if (force) {
       if (reconnectTimerRef.current) {
@@ -6519,7 +6520,9 @@ export default function HomeScreen() {
     if (force) {
       appendEvent("重新連線完成｜MT／DG／SA／T9 已全部執行重連");
     }
-    roadConnectBusyRef.current = false;
+    } finally {
+      roadConnectBusyRef.current = false;
+    }
   };
 
   // DG-only same-session web proxy. When the real DG game opens we stop only
@@ -6752,7 +6755,8 @@ export default function HomeScreen() {
         if (!cancelled) setDgTodayPnl(report);
       },
       onTables: (next: DgTableData[]) => {
-        if (!cancelled) setDgTables(next as TableData[]);
+        if (!cancelled)
+          setDgTables((prev) => mergeVendorTables(prev, next as TableData[]));
       },
       onStatus: (status, message) => {
         if (cancelled) return;
@@ -6841,19 +6845,18 @@ export default function HomeScreen() {
       onTables: (next: SaTableData[]) => {
         if (cancelled) return;
         // Enforce official D01/C01 labels even if relay snapshot still has bare hostId.
-        setSaTables(
-          next.map((t) => {
-            const hostKey = String(t.roomId || "").replace(/^SA/i, "") || String(t.apiId || "").replace(/^SA/i, "");
-            const label = hostKey ? saTableLabel(hostKey) : "";
-            if (!label || label === hostKey) return t as TableData;
-            return {
-              ...(t as TableData),
-              id: label,
-              name: label,
-              tableBadge: label,
-            };
-          }),
-        );
+        const normalized = next.map((t) => {
+          const hostKey = String(t.roomId || "").replace(/^SA/i, "") || String(t.apiId || "").replace(/^SA/i, "");
+          const label = hostKey ? saTableLabel(hostKey) : "";
+          if (!label || label === hostKey) return t as TableData;
+          return {
+            ...(t as TableData),
+            id: label,
+            name: label,
+            tableBadge: label,
+          };
+        });
+        setSaTables((prev) => mergeVendorTables(prev, normalized));
       },
       onStatus: (status, message) => {
         if (cancelled) return;
@@ -9802,7 +9805,8 @@ export default function HomeScreen() {
                     width: desktop ? 1280 : Math.max(320, width),
                     height: desktop ? 720 : Math.max(520, height - 58),
                     zIndex: -1,
-                    opacity: 0.01,
+                    opacity: 0,
+                    visibility: "hidden" as any,
                     pointerEvents: "none",
                   }
             }

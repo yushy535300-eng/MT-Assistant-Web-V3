@@ -311,6 +311,10 @@ class T9Relay {
   private initialized = false;
   private bridge = false;
   private mirrorIngestLogged = false;
+  private tableEmitTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingTableSnapshot: T9TableData[] | null = null;
+  private pendingTableSignature = "";
+  private lastTableSignature = "";
 
   constructor(public readonly sessionId: string) {}
 
@@ -334,7 +338,30 @@ class T9Relay {
 
   private emitTables() {
     const snapshot = sortTables([...this.tables.values()]);
-    for (const res of this.subscribers) sse(res, "tables", snapshot);
+    const signature = snapshot.map((t: any) => [
+      t.apiId || t.id || t.roomId || "",
+      t.round || 0,
+      t.shoe || "",
+      t.status || "",
+      t.dealerName || t.name || "",
+      t.results?.length || 0,
+      t.results?.[t.results.length - 1] || "",
+    ].join(":" )).join("|");
+    if (signature === this.lastTableSignature && !this.tableEmitTimer) return;
+    this.pendingTableSnapshot = snapshot;
+    this.pendingTableSignature = signature;
+    if (this.tableEmitTimer) return;
+    this.tableEmitTimer = setTimeout(() => {
+      this.tableEmitTimer = null;
+      const next = this.pendingTableSnapshot;
+      const nextSignature = this.pendingTableSignature;
+      this.pendingTableSnapshot = null;
+      this.pendingTableSignature = "";
+      if (!next || nextSignature === this.lastTableSignature) return;
+      this.lastTableSignature = nextSignature;
+      for (const res of this.subscribers) sse(res, "tables", next);
+    }, 90);
+    this.tableEmitTimer.unref?.();
   }
 
   private emitEvent(message: string) {
@@ -496,6 +523,9 @@ class T9Relay {
     this.initialized = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    if (this.tableEmitTimer) clearTimeout(this.tableEmitTimer);
+    this.tableEmitTimer = null;
+    this.pendingTableSnapshot = null;
     const ws = this.ws;
     this.ws = null;
     try { ws?.close(); } catch {}
