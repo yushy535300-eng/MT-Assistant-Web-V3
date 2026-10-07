@@ -8,7 +8,9 @@
   "license": "UNLICENSED",
   "scripts": {
     "start": "electron .",
-    "pack:win": "electron-builder --win nsis --x64"
+    "pack:win:x64": "electron-builder --win nsis --x64",
+    "pack:win:ia32": "electron-builder --win nsis --ia32",
+    "pack:win": "electron-builder --win nsis --x64 --ia32"
   },
   "devDependencies": {
     "electron": "33.2.1",
@@ -41,8 +43,8 @@
     ],
     "win": {
       "icon": "build/icon.ico",
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
-      "artifactName": "MT-Assistant-Setup-${version}.exe",
+      "target": [{ "target": "nsis", "arch": ["x64", "ia32"] }],
+      "artifactName": "MT-Assistant-Setup-${version}-${arch}.exe",
       "signAndEditExecutable": true
     },
     "nsis": {
