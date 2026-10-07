@@ -1,0 +1,57 @@
+name: Build Windows Installers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - ".github/workflows/build-windows-installers.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, ia32]
+    defaults:
+      run:
+        working-directory: desktop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          if ("${{ matrix.arch }}" -eq "x64") {
+            npm run pack:win:x64
+          } else {
+            npm run pack:win:ia32
+          }
+
+      - name: Verify installer
+        shell: pwsh
+        run: |
+          Get-ChildItem release -Filter "*.exe"
+          if (-not (Get-ChildItem release -Filter "*.exe")) { throw "Installer not generated" }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: MT-Assistant-Windows-${{ matrix.arch }}
+          path: desktop/release/*.exe
+          if-no-files-found: error
+          retention-days: 30
