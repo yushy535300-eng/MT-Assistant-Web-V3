@@ -1,0 +1,1 @@
+Build marker for x64 and ia32 Windows installers.
