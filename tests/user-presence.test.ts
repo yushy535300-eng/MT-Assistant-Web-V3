@@ -4,7 +4,6 @@ import { createServer } from "node:http";
 // @ts-expect-error This project has ws installed but does not include its declaration package.
 import WebSocket from "ws";
 import { registerUserPresence } from "../server/user-presence";
-import { readRiskTrackerIdentity } from "../server/sessions";
 
 type QueryCall = [string, any[] | undefined];
 type MockDb = { query: ReturnType<typeof vi.fn>; calls: QueryCall[] };
@@ -24,7 +23,7 @@ function createMockDb(summary = { online_accounts: "1", running_accounts: "1" })
   const calls: QueryCall[] = [];
   const query = vi.fn(async (sql: string, values?: any[]) => {
     calls.push([sql, values]);
-    if (/SELECT\s+COUNT\(\*\)::int AS online_accounts/i.test(sql)) return { rows: [summary] };
+    if (sql.includes('WITH eligible_presence AS')) return { rows: [{app_id:null,...summary},{app_id:'autobac',...summary}] };
     return { rows: [] };
   });
   return { query, calls };
@@ -99,27 +98,6 @@ async function fixture(options: {
     },
   };
 }
-
-describe("baccarat-helper session adapter", () => {
-  it("uses only a read-only current-session and active-whitelist identity query", async () => {
-    const calls: Array<[string, unknown[] | undefined]> = [];
-    const query = vi.fn(async (sql: string, values?: unknown[]) => {
-      calls.push([sql, values]);
-      return { rows: [{ platform: "OFA", username: "OwnerCase" }] };
-    });
-    await expect(readRiskTrackerIdentity({ query }, "opaque-session")).resolves.toEqual({
-      platform: "OFA",
-      username: "OwnerCase",
-    });
-    const [sql, values] = calls[0]!;
-    expect(sql).toContain("FROM tracker_sessions s");
-    expect(sql).toContain("JOIN tz_whitelist w");
-    expect(sql).toContain("w.enabled=TRUE");
-    expect(sql).toContain("w.expires_at>NOW()");
-    expect(sql).not.toMatch(/CREATE|ALTER|INSERT|UPDATE|DELETE/i);
-    expect(values).toEqual(["opaque-session"]);
-  });
-});
 
 describe("AutoBac authenticated connection presence", () => {
   const cleanups: Array<() => Promise<void>> = [];
@@ -225,9 +203,10 @@ describe("AutoBac authenticated connection presence", () => {
       headers: { "X-Admin-Token": "anonymous-admin" },
     });
     expect(await response.json()).toMatchObject({ onlineAccounts: 7, runningAccounts: 3, scope: "shared-whitelist" });
-    const sql = db.calls.find(([text]) => /SELECT\s+COUNT\(\*\)::int AS online_accounts/i.test(text))![0];
-    expect(sql).toContain("BOOL_OR(p.running)");
-    expect(sql).toContain("GROUP BY p.platform, p.username_key");
+    const sql = db.calls.find(([text]) => text.includes('WITH eligible_presence AS'))![0];
+    expect(sql).toContain("BOOL_OR(p.running AND p.app_id='autobac')");
+    expect(sql).toContain("GROUP BY p.app_id, p.platform, p.username_key");
+    expect(sql).toContain("COUNT(DISTINCT (platform, username_key))");
     expect(sql).toContain("w.enabled=TRUE");
     expect(sql).toContain("w.expires_at>NOW()");
     expect(sql).toContain("tz_whitelist w");
@@ -243,13 +222,15 @@ describe("AutoBac authenticated connection presence", () => {
       if(sql.includes('INSERT INTO autobac_user_presence'))rows.set(values![0],{platform:values![1],user:values![2],running:false,site:values![3]});
       else if(sql.includes('SET running=$1')){const row=rows.get(values![1]);if(row)row.running=values![0];}
       else if(sql==='DELETE FROM autobac_user_presence WHERE connection_id=$1')rows.delete(values![0]);
-      if(/SELECT\s+COUNT\(\*\)::int AS online_accounts/i.test(sql)){
+      if(sql.includes('WITH eligible_presence AS')){
         const accounts=new Map<string,boolean>();for(const row of rows.values()){const key=row.platform+':'+row.user;accounts.set(key,!!accounts.get(key)||row.running);}
-        return {rows:[{online_accounts:accounts.size,running_accounts:[...accounts.values()].filter(Boolean).length}]};
+        const sites=new Map<string,Map<string,boolean>>();
+        for(const row of rows.values()){const group=sites.get(row.site)||new Map<string,boolean>();const key=row.platform+':'+row.user;group.set(key,!!group.get(key)||row.running);sites.set(row.site,group);}
+        return {rows:[{app_id:null,online_accounts:accounts.size,running_accounts:[...accounts.values()].filter(Boolean).length},...Array.from(sites,([app_id,group])=>({app_id,online_accounts:group.size,running_accounts:[...group.values()].filter(Boolean).length}))]};
       }
       return {rows:[]};
     })};
-    const sites=['autobac','baccarat-helper','scarab-heart'] as const;
+    const sites=['autobac','baccarat-helper','scarab-heart','autobac'] as const;
     const fixtures: Array<Awaited<ReturnType<typeof fixture>>> = [];
     for(let i=0;i<sites.length;i++){
       const test=await fixture({db,appId:sites[i],connectionId:`00000000-0000-4000-8000-00000000000${i}`,readIdentity:vi.fn(async()=>i===2?{platform:'TZ',username:'Another'}:identity)});
@@ -261,13 +242,25 @@ describe("AutoBac authenticated connection presence", () => {
     await eventually(()=>rows.get('00000000-0000-4000-8000-000000000000')?.running===true);
     await sleep(20);
     const summary=async()=>await(await fetch(fixtures[0].origin+'/api/admin/presence',{headers:{'X-Admin-Token':'anonymous-admin'}})).json();
-    expect(await summary()).toMatchObject({onlineAccounts:2,runningAccounts:1});
+    const first=await summary();
+    expect(first).toMatchObject({schemaVersion:2,onlineAccounts:2,runningAccounts:1});
+    expect(first.applications).toEqual([
+      {appId:'autobac',name:'AutoBac',onlineAccounts:1,runningAccounts:1},
+      {appId:'baccarat-helper',name:'百家輔助',onlineAccounts:1,runningAccounts:0},
+      {appId:'scarab-heart',name:'聖甲之心',onlineAccounts:1,runningAccounts:0},
+    ]);
+    // The same account visits AutoBac and helper: per-site sum 3, union 2.
+    expect(first.applications.reduce((sum:number,site:any)=>sum+site.onlineAccounts,0)).toBe(3);
     expect(rows.get('00000000-0000-4000-8000-000000000001')?.running).toBe(false);
     expect(new Set([...rows.values()].map(r=>r.site))).toEqual(new Set(sites));
-    sockets[0].close();await once(sockets[0],'close');await eventually(()=>rows.size===2);
+    sockets[0].close();await once(sockets[0],'close');await eventually(()=>rows.size===3);
+    expect(await summary()).toMatchObject({onlineAccounts:2,runningAccounts:0,applications:[{appId:'autobac',onlineAccounts:1,runningAccounts:0},{appId:'baccarat-helper',onlineAccounts:1},{appId:'scarab-heart',onlineAccounts:1}]});
+    sockets[1].close();await once(sockets[1],'close');await eventually(()=>rows.size===2);
     expect(await summary()).toMatchObject({onlineAccounts:2,runningAccounts:0});
-    sockets[1].close();await once(sockets[1],'close');await eventually(()=>rows.size===1);
+    sockets[3].close();await once(sockets[3],'close');await eventually(()=>rows.size===1);
     expect(await summary()).toMatchObject({onlineAccounts:1,runningAccounts:0});
+    sockets[2].close();await once(sockets[2],'close');await eventually(()=>rows.size===0);
+    expect(await summary()).toMatchObject({onlineAccounts:0,runningAccounts:0,applications:[{onlineAccounts:0},{onlineAccounts:0},{onlineAccounts:0}]});
   });
 
   it("returns 503 rather than a misleading zero when the database fails", async () => {

@@ -176,11 +176,9 @@ export function registerUserPresence(
           `DELETE FROM autobac_user_presence
            WHERE last_seen_at <= NOW() - INTERVAL '${LEASE_TTL_SECONDS} seconds'`,
         );
-        const result = await db.query(`SELECT
-          COUNT(*)::int AS online_accounts,
-          COUNT(*) FILTER (WHERE account.running)::int AS running_accounts
-          FROM (
-            SELECT p.platform, p.username_key, BOOL_OR(p.running) AS running
+        const result = await db.query(`WITH eligible_presence AS (
+            SELECT p.app_id, p.platform, p.username_key,
+              BOOL_OR(p.running AND p.app_id='autobac') AS running
             FROM autobac_user_presence p
             WHERE p.last_seen_at > NOW() - INTERVAL '${LEASE_TTL_SECONDS} seconds'
               AND EXISTS (
@@ -190,15 +188,41 @@ export function registerUserPresence(
                   AND w.enabled=TRUE
                   AND (w.expires_at IS NULL OR w.expires_at>NOW())
               )
-            GROUP BY p.platform, p.username_key
-          ) account`);
-        const row = result.rows?.[0] || {};
+            GROUP BY p.app_id, p.platform, p.username_key
+          )
+          SELECT NULL::text AS app_id,
+            COUNT(DISTINCT (platform, username_key))::int AS online_accounts,
+            COUNT(DISTINCT (platform, username_key)) FILTER (WHERE running)::int AS running_accounts
+          FROM eligible_presence
+          UNION ALL
+          SELECT app_id, COUNT(*)::int AS online_accounts,
+            COUNT(*) FILTER (WHERE running)::int AS running_accounts
+          FROM eligible_presence GROUP BY app_id`);
+        const rows = result.rows || [];
+        const row = rows.find(value => value.app_id == null) || {};
+        const onlineAccounts = asCount(row.online_accounts);
+        const runningAccounts = asCount(row.running_accounts);
+        if (runningAccounts > onlineAccounts) throw new Error('invalid_count');
+        const applications = [
+          { appId: 'autobac', name: 'AutoBac' },
+          { appId: 'baccarat-helper', name: '百家輔助' },
+          { appId: 'scarab-heart', name: '聖甲之心' },
+        ].map(application => {
+          // No grouped row means no eligible live lease for this site, not a failed query.
+          const site = rows.find(value => value.app_id === application.appId);
+          const online = site ? asCount(site.online_accounts) : 0;
+          const running = site ? asCount(site.running_accounts) : 0;
+          if (running > online || online > onlineAccounts) throw new Error('invalid_count');
+          return { ...application, onlineAccounts: online, runningAccounts: running };
+        });
         return res.json({
           ok: true,
           scope: "shared-whitelist",
           appId,
-          onlineAccounts: asCount(row.online_accounts),
-          runningAccounts: asCount(row.running_accounts),
+          schemaVersion: 2,
+          onlineAccounts,
+          runningAccounts,
+          applications,
           updatedAt: new Date(now()).toISOString(),
           disconnectDetectionSeconds: 20,
         });

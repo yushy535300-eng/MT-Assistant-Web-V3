@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
 import { registerUserPresence } from "../user-presence";
+import { registerAdminAuditReader } from "../admin-audit-reader";
 import fs from "node:fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -193,6 +194,8 @@ async function startServer() {
     if (!token || !adminSessions.has(token)) return res.status(401).json({ error: "管理員登入已失效" });
     next();
   };
+  // This only reads existing shared audit tables and keeps this site's own admin cookie boundary.
+  registerAdminAuditReader(app, requireAdmin, { getPool });
   registerUserPresence(app, server, requireAdmin, {
     appId: "baccarat-helper",
     getPool,
