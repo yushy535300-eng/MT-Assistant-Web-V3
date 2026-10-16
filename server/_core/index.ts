@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
+import { registerUserPresence } from "../user-presence";
 import fs from "node:fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -9,7 +10,6 @@ import { appRouter, hasActiveTrackerSession, requireTrackerSession } from "../ro
 import { createContext } from "./context";
 import { randomUUID } from "node:crypto";
 import { adminPage } from "../admin-page";
-import { listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
 import { startDgRelay, getDgRelay, stopDgRelay, findDgRelayByToken, sweepIdleDgRelays } from "../dg-relay";
 import { startSaRelay, getSaRelay, stopSaRelay, sweepIdleSaRelays, ensureSaRelayShell } from "../sa-relay";
 import { startT9Relay, getT9Relay, stopT9Relay, sweepIdleT9Relays, ensureT9RelayShell } from "../t9-relay";
@@ -21,7 +21,8 @@ import {
   mvRoomsOrFallback,
   parseMvLobbyHtml,
 } from "../mv-live-rooms";
-import { restoreTrackerSessions, saveTrackerSession } from "../sessions";
+import { readRiskTrackerIdentity, restoreTrackerSessions, saveTrackerSession } from "../sessions";
+import { getPool, listWhitelist, upsertWhitelist, setWhitelistEnabled, extendWhitelist, deleteWhitelist } from "../whitelist";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -192,6 +193,13 @@ async function startServer() {
     if (!token || !adminSessions.has(token)) return res.status(401).json({ error: "管理員登入已失效" });
     next();
   };
+  registerUserPresence(app, server, requireAdmin, {
+    appId: "baccarat-helper",
+    getPool,
+    readRiskTrackerIdentity,
+    publicOrigin: process.env.PRESENCE_PUBLIC_ORIGIN || "https://mt-assistant-web-v3.onrender.com",
+  });
+
   const adminRedirect = (res: any, msg = "") =>
     res.redirect(303, "/admin" + (msg ? "?msg=" + encodeURIComponent(msg) : ""));
   app.get("/admin", async (req, res) => {

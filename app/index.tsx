@@ -27,6 +27,7 @@ import * as Linking from "expo-linking";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { ScreenContainer } from "@/components/screen-container";
 import { trpc } from "@/lib/trpc";
+import { connectUserPresence } from "@/lib/user-presence-client";
 import {
   applyLiveShowWin,
   applyLiveTables,
@@ -3848,6 +3849,13 @@ export default function HomeScreen() {
     },
   );
   const logoutAccess = trpc.trackerAccess.logout.useMutation();
+  useEffect(() => {
+    // Helper has no automatic betting: every authenticated account is present, never running.
+    if (Platform.OS !== "web" || !accessGranted || !accessSessionId) return;
+    const presence = connectUserPresence(accessSessionId, () => false);
+    return () => presence.dispose();
+  }, [accessGranted, accessSessionId]);
+
   // Local demo: http://127.0.0.1:3847/?demo=1 — skips TZ login for UI checks only.
   // Optional: &platform=MV|SA|DG|MT to land on that tab after demo enter.
   useEffect(() => {
@@ -9017,6 +9025,14 @@ export default function HomeScreen() {
             ) : null}
           </View>
         </View>
+        {accessSessionCheck.data?.valid ? (
+          <View style={s.presenceNotice}>
+            <MaterialIcons name="verified-user" size={12} color="#69D7B7" />
+            <Text style={s.presenceNoticeText}>
+              驗證連線統計已啟用；不儲存捲動、IP 或登入憑證。
+            </Text>
+          </View>
+        ) : null}
         <ScrollView style={{ flex: 1 }} contentContainerStyle={s.content}>
           <View
             style={[
@@ -10056,6 +10072,17 @@ const s = StyleSheet.create({
   headerBtnText: { color: "#fff", fontSize: 10, fontWeight: "800" },
   headerBtnTextMobile: { fontSize: 9 },
   headerBtnTextMuted: { color: "#8A9AA6" },
+  presenceNotice: {
+    minHeight: 24,
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderBottomWidth: 1,
+    borderBottomColor: "#173B48",
+    backgroundColor: "#091822",
+  },
+  presenceNoticeText: { color: "#8EAAB7", fontSize: 9, fontWeight: "600" },
   content: { padding: 10, paddingBottom: 90 },
   overview: {
     borderWidth: 1,

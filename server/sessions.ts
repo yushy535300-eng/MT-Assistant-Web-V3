@@ -48,6 +48,34 @@ export function hasActiveTrackerSession(sessionId: string) {
   return false;
 }
 
+/**
+ * Presence uses a direct read-only join: the browser session is current only while
+ * its tracker_sessions row still exists and its shared whitelist authorization remains active.
+ * Deliberately does not call ensureWhitelistTables(), seed, or mutate legacy tables.
+ */
+export async function readRiskTrackerIdentity(
+  db: { query: (text: string, values?: unknown[]) => Promise<{ rows?: any[] }> },
+  sessionId: string,
+): Promise<{ platform: string; username: string } | null> {
+  if (!sessionId) return null;
+  const result = await db.query(
+    `SELECT s.platform, s.username
+     FROM tracker_sessions s
+     JOIN tz_whitelist w
+       ON UPPER(w.platform)=UPPER(s.platform)
+      AND LOWER(w.username)=LOWER(s.username)
+     WHERE s.session_id=$1
+       AND w.enabled=TRUE
+       AND (w.expires_at IS NULL OR w.expires_at>NOW())
+     LIMIT 1`,
+    [sessionId],
+  );
+  const row = result.rows?.[0];
+  return row
+    ? { platform: String(row.platform), username: String(row.username) }
+    : null;
+}
+
 export async function restoreTrackerSessions() {
   restoreFile();
   const db = getPool();
