@@ -1,3 +1,4 @@
+import { adminOnlinePage } from "./admin-online-page";
 import type { Express, RequestHandler } from "express";
 import type { IncomingMessage, Server as HttpServer } from "node:http";
 import type { Socket } from "node:net";
@@ -137,6 +138,55 @@ function asCount(value: unknown): number {
   return count;
 }
 
+/** One statement keeps account counts and the display list on the same PG snapshot. */
+export const PRESENCE_SUMMARY_SQL = `WITH eligible_presence AS (
+  SELECT p.app_id, p.platform, p.username_key,
+    MIN(w.username)::text AS username,
+    BOOL_OR(p.running AND p.app_id='autobac') AS running
+  FROM autobac_user_presence p
+  JOIN tz_whitelist w
+    ON UPPER(w.platform)=UPPER(p.platform)
+    AND LOWER(w.username)=p.username_key
+    AND w.enabled=TRUE
+    AND (w.expires_at IS NULL OR w.expires_at>NOW())
+  WHERE p.last_seen_at > NOW() - INTERVAL '${LEASE_TTL_SECONDS} seconds'
+  GROUP BY p.app_id, p.platform, p.username_key
+), account_summary AS (
+  SELECT COUNT(DISTINCT (platform, username_key))::int AS online_accounts,
+    COUNT(DISTINCT (platform, username_key)) FILTER (WHERE running)::int AS running_accounts
+  FROM eligible_presence
+), application_summary AS (
+  SELECT app_id, COUNT(*)::int AS online_accounts,
+    COUNT(*) FILTER (WHERE running)::int AS running_accounts
+  FROM eligible_presence
+  GROUP BY app_id
+)
+SELECT 'summary'::text AS row_kind, NULL::text AS app_id,
+  online_accounts, running_accounts, TRUE AS online_users_available,
+  NULL::text AS platform, NULL::text AS username
+FROM account_summary
+UNION ALL
+SELECT 'application'::text AS row_kind, app_id,
+  online_accounts, running_accounts, TRUE AS online_users_available,
+  NULL::text AS platform, NULL::text AS username
+FROM application_summary
+UNION ALL
+SELECT 'online_user'::text AS row_kind, app_id,
+  NULL::int AS online_accounts, NULL::int AS running_accounts,
+  TRUE AS online_users_available, platform, username
+FROM eligible_presence
+ORDER BY row_kind, app_id NULLS FIRST, platform, username`;
+
+function asOnlineUser(value: any): { appId: string; platform: string; username: string } {
+  const appId = String(value?.app_id || "");
+  const platform = String(value?.platform || "");
+  const username = String(value?.username || "");
+  if (!['autobac', 'baccarat-helper', 'scarab-heart'].includes(appId) || !platform || !username) {
+    throw new Error("invalid_online_user");
+  }
+  return { appId, platform, username };
+}
+
 /**
  * Registers AutoBac-only authenticated browser-connection presence.
  * The returned disposer is primarily for isolated tests; normal process lifetime
@@ -159,6 +209,15 @@ export function registerUserPresence(
   const sockets = new Set<() => void>();
   const wss = new WebSocketServer({ noServer: true, clientTracking: false, maxPayload: 4096 });
 
+  app.get('/admin/online', (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    return requireAdmin(req, res, next);
+  }, (req, res) => {
+    const appId = req.query.app;
+    if (typeof appId !== 'string' || !['autobac','baccarat-helper','scarab-heart'].includes(appId)) return res.status(400).send('請從對應程式的查看按鈕進入');
+    return res.type('html').send(adminOnlinePage(appId));
+  });
+
   app.get(
     "/api/admin/presence",
     (req, res, next) => {
@@ -176,40 +235,25 @@ export function registerUserPresence(
           `DELETE FROM autobac_user_presence
            WHERE last_seen_at <= NOW() - INTERVAL '${LEASE_TTL_SECONDS} seconds'`,
         );
-        const result = await db.query(`WITH eligible_presence AS (
-            SELECT p.app_id, p.platform, p.username_key,
-              BOOL_OR(p.running AND p.app_id='autobac') AS running
-            FROM autobac_user_presence p
-            WHERE p.last_seen_at > NOW() - INTERVAL '${LEASE_TTL_SECONDS} seconds'
-              AND EXISTS (
-                SELECT 1 FROM tz_whitelist w
-                WHERE UPPER(w.platform)=UPPER(p.platform)
-                  AND LOWER(w.username)=p.username_key
-                  AND w.enabled=TRUE
-                  AND (w.expires_at IS NULL OR w.expires_at>NOW())
-              )
-            GROUP BY p.app_id, p.platform, p.username_key
-          )
-          SELECT NULL::text AS app_id,
-            COUNT(DISTINCT (platform, username_key))::int AS online_accounts,
-            COUNT(DISTINCT (platform, username_key)) FILTER (WHERE running)::int AS running_accounts
-          FROM eligible_presence
-          UNION ALL
-          SELECT app_id, COUNT(*)::int AS online_accounts,
-            COUNT(*) FILTER (WHERE running)::int AS running_accounts
-          FROM eligible_presence GROUP BY app_id`);
+        const result = await db.query(PRESENCE_SUMMARY_SQL);
         const rows = result.rows || [];
-        const row = rows.find(value => value.app_id == null) || {};
+        const row = rows.find(value => value.row_kind === "summary") || rows.find(value => value.app_id == null) || {};
         const onlineAccounts = asCount(row.online_accounts);
         const runningAccounts = asCount(row.running_accounts);
         if (runningAccounts > onlineAccounts) throw new Error('invalid_count');
+        // An absent marker means an older/mock summary query: never invent an empty list.
+        const onlineUsersAvailable = row.online_users_available === true || row.online_users_available === "true";
+        const onlineUsers = onlineUsersAvailable
+          ? rows.filter(value => value.row_kind === "online_user").map(asOnlineUser)
+          : null;
         const applications = [
           { appId: 'autobac', name: 'AutoBac' },
           { appId: 'baccarat-helper', name: '百家輔助' },
           { appId: 'scarab-heart', name: '聖甲之心' },
         ].map(application => {
           // No grouped row means no eligible live lease for this site, not a failed query.
-          const site = rows.find(value => value.app_id === application.appId);
+          const site = rows.find(value => value.row_kind === "application" && value.app_id === application.appId)
+            || rows.find(value => value.row_kind == null && value.app_id === application.appId);
           const online = site ? asCount(site.online_accounts) : 0;
           const running = site ? asCount(site.running_accounts) : 0;
           if (running > online || online > onlineAccounts) throw new Error('invalid_count');
@@ -220,9 +264,11 @@ export function registerUserPresence(
           scope: "shared-whitelist",
           appId,
           schemaVersion: 2,
+          accountsSchemaVersion: 1,
           onlineAccounts,
           runningAccounts,
           applications,
+          onlineUsers,
           updatedAt: new Date(now()).toISOString(),
           disconnectDetectionSeconds: 20,
         });

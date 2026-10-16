@@ -1,7 +1,13 @@
 {
-  "version": "3.2.14",
+  "version": "3.2.20",
   "appId": "baccarat-helper",
   "perApplicationOnline": true,
   "unifiedUsageSettingsView": true,
-  "usageSource": "AutoBac client reported; not official financial statement"
+  "usageSource": "AutoBac client reported; not official financial statement",
+  "onlineCards": 3,
+  "brandLogos": true,
+  "zhHantLabels": true,
+  "technicalPresenceNote": false,
+  "onlineAccountLists": "per-program-member-page",
+  "onlineCountLayout": "compact-horizontal-with-view"
 }

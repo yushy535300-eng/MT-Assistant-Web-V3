@@ -1,6 +1,6 @@
 {
   "name": "mt-assistant-v34-perfect-web",
-  "version": "1.0.0",
+  "version": "3.2.20",
   "private": true,
   "main": "expo-router/entry",
   "scripts": {

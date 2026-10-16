@@ -140,6 +140,7 @@ describe("AutoBac authenticated connection presence", () => {
       onlineAccounts: 1,
       runningAccounts: 1,
       disconnectDetectionSeconds: 20,
+      onlineUsers: null,
     });
 
     socket.close();
@@ -226,7 +227,9 @@ describe("AutoBac authenticated connection presence", () => {
         const accounts=new Map<string,boolean>();for(const row of rows.values()){const key=row.platform+':'+row.user;accounts.set(key,!!accounts.get(key)||row.running);}
         const sites=new Map<string,Map<string,boolean>>();
         for(const row of rows.values()){const group=sites.get(row.site)||new Map<string,boolean>();const key=row.platform+':'+row.user;group.set(key,!!group.get(key)||row.running);sites.set(row.site,group);}
-        return {rows:[{app_id:null,online_accounts:accounts.size,running_accounts:[...accounts.values()].filter(Boolean).length},...Array.from(sites,([app_id,group])=>({app_id,online_accounts:group.size,running_accounts:[...group.values()].filter(Boolean).length}))]};
+        const appRows=[...sites].sort(([left],[right])=>left.localeCompare(right)).map(([app_id,group])=>({row_kind:'application',app_id,online_accounts:group.size,running_accounts:[...group.values()].filter(Boolean).length,online_users_available:true}));
+        const userRows=[...sites].flatMap(([app_id,group])=>[...group.keys()].map(key=>{const [platform,usernameKey]=key.split(':');return {row_kind:'online_user',app_id,platform,username:usernameKey==='ownercase'?'OwnerCase':'Another',online_users_available:true};})).sort((left,right)=>`${left.app_id}:${left.platform}:${left.username}`.localeCompare(`${right.app_id}:${right.platform}:${right.username}`));
+        return {rows:[{row_kind:'summary',app_id:null,online_accounts:accounts.size,running_accounts:[...accounts.values()].filter(Boolean).length,online_users_available:true},...appRows,...userRows]};
       }
       return {rows:[]};
     })};
@@ -251,6 +254,14 @@ describe("AutoBac authenticated connection presence", () => {
     ]);
     // The same account visits AutoBac and helper: per-site sum 3, union 2.
     expect(first.applications.reduce((sum:number,site:any)=>sum+site.onlineAccounts,0)).toBe(3);
+    expect(first.onlineUsers).toEqual([
+      {appId:'autobac',platform:'OFA',username:'OwnerCase'},
+      {appId:'baccarat-helper',platform:'OFA',username:'OwnerCase'},
+      {appId:'scarab-heart',platform:'TZ',username:'Another'},
+    ]);
+    // Global total remains unique account/platform pairs; each per-site total agrees with the list.
+    expect(new Set(first.onlineUsers.map((user:any)=>`${user.platform}:${user.username.toLowerCase()}`)).size).toBe(first.onlineAccounts);
+    for(const application of first.applications){expect(first.onlineUsers.filter((user:any)=>user.appId===application.appId)).toHaveLength(application.onlineAccounts);}
     expect(rows.get('00000000-0000-4000-8000-000000000001')?.running).toBe(false);
     expect(new Set([...rows.values()].map(r=>r.site))).toEqual(new Set(sites));
     sockets[0].close();await once(sockets[0],'close');await eventually(()=>rows.size===3);
@@ -274,4 +285,13 @@ describe("AutoBac authenticated connection presence", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ ok: false, error: "presence_unavailable" });
   });
+});
+
+it('protects the dedicated online-account page with the existing admin gate and no-store',async()=>{
+ const test=await fixture();try{
+  const denied=await fetch(test.origin+'/admin/online');expect(denied.status).toBe(401);expect(denied.headers.get('cache-control')).toBe('no-store');
+  const allowed=await fetch(test.origin+'/admin/online?app=autobac',{headers:{'X-Admin-Token':'anonymous-admin'}});expect(allowed.status).toBe(200);expect(allowed.headers.get('cache-control')).toBe('no-store');
+  const html=await allowed.text();expect(html).toContain('href="/admin"');expect(html).toContain('online-list-autobac');expect(html).toContain('name.textContent=user.username');expect(html).not.toContain('OwnerCase');expect(html).not.toContain('id="online-list-scarab-heart"');expect(html).not.toContain('id="online-list-baccarat-helper"');
+  const invalid=await fetch(test.origin+'/admin/online?app=unknown',{headers:{'X-Admin-Token':'anonymous-admin'}});expect(invalid.status).toBe(400);
+ }finally{await test.close();}
 });
