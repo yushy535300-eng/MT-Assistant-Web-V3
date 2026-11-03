@@ -1,3 +1,5 @@
+import {registerAgentContext} from "../program-access";
+import {ensureWhitelistTables} from "../whitelist";
 import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
@@ -33,6 +35,8 @@ async function startServer() {
   const app = express();
   const server = createServer(app);
   app.use(express.json({ limit: "5mb" }));
+  registerAgentContext(app,{getPool,ensureWhitelist:ensureWhitelistTables,appId:"baccarat-helper"});
+  app.get("/agent-context.js",(_req,res)=>res.sendFile(path.resolve(process.cwd(),"public/agent-context.js")));
   app.use(express.urlencoded({ limit: "5mb", extended: true }));
 
   // Foreground same-session proxies. These are intentionally registered

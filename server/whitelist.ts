@@ -1,3 +1,4 @@
+import {checkProgram} from './program-access';
 import pg from "pg";
 
 const { Pool } = pg;
@@ -87,7 +88,7 @@ export async function ensureWhitelistTables() {
 }
 
 export async function authorizeWhitelist(usernameRaw: string, platformRaw = "TZ") {
-  if (!whitelistEnabled()) return { allowed: true, reason: "whitelist_disabled" } as const;
+
   const db = getPool();
   if (!db) return { allowed: false, reason: "database_unavailable" } as const;
   await ensureWhitelistTables();
@@ -98,11 +99,12 @@ export async function authorizeWhitelist(usernameRaw: string, platformRaw = "TZ"
   if (!row) return { allowed: false, reason: "not_whitelisted" } as const;
   if (!row.enabled) return { allowed: false, reason: "disabled" } as const;
   if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) return { allowed: false, reason: "expired" } as const;
+  if(!await checkProgram(db,username,platform,"baccarat-helper"))return {allowed:false,reason:"program_disabled"} as const;
   return { allowed: true, reason: "ok" } as const;
 }
 
 export async function getWhitelistPlatform(usernameRaw:string) {
-  if (!whitelistEnabled()) return { found:true, platform:"TZ", reason:"whitelist_disabled" } as const;
+
   const db=getPool(); if(!db) return { found:false, platform:"", reason:"database_unavailable" } as const;
   await ensureWhitelistTables();
   const username=usernameRaw.trim();
@@ -111,6 +113,7 @@ export async function getWhitelistPlatform(usernameRaw:string) {
   if(!row) return { found:false, platform:"", reason:"not_whitelisted" } as const;
   if(!row.enabled) return { found:false, platform:String(row.platform||"TZ").toUpperCase(), reason:"disabled" } as const;
   if(row.expires_at && new Date(row.expires_at).getTime()<=Date.now()) return { found:false, platform:String(row.platform||"TZ").toUpperCase(), reason:"expired" } as const;
+  if(!await checkProgram(db,username,row.platform,"baccarat-helper"))return {found:false,platform:String(row.platform||"TZ").toUpperCase(),reason:"program_disabled"} as const;
   return { found:true, platform:String(row.platform||"TZ").toUpperCase(), reason:"ok" } as const;
 }
 
