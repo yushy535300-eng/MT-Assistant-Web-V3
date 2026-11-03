@@ -1,3 +1,4 @@
+import {checkProgram} from './program-access';
 import { writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { ensureWhitelistTables, getPool } from "./whitelist";
@@ -71,6 +72,7 @@ export async function readRiskTrackerIdentity(
     [sessionId],
   );
   const row = result.rows?.[0];
+  if(row&&!await checkProgram(db,row.username,row.platform,"baccarat-helper"))return null;
   return row
     ? { platform: String(row.platform), username: String(row.username) }
     : null;
@@ -129,7 +131,7 @@ export async function saveTrackerSession(session: TrackerSession) {
 
 export async function loadTrackerSession(sessionId: string): Promise<TrackerSession | null> {
   if (!sessionId) return null;
-  for (const value of memory.values()) if (value.sessionId === sessionId) return value;
+  for (const value of memory.values()) if (value.sessionId === sessionId) {const db=getPool();return db&&await checkProgram(db,value.username,value.platform,"baccarat-helper")?value:null;}
   const db = getPool();
   if (!db) return null;
   await ensureWhitelistTables();
@@ -140,6 +142,7 @@ export async function loadTrackerSession(sessionId: string): Promise<TrackerSess
   const row = result.rows[0];
   if (!row) return null;
   const session = { sessionId: String(row.session_id), platform: String(row.platform), username: String(row.username) };
+  if(!await checkProgram(db,session.username,session.platform,"baccarat-helper"))return null;
   remember(session);
   return session;
 }
