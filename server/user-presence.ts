@@ -47,6 +47,13 @@ export function ensureUserPresence(db: Database): Promise<void> {
       last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
     await db.query(`ALTER TABLE autobac_user_presence ADD COLUMN IF NOT EXISTS app_id VARCHAR(32) NOT NULL DEFAULT 'autobac'`);
+    await db.query(`CREATE TABLE IF NOT EXISTS scarab_member_usage_sessions (
+      connection_id UUID PRIMARY KEY, platform VARCHAR(16) NOT NULL,
+      username_key VARCHAR(128) NOT NULL, app_id VARCHAR(32) NOT NULL,
+      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ended_at TIMESTAMPTZ NULL
+    ); CREATE INDEX IF NOT EXISTS scarab_member_usage_sessions_member
+      ON scarab_member_usage_sessions(platform,username_key,app_id,started_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS autobac_user_presence_lease
       ON autobac_user_presence (last_seen_at)`);
     await db.query(`CREATE INDEX IF NOT EXISTS autobac_user_presence_account_lease
@@ -311,7 +318,8 @@ export function registerUserPresence(
           const db = dbForConnection;
           if (!db || !connectionId) return;
           try {
-            await db.query("DELETE FROM autobac_user_presence WHERE connection_id=$1", [connectionId]);
+            await db.query(`UPDATE scarab_member_usage_sessions SET ended_at=last_seen_at WHERE connection_id=$1 AND ended_at IS NULL`, [connectionId]);
+          await db.query("DELETE FROM autobac_user_presence WHERE connection_id=$1", [connectionId]);
           } catch {
             // A failed delete is still hidden by the 25-second lease query.
           }
@@ -374,6 +382,7 @@ export function registerUserPresence(
            WHERE connection_id=$1 AND platform=$2 AND username_key=$3`,
           [connectionId, identity!.platform, identity!.usernameKey],
         );
+        await dbForConnection.query(`UPDATE scarab_member_usage_sessions SET last_seen_at=NOW() WHERE connection_id=$1 AND ended_at IS NULL`, [connectionId]);
         if (now() - lastUsageWriteAt >= 60000) {
           lastUsageWriteAt = now();
           await dbForConnection!.query(
@@ -429,6 +438,8 @@ export function registerUserPresence(
              WHERE UPPER(platform)=UPPER($1) AND LOWER(username)=LOWER($2)`,
             [checked.platform, checked.usernameKey],
           );
+          await db.query(`INSERT INTO scarab_member_usage_sessions(connection_id,platform,username_key,app_id)
+            VALUES($1,$2,$3,$4) ON CONFLICT(connection_id) DO NOTHING`, [connectionId,checked.platform,checked.usernameKey,appId]);
           lastUsageWriteAt = now();
           if (closed) return;
           authenticated = true;
