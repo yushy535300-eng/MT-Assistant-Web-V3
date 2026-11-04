@@ -288,6 +288,7 @@ export function registerUserPresence(
     let identity: { platform: string; usernameKey: string } | null = null;
     let dbForConnection: Database | null = null;
     let lastPongAt = now();
+    let lastUsageWriteAt = 0;
     let serial: Promise<void> = Promise.resolve();
     let authTimer: ReturnType<typeof setTimeout> | undefined;
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
@@ -373,6 +374,14 @@ export function registerUserPresence(
            WHERE connection_id=$1 AND platform=$2 AND username_key=$3`,
           [connectionId, identity!.platform, identity!.usernameKey],
         );
+        if (now() - lastUsageWriteAt >= 60000) {
+          lastUsageWriteAt = now();
+          await dbForConnection!.query(
+            `UPDATE tz_whitelist SET last_used_at=GREATEST(COALESCE(last_used_at,'-infinity'::timestamptz),NOW())
+             WHERE UPPER(platform)=UPPER($1) AND LOWER(username)=LOWER($2)`,
+            [identity!.platform, identity!.usernameKey],
+          );
+        }
       });
     });
 
@@ -415,6 +424,12 @@ export function registerUserPresence(
              ON CONFLICT (connection_id) DO NOTHING`,
             [connectionId, checked.platform, checked.usernameKey, appId],
           );
+          await db.query(
+            `UPDATE tz_whitelist SET last_used_at=GREATEST(COALESCE(last_used_at,'-infinity'::timestamptz),NOW())
+             WHERE UPPER(platform)=UPPER($1) AND LOWER(username)=LOWER($2)`,
+            [checked.platform, checked.usernameKey],
+          );
+          lastUsageWriteAt = now();
           if (closed) return;
           authenticated = true;
           if (authTimer) clearTimeout(authTimer);
