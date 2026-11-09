@@ -18,6 +18,9 @@ function validateLinks(value){
   if(key==='threads'&&!['threads.com','www.threads.com'].includes(u.hostname))throw Error('Threads 請使用 threads.com 連結');
   out.shared[key]=u.href;
  }
+ const threadsName=String(shared.threadsName||'').trim();
+ if(threadsName.length>80||/[<>\u0000-\u001f]/.test(threadsName))throw Error('Threads 顯示名稱最多 80 字且不可含控制字元');
+ out.shared.threadsName=threadsName;
  return out;
 }
 function sharedLinks(agent){const links=agent?.program_links||{};return links.shared||links['scarab-heart']||{};}
