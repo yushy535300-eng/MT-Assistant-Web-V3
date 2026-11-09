@@ -27,7 +27,13 @@ function updateThreadsLabels(root){
   const old=node.nodeValue||'';
   let changed=old;
   if(handle)changed=changed.replace(/@uss0857\b/g,handle).split(lastThreadsHandle).join(handle);
-  if(p.closest('[class*="threads"],[class*="Threads"],[aria-label*="Threads"]'))changed=changed.split('MT工程師').join(displayName).split(lastThreadsName).join(displayName);
+  // React Native Web generates opaque class names; the original Threads title
+  // is a dedicated text node rather than an element with a "threads" class.
+  // Replace that title directly, without changing unrelated headings.
+  if(old.trim()==='MT工程師'||old.trim()===lastThreadsName){
+   const nameStart=old.indexOf(old.trim());
+   if(nameStart>=0)changed=old.slice(0,nameStart)+displayName+old.slice(nameStart+old.trim().length);
+  }
   if(changed!==old)node.nodeValue=changed;
   if(p.hasAttribute('aria-label')&&handle){
    const label=p.getAttribute('aria-label');
