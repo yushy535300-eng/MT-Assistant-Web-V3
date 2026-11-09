@@ -525,7 +525,7 @@ function isSaOpenTable(t: {
 }
 
 const lineContactUrl = "https://line.me/ti/p/k2pkYGXGL3";
-const threadsUrl = "https://www.threads.com/@uss0857?igshid=NTc4MTIwNjQ2YQ==";
+const threadsUrl = "https://www.threads.com/@hacklook_";
 const tzRegisterUrl = "https://shy9453.tz6868.cc";
 const resultColor = (r?: Result) =>
   r === "莊"
@@ -1698,7 +1698,7 @@ function ThreadsSignature({ mobile = false }: { mobile?: boolean }) {
       <FontAwesome6 name="threads" size={mobile ? 12 : 13} color="#F2F8FC" />
       {mobile ? <Text style={s.threadsWord}>Threads</Text> : null}
       <Text style={[s.threadsId, mobile ? s.threadsIdMobile : null]}>
-        @uss0857
+        @hacklook_
       </Text>
     </View>
   );
@@ -2576,7 +2576,7 @@ function getTzLoginDeviceId() {
 
 type AgentThreadsProfile = { name: string; handle: string };
 function useAgentThreadsProfile(): AgentThreadsProfile {
-  const [profile, setProfile] = useState<AgentThreadsProfile>({ name: "MT工程師", handle: "@uss0857" });
+  const [profile, setProfile] = useState<AgentThreadsProfile>({ name: "MT工程師", handle: "@hacklook_" });
   useEffect(() => {
     if (Platform.OS !== "web" || typeof window === "undefined") return;
     const query = new URLSearchParams(window.location.search);
@@ -2591,7 +2591,7 @@ function useAgentThreadsProfile(): AgentThreadsProfile {
         const result = await response.json();
         if (!active || !result?.active) return;
         const name = String(result.links?.threadsName || "").trim() || "MT工程師";
-        let handle = "@uss0857";
+        let handle = "@hacklook_";
         if (result.links?.threads) {
           const part = decodeURIComponent(new URL(result.links.threads).pathname.split("/").filter(Boolean)[0] || "");
           if (/^@[A-Za-z0-9_.]+$/.test(part)) handle = part;
