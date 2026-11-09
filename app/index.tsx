@@ -2573,6 +2573,39 @@ function getTzLoginDeviceId() {
   return id;
 }
 
+
+type AgentThreadsProfile = { name: string; handle: string };
+function useAgentThreadsProfile(): AgentThreadsProfile {
+  const [profile, setProfile] = useState<AgentThreadsProfile>({ name: "MT工程師", handle: "@uss0857" });
+  useEffect(() => {
+    if (Platform.OS !== "web" || typeof window === "undefined") return;
+    const query = new URLSearchParams(window.location.search);
+    let agent = query.get("agent");
+    try { agent ||= window.sessionStorage.getItem("scarab.agent.entry"); } catch {}
+    if (!agent) return;
+    let active = true;
+    const refresh = async () => {
+      try {
+        const response = await fetch("/api/agent-context?agent=" + encodeURIComponent(agent!), { cache: "no-store" });
+        if (!response.ok) return;
+        const result = await response.json();
+        if (!active || !result?.active) return;
+        const name = String(result.links?.threadsName || "").trim() || "MT工程師";
+        let handle = "@uss0857";
+        if (result.links?.threads) {
+          const part = decodeURIComponent(new URL(result.links.threads).pathname.split("/").filter(Boolean)[0] || "");
+          if (/^@[A-Za-z0-9_.]+$/.test(part)) handle = part;
+        }
+        setProfile({ name, handle });
+      } catch { /* Keep the existing display when the agent API is unavailable. */ }
+    };
+    void refresh();
+    const interval = window.setInterval(refresh, 30000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, []);
+  return profile;
+}
+
 function AccessScreen({
   onAuthenticated,
   notice,
@@ -2586,6 +2619,7 @@ function AccessScreen({
 }) {
   const { width } = useWindowDimensions();
   const desktop = width >= 1000;
+  const agentThreads = useAgentThreadsProfile();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -2790,8 +2824,8 @@ function AccessScreen({
                 </View>
                 <Text style={s.threadsLabel}>THREADS</Text>
               </View>
-              <Text style={s.threadsName}>MT工程師</Text>
-              <Text style={s.threadsAccount}>@uss0857</Text>
+              <Text style={s.threadsName}>{agentThreads.name}</Text>
+              <Text style={s.threadsAccount}>{agentThreads.handle}</Text>
               <Pressable
                 style={({ pressed }: any) => [
                   s.threadsFollow,
