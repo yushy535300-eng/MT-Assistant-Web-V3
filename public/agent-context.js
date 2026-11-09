@@ -8,6 +8,8 @@ const originalOpen=window.open;let config=null;
 const notice=message=>{let el=document.getElementById('agentEntryNotice');if(!el){el=document.createElement('div');el.id='agentEntryNotice';el.setAttribute('role','alert');Object.assign(el.style,{position:'fixed',inset:'0',zIndex:'2147483647',background:'#111820',color:'#fff',display:'grid',placeItems:'center',padding:'24px',textAlign:'center'});document.body.append(el);}el.textContent=message;};
 const currentThreads=()=>config?.links?.threads||null;
 let lastThreadsHandle='@uss0857';
+let lastThreadsName='MT工程師';
+const currentThreadsName=()=>String(config?.links?.threadsName||'').trim()||'MT工程師';
 function threadsHandle(){
  const raw=currentThreads();if(!raw)return null;
  try{
@@ -16,21 +18,24 @@ function threadsHandle(){
  }catch{return null;}
 }
 function updateThreadsLabels(root){
- const handle=threadsHandle();if(!handle||!root)return;
+ const handle=threadsHandle();const displayName=currentThreadsName();if(!root)return;
  const walk=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
  const nodes=[];while(walk.nextNode())nodes.push(walk.currentNode);
  for(const node of nodes){
   const p=node.parentElement;
   if(!p||p.closest('script,style,textarea,input,[contenteditable="true"]'))continue;
   const old=node.nodeValue||'';
-  const changed=old.replace(/@uss0857\b/g,handle).split(lastThreadsHandle).join(handle);
+  let changed=old;
+  if(handle)changed=changed.replace(/@uss0857\b/g,handle).split(lastThreadsHandle).join(handle);
+  if(p.closest('[class*="threads"],[class*="Threads"],[aria-label*="Threads"]'))changed=changed.split('MT工程師').join(displayName).split(lastThreadsName).join(displayName);
   if(changed!==old)node.nodeValue=changed;
-  if(p.hasAttribute('aria-label')){
+  if(p.hasAttribute('aria-label')&&handle){
    const label=p.getAttribute('aria-label');
    if(label&&label.includes('@uss0857'))p.setAttribute('aria-label',label.replace(/@uss0857\b/g,handle));
   }
  }
- lastThreadsHandle=handle;
+ if(handle)lastThreadsHandle=handle;
+ lastThreadsName=displayName;
 }
 
 function destination(url,label=''){
