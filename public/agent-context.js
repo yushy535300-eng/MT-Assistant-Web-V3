@@ -6,7 +6,33 @@ const valid=/^[a-zA-Z][a-zA-Z0-9_-]{2,39}$/.test(slug)||/^[a-f0-9-]{36}$/i.test(
 const programOrigins=['https://scarabheart2.onrender.com','https://mt-assistant-web-v3.onrender.com','https://autotable-o6a2.onrender.com'];
 const originalOpen=window.open;let config=null;
 const notice=message=>{let el=document.getElementById('agentEntryNotice');if(!el){el=document.createElement('div');el.id='agentEntryNotice';el.setAttribute('role','alert');Object.assign(el.style,{position:'fixed',inset:'0',zIndex:'2147483647',background:'#111820',color:'#fff',display:'grid',placeItems:'center',padding:'24px',textAlign:'center'});document.body.append(el);}el.textContent=message;};
-const currentThreads=()=>config?.program==='baccarat-helper'?config.links.threadsBaccarat:config?.program==='autobac'?config.links.threadsAutobac:null;
+const currentThreads=()=>config?.links?.threads||null;
+let lastThreadsHandle='@uss0857';
+function threadsHandle(){
+ const raw=currentThreads();if(!raw)return null;
+ try{
+  const part=decodeURIComponent(new URL(raw).pathname.split('/').filter(Boolean)[0]||'');
+  return /^@[A-Za-z0-9_.]+$/.test(part)?part:null;
+ }catch{return null;}
+}
+function updateThreadsLabels(root){
+ const handle=threadsHandle();if(!handle||!root)return;
+ const walk=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
+ const nodes=[];while(walk.nextNode())nodes.push(walk.currentNode);
+ for(const node of nodes){
+  const p=node.parentElement;
+  if(!p||p.closest('script,style,textarea,input,[contenteditable="true"]'))continue;
+  const old=node.nodeValue||'';
+  const changed=old.replace(/@uss0857\b/g,handle).split(lastThreadsHandle).join(handle);
+  if(changed!==old)node.nodeValue=changed;
+  if(p.hasAttribute('aria-label')){
+   const label=p.getAttribute('aria-label');
+   if(label&&label.includes('@uss0857'))p.setAttribute('aria-label',label.replace(/@uss0857\b/g,handle));
+  }
+ }
+ lastThreadsHandle=handle;
+}
+
 function destination(url,label=''){
  if(!config)return null;
  let u;try{u=new URL(String(url),location.href);}catch{return null;}
@@ -27,6 +53,7 @@ function destination(url,label=''){
 window.open=function(url,...args){const target=destination(url);if(target==='#')return null;return originalOpen.call(window,target||url,...args);};
 function bind(root){
  if(!config||root.nodeType!==1)return;
+ updateThreadsLabels(root);
  const links=[...(root.matches('a[href]')?[root]:[]),...root.querySelectorAll('a[href]')];
  for(const a of links){
   const target=destination(a.getAttribute('href'),a.textContent);
