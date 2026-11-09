@@ -12,7 +12,7 @@ function destination(url,label=''){
  let u;try{u=new URL(String(url),location.href);}catch{return null;}
  const host=u.hostname.toLowerCase(),name=String(label||'');
  if(['line.me','lin.ee'].includes(host)||/LINE|客服|聯繫|忘記密碼/i.test(name))return config.links.support||null;
- if(['threads.com','www.threads.com'].includes(host)||/threads|脆|追蹤|follow/i.test(name))return currentThreads()||null;
+ if(['threads.com','www.threads.com'].includes(host)||/threads|脆|追蹤|follow/i.test(name))return currentThreads()||'#';
  if(u.searchParams.get('id')==='register'||host==='shy9453.tz6868.cc'||/註冊|建立帳號/i.test(name))return config.links.register||null;
  if(programOrigins.includes(u.origin)){
   const entry=Object.values(config.entries||{}).find(v=>{try{return new URL(v).origin===u.origin;}catch{return false;}});
@@ -43,7 +43,7 @@ document.addEventListener('click',ev=>{
  const href=el.getAttribute('href');
  const target=destination(href||location.href,label);
  if(target==='#'){ev.preventDefault();ev.stopImmediatePropagation();return;}
- if(target&&(/註冊|LINE|客服|聯繫|忘記密碼|threads|脆|follow|追蹤/i.test(label)||href)){
+ if(target&&/註冊|LINE|客服|聯繫|忘記密碼|threads|脆|follow|追蹤/i.test(label)){
    ev.preventDefault();ev.stopImmediatePropagation();originalOpen.call(window,target,'_blank','noopener,noreferrer');
  }
 },true);
