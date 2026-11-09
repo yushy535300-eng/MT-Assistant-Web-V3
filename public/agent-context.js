@@ -87,7 +87,7 @@ async function update(){
   document.getElementById('agentEntryNotice')?.remove();
  }catch(error){config=null;notice(error.message||'代理入口暫時無法使用');}
 }
-new MutationObserver(records=>{if(!config)return;records.forEach(record=>record.addedNodes.forEach(bind));}).observe(document.documentElement,{childList:true,subtree:true});
+new MutationObserver(records=>{if(!config)return;for(const record of records){if(record.type==='characterData'){const parent=record.target.parentElement;if(parent)updateThreadsLabels(parent);continue;}for(const node of record.addedNodes){if(node.nodeType===1)bind(node);else if(node.nodeType===3&&node.parentElement)updateThreadsLabels(node.parentElement);}}}).observe(document.documentElement,{childList:true,subtree:true,characterData:true});
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',update);else update();
 setInterval(update,30000);
 })();
