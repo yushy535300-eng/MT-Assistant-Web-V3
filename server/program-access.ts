@@ -9,12 +9,13 @@ function validateLinks(value){
  if(!value||typeof value!=='object'||Array.isArray(value))throw Error('代理連結格式不正確');
  const shared=value.shared||value['scarab-heart']||{};
  const out={shared:{}};
- for(const key of ['support','register']){
+ for(const key of ['support','register','threadsBaccarat','threadsAutobac']){
   const raw=String(shared[key]||'').trim();
   if(!raw){out.shared[key]='';continue;}
   let u;try{u=new URL(raw);}catch{throw Error('請輸入完整 HTTPS 網址');}
   if(u.protocol!=='https:'||u.username||u.password||raw.length>2000)throw Error('代理連結必須使用 HTTPS');
   if(key==='support'&&!['line.me','lin.ee'].includes(u.hostname))throw Error('客服請使用 line.me 或 lin.ee 連結');
+  if(key.startsWith('threads')&&!['threads.com','www.threads.com'].includes(u.hostname))throw Error('Threads 請使用 threads.com 連結');
   out.shared[key]=u.href;
  }
  return out;
