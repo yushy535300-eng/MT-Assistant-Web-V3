@@ -1,1 +1,66 @@
-(()=>{'use strict';const key='scarab.agent.entry',q=new URLSearchParams(location.search);let slug=q.get('agent');try{if(slug)sessionStorage.setItem(key,slug);else slug=sessionStorage.getItem(key);}catch{}if(!slug)return;const valid=/^[a-zA-Z][a-zA-Z0-9_-]{2,39}$/.test(slug)||/^[a-f0-9-]{36}$/i.test(slug);let config=null;const programOrigins=['https://scarabheart2.onrender.com','https://mt-assistant-web-v3.onrender.com','https://autotable-o6a2.onrender.com'];const block=message=>{let box=document.getElementById('agentEntryNotice');if(!box){box=document.createElement('div');box.id='agentEntryNotice';box.setAttribute('role','alert');Object.assign(box.style,{position:'fixed',inset:'0',zIndex:'2147483647',background:'#111820',color:'#fff',display:'grid',placeItems:'center',padding:'24px',textAlign:'center'});document.body.append(box);}box.textContent=message;};const originalOpen=window.open;window.open=function(url,...args){let u;try{u=new URL(String(url),location.href);}catch{return originalOpen.call(window,url,...args);}if(config&&(['line.me','lin.ee'].includes(u.hostname)||u.hostname==='shy9453.tz6868.cc')){const dest=['line.me','lin.ee'].includes(u.hostname)?config.links.support:config.links.register;if(!dest)return null;location.assign(dest);return null;}if(config&&programOrigins.includes(u.origin)&&u.origin!==location.origin){const entry=Object.values(config.entries).find(x=>new URL(x).origin===u.origin);if(!entry)return null;u.searchParams.set('agent',slug);return originalOpen.call(window,u.href,...args);}return originalOpen.call(window,url,...args);};document.addEventListener('click',ev=>{if(!config)return;const el=ev.target.closest('button,[role=button],a');if(!el)return;const label=(el.textContent||'').trim();const type=/註冊/.test(label)?'register':/客服|聯繫|忘記密碼/.test(label)?'support':null;if(!type)return;ev.preventDefault();ev.stopImmediatePropagation();if(config.links[type])location.assign(config.links[type]);},true);const bind=root=>{if(!config||root.nodeType!==1)return;const links=[...(root.matches('a[href]')?[root]:[]),...root.querySelectorAll('a[href]')];for(const a of links){let u;try{u=new URL(a.href,location.href);}catch{continue;}if(['line.me','lin.ee'].includes(u.hostname)){if(config.links.support)a.href=config.links.support;else a.hidden=true;}else if(/register|註冊/i.test(a.textContent)||u.searchParams.get('id')==='register'){if(config.links.register)a.href=config.links.register;else a.hidden=true;}else if(programOrigins.includes(u.origin)&&u.origin!==location.origin&&!Object.values(config.entries).some(x=>new URL(x).origin===u.origin))a.hidden=true;else if(u.origin===location.origin&&!u.pathname.startsWith('/admin')&&!u.pathname.startsWith('/api/')||Object.values(config.entries).some(x=>new URL(x).origin===u.origin)){u.searchParams.set('agent',slug);a.href=u.href;}}};async function update(){try{if(!config)block('正在讀取代理入口…');if(!valid)throw Error('代理入口無效');const r=await fetch('/api/agent-context?agent='+encodeURIComponent(slug),{cache:'no-store'}),v=await r.json();if(!r.ok)throw Error(v.error||'代理入口暫時無法讀取');config=v;let nav=document.getElementById('agentContactLinks');if(!nav){nav=document.createElement('nav');nav.id='agentContactLinks';nav.setAttribute('aria-label','代理客服與註冊');Object.assign(nav.style,{position:'fixed',right:'12px',bottom:'calc(12px + env(safe-area-inset-bottom))',display:'flex',gap:'8px',zIndex:'2147483000',maxWidth:'calc(100vw - 24px)'});document.body.append(nav);}nav.replaceChildren();for(const [key,label]of [['support','客服 LINE'],['register','註冊帳號']]){if(!v.links[key])continue;const a=document.createElement('a');a.textContent=label;a.href=v.links[key];a.target='_self';Object.assign(a.style,{background:key==='support'?'#168653':'#cfa850',color:key==='support'?'#fff':'#19170f',padding:'10px 14px',borderRadius:'8px',fontSize:'13px',fontWeight:'700',textDecoration:'none',boxShadow:'0 4px 16px #0004'});nav.append(a);}bind(document.body);document.getElementById('agentEntryNotice')?.remove();}catch(e){block(e.message);}}new MutationObserver(rs=>rs.forEach(r=>r.addedNodes.forEach(bind))).observe(document.documentElement,{childList:true,subtree:true});if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',update);else update();setInterval(update,30000);})();
+(()=>{'use strict';
+const key='scarab.agent.entry',query=new URLSearchParams(location.search);
+let slug=query.get('agent');try{if(slug)sessionStorage.setItem(key,slug);else slug=sessionStorage.getItem(key);}catch{}
+if(!slug)return;
+const valid=/^[a-zA-Z][a-zA-Z0-9_-]{2,39}$/.test(slug)||/^[a-f0-9-]{36}$/i.test(slug);
+const programOrigins=['https://scarabheart2.onrender.com','https://mt-assistant-web-v3.onrender.com','https://autotable-o6a2.onrender.com'];
+const originalOpen=window.open;let config=null;
+const notice=message=>{let el=document.getElementById('agentEntryNotice');if(!el){el=document.createElement('div');el.id='agentEntryNotice';el.setAttribute('role','alert');Object.assign(el.style,{position:'fixed',inset:'0',zIndex:'2147483647',background:'#111820',color:'#fff',display:'grid',placeItems:'center',padding:'24px',textAlign:'center'});document.body.append(el);}el.textContent=message;};
+const currentThreads=()=>config?.program==='baccarat-helper'?config.links.threadsBaccarat:config?.program==='autobac'?config.links.threadsAutobac:null;
+function destination(url,label=''){
+ if(!config)return null;
+ let u;try{u=new URL(String(url),location.href);}catch{return null;}
+ const host=u.hostname.toLowerCase(),name=String(label||'');
+ if(['line.me','lin.ee'].includes(host)||/LINE|客服|聯繫|忘記密碼/i.test(name))return config.links.support||null;
+ if(['threads.com','www.threads.com'].includes(host)||/threads|脆|追蹤|follow/i.test(name))return currentThreads()||null;
+ if(u.searchParams.get('id')==='register'||host==='shy9453.tz6868.cc'||/註冊|建立帳號/i.test(name))return config.links.register||null;
+ if(programOrigins.includes(u.origin)){
+  const entry=Object.values(config.entries||{}).find(v=>{try{return new URL(v).origin===u.origin;}catch{return false;}});
+  if(!entry)return '#';
+  u.searchParams.set('agent',slug);return u.href;
+ }
+ if(u.origin===location.origin&&!u.pathname.startsWith('/admin')&&!u.pathname.startsWith('/api/')){
+  u.searchParams.set('agent',slug);return u.href;
+ }
+ return null;
+}
+window.open=function(url,...args){const target=destination(url);if(target==='#')return null;return originalOpen.call(window,target||url,...args);};
+function bind(root){
+ if(!config||root.nodeType!==1)return;
+ const links=[...(root.matches('a[href]')?[root]:[]),...root.querySelectorAll('a[href]')];
+ for(const a of links){
+  const target=destination(a.getAttribute('href'),a.textContent);
+  if(target==='#'){a.hidden=true;continue;}
+  if(target&&target!==a.href)a.href=target;
+ }
+}
+document.addEventListener('click',ev=>{
+ if(!config)return;
+ const el=ev.target.closest('a,button,[role="button"]');if(!el)return;
+ const words=(el.textContent||'')+' '+(el.getAttribute('aria-label')||'');
+ const parent=el.closest('[class*="threads"],[class*="Threads"]');
+ const label=parent?words+' threads':words;
+ const href=el.getAttribute('href');
+ const target=destination(href||location.href,label);
+ if(target==='#'){ev.preventDefault();ev.stopImmediatePropagation();return;}
+ if(target&&(/註冊|LINE|客服|聯繫|忘記密碼|threads|脆|follow|追蹤/i.test(label)||href)){
+   ev.preventDefault();ev.stopImmediatePropagation();originalOpen.call(window,target,'_blank','noopener,noreferrer');
+ }
+},true);
+async function update(){
+ try{
+  if(!valid)throw Error('代理入口無效');
+  if(!config)notice('正在讀取代理入口…');
+  const response=await fetch('/api/agent-context?agent='+encodeURIComponent(slug),{cache:'no-store'});
+  const data=await response.json();
+  if(!response.ok||!data.active)throw Error(data.error||'代理入口無法讀取');
+  config=data;
+  document.getElementById('agentContactLinks')?.remove();
+  bind(document.body);
+  document.getElementById('agentEntryNotice')?.remove();
+ }catch(error){config=null;notice(error.message||'代理入口暫時無法使用');}
+}
+new MutationObserver(records=>{if(!config)return;records.forEach(record=>record.addedNodes.forEach(bind));}).observe(document.documentElement,{childList:true,subtree:true});
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',update);else update();
+setInterval(update,30000);
+})();
