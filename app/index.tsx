@@ -2560,15 +2560,17 @@ async function transferIntoGameWallet(
 }
 
 function getTzLoginDeviceId() {
+  // Match the verified TZ login wire format: 16 random bytes = 32 hex chars.
+  // Legacy 36-character UUIDs must not be reused for TZ login.
   if (typeof window === "undefined") return "web";
   const key = "mt_tz_device_id";
-  let id = window.localStorage.getItem(key);
-  if (!id) {
-    id = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-      const r = Math.floor(Math.random() * 16);
-      return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
-    });
-    window.localStorage.setItem(key, id);
+  let id = "";
+  try { id = window.localStorage.getItem(key) || ""; } catch {}
+  if (!/^[a-f0-9]{32}$/i.test(id)) {
+    const bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    id = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    try { window.localStorage.setItem(key, id); } catch {}
   }
   return id;
 }
