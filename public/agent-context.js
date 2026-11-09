@@ -6,8 +6,8 @@ const valid=/^[a-zA-Z][a-zA-Z0-9_-]{2,39}$/.test(slug)||/^[a-f0-9-]{36}$/i.test(
 const programOrigins=['https://scarabheart2.onrender.com','https://mt-assistant-web-v3.onrender.com','https://autotable-o6a2.onrender.com'];
 const originalOpen=window.open;let config=null;
 const notice=message=>{let el=document.getElementById('agentEntryNotice');if(!el){el=document.createElement('div');el.id='agentEntryNotice';el.setAttribute('role','alert');Object.assign(el.style,{position:'fixed',inset:'0',zIndex:'2147483647',background:'#111820',color:'#fff',display:'grid',placeItems:'center',padding:'24px',textAlign:'center'});document.body.append(el);}el.textContent=message;};
-const currentThreads=()=>config?.links?.threads||null;
-let lastThreadsHandle='@uss0857';
+const currentThreads=()=>config?.links?.threads||'https://www.threads.com/@hacklook_';
+let lastThreadsHandle='@hacklook_';
 let lastThreadsName='MT工程師';
 const currentThreadsName=()=>String(config?.links?.threadsName||'').trim()||'MT工程師';
 function threadsHandle(){
@@ -26,7 +26,7 @@ function updateThreadsLabels(root){
   if(!p||p.closest('script,style,textarea,input,[contenteditable="true"]'))continue;
   const old=node.nodeValue||'';
   let changed=old;
-  if(handle)changed=changed.replace(/@uss0857\b/g,handle).split(lastThreadsHandle).join(handle);
+  if(handle)changed=changed.replace(/@hacklook_\b/g,handle).split(lastThreadsHandle).join(handle);
   // React Native Web generates opaque class names; the original Threads title
   // is a dedicated text node rather than an element with a "threads" class.
   // Replace that title directly, without changing unrelated headings.
@@ -37,7 +37,7 @@ function updateThreadsLabels(root){
   if(changed!==old)node.nodeValue=changed;
   if(p.hasAttribute('aria-label')&&handle){
    const label=p.getAttribute('aria-label');
-   if(label&&label.includes('@uss0857'))p.setAttribute('aria-label',label.replace(/@uss0857\b/g,handle));
+   if(label&&label.includes('@hacklook_'))p.setAttribute('aria-label',label.replace(/@hacklook_\b/g,handle));
   }
  }
  if(handle)lastThreadsHandle=handle;
